@@ -1,0 +1,13 @@
+operators = ["boundary", "boolean"]
+timeout = "20s"
+test_run = ""
+format = "text"
+output = ""
+cache_dir = ".mutation-judge/cache"
+cache = true
+max_mutants = 0
+ci_min_score = 0
+ci_exit_code = 10
+include_generated = false
+changed = ""
+progress = true

@@ -1,0 +1,9 @@
+/bin/
+/mutation-judge
+/.mutation-judge/
+*.out
+*.html
+mutation-report*.json
+self-eval.json
+.DS_Store
+bin/

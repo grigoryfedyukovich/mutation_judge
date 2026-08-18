@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mutation Judge report</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #202124; }
+    code, pre { font-family: ui-monospace, monospace; }
+    header { border-bottom: 1px solid #ddd; margin-bottom: 1.5rem; }
+    .summary { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+    .KILLED { border-left: 6px solid #188038; }
+    .SURVIVED { border-left: 6px solid #d93025; }
+    .INVALID, .TIMEOUT, .UNKNOWN, .UNSUPPORTED { border-left: 6px solid #f9ab00; }
+    pre { background: #f6f8fa; padding: 1rem; overflow: auto; }
+    .muted { color: #5f6368; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Mutation Judge</h1>
+  <p>Version {{.ToolVersion}} · {{.GeneratedAt}} · schema {{.SchemaVersion}}</p>
+  {{if not .Complete}}<p><strong>INCOMPLETE REPORT</strong></p>{{end}}
+</header>
+<section class="summary">
+  <strong>{{.Summary.Generated}} generated</strong>
+  <span>{{.Summary.Killed}} killed</span>
+  <span>{{.Summary.Survived}} survived</span>
+  <span>{{.Summary.Invalid}} invalid</span>
+  <span>{{.Summary.Timeout}} timeout</span>
+  <span>{{.Summary.Unknown}} unknown</span>
+  <span>{{.Summary.Unsupported}} unsupported</span>
+  <span>score {{.Summary.ScoreText}}</span>
+</section>
+{{range .Results}}
+<article class="card {{.Verdict}}">
+  <h2>{{.Verdict}} <code>{{.Mutation.ID}}</code></h2>
+  <p><code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code> — {{.Mutation.Description}}</p>
+  {{if .Responsible}}<p><strong>Responsible tests:</strong> {{join .Responsible ", "}}</p>{{end}}
+  {{if eq .Verdict "SURVIVED"}}
+  <p><strong>Suggested test:</strong> {{.Mutation.Suggestion}}</p>
+  <pre>{{.Mutation.Diff}}</pre>
+  {{end}}
+  <p class="muted">{{if .CoverageKnown}}Baseline covered: {{.Covered}}{{else}}Coverage unknown{{end}} · {{.DurationMS}} ms{{if .Cached}} · cached{{end}}</p>
+</article>
+{{end}}
+<footer class="muted">
+  parse={{.Timing.ParsingMS}}ms · baseline={{.Timing.BaselineMS}}ms · mutants={{.Timing.ExecutionMS}}ms · render={{.Timing.RenderingMS}}ms · total={{.Timing.TotalMS}}ms
+</footer>
+</body>
+</html>
