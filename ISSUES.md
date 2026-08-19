@@ -4,7 +4,7 @@ Resolved findings from the 2026-07-18 audit are recorded in [`docs/reviews/revie
 
 ## Correctness and trust work
 
-- [ ] Replace heuristic compiler-output matching with structured `go test -json` event classification and explicit build diagnostics.
+- [x] Replace heuristic compiler-output matching with structured `go test -json` event classification and explicit build diagnostics. `internal/runner.GoTest` now classifies from the `-json` event stream: a package-level `[build failed]` marker (the tool's own FAIL-summary line, emitted identically for compile *and* vet failures) means INVALID; a package that fails before any test starts for a non-build reason (init() panic, `TestMain` calling `os.Exit`, ...) means KILLED with no test attributed; a test still "started" when the stream ends (an unrecovered panic in a goroutine the testing package doesn't supervise, which aborts the binary without a clean per-test fail event) is attributed as responsible. The previous English-substring regex is kept only as a last-resort fallback for the rare case where `go test` rejects the invocation before `test2json` ever writes JSON (e.g. build constraints exclude all Go files). This also fixed a latent attribution bug: the old `--- FAIL: ` line regex was anchored to line-start and silently missed every subtest name, since Go indents nested subtest result lines (`    --- FAIL: TestX/sub`) — a common table-driven-test pattern. "killed by" now correctly includes subtests.
 - [ ] Add process-signal tests proving temporary-workspace cleanup under abrupt CLI termination.
 - [ ] Add a fixed external corpus evaluation with manually reviewed survivors.
 - [ ] Test cgo, build tags, package initialization failures, custom `TestMain`, and unusual toolchain failures.

@@ -55,6 +55,57 @@ func TestGoTestClassifiesDeadlineAsTimeout(t *testing.T) {
 	}
 }
 
+// A vet failure (not just a compile error) must also classify as
+// INVALID: go test always reports it via the same "[build failed]"
+// summary line, so it needs no separate pattern.
+func TestGoTestClassifiesVetFailureAsInvalid(t *testing.T) {
+	root := testModule(t, "package p\nimport \"fmt\"\nfunc F() { fmt.Printf(\"%d\\n\", \"nope\") }\n",
+		"package p\nimport \"testing\"\nfunc TestF(t *testing.T) { F() }\n")
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 2 * time.Second})
+	if got.Verdict != model.VerdictInvalid {
+		t.Fatalf("verdict=%s output=%s", got.Verdict, got.Output)
+	}
+}
+
+// A package that fails before any test can run for a runtime reason --
+// here, a panic in init() -- compiled successfully, so the mutant
+// produced a genuine failure. It must not be misclassified as INVALID
+// just because, like a real build failure, no test ever started.
+func TestGoTestClassifiesInitPanicAsKilledNotInvalid(t *testing.T) {
+	root := testModule(t, "package p\nfunc init() { panic(\"init boom\") }\nfunc F() {}\n",
+		"package p\nimport \"testing\"\nfunc TestF(t *testing.T) {}\n")
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 2 * time.Second})
+	if got.Verdict != model.VerdictKilled {
+		t.Fatalf("verdict=%s output=%s", got.Verdict, got.Output)
+	}
+}
+
+// A panic in a goroutine the testing package does not directly supervise
+// crashes the whole test binary without a clean per-test "fail" event.
+// The in-flight test must still be attributed as responsible.
+func TestGoTestAttributesAsyncGoroutinePanicToInFlightTest(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() {}\n",
+		"package p\nimport \"testing\"\nfunc TestAsync(t *testing.T) { go func() { panic(\"async boom\") }(); select {} }\n")
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 2 * time.Second})
+	if got.Verdict != model.VerdictKilled {
+		t.Fatalf("verdict=%s output=%s", got.Verdict, got.Output)
+	}
+	if len(got.Tests) != 1 || got.Tests[0] != "TestAsync" {
+		t.Fatalf("tests=%v, want [TestAsync]", got.Tests)
+	}
+}
+
+// A package that go test rejects before test2json ever writes JSON (no
+// buildable files match the build constraints) must fall back cleanly
+// to INVALID rather than being lost or misclassified as UNKNOWN.
+func TestGoTestClassifiesExcludedBuildConstraintsAsInvalid(t *testing.T) {
+	root := testModule(t, "//go:build never\npackage p\n", "")
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 2 * time.Second})
+	if got.Verdict != model.VerdictInvalid {
+		t.Fatalf("verdict=%s output=%s", got.Verdict, got.Output)
+	}
+}
+
 func TestGoTestStartFailureIsUnknown(t *testing.T) {
 	t.Setenv("PATH", "")
 	got := (GoTest{}).Run(context.Background(), Request{Root: t.TempDir(), WorkRel: ".", Patterns: []string{"."}, Timeout: time.Second})

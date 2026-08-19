@@ -36,3 +36,24 @@ func TestAmbiguousSuffixIsUnknown(t *testing.T) {
 		t.Fatal("ambiguous suffix should not resolve")
 	}
 }
+
+// Two distinct files can coincidentally cover the exact same set of line
+// numbers (e.g. two small functions with identical statement/block shape,
+// as happens for real between examples/boundary/counter.go and
+// examples/boundary_fixed/counter.go). Ambiguity must be decided by file
+// identity, not by whether the covered-line sets happen to be equal;
+// otherwise the index can silently resolve a query to the wrong file.
+func TestAmbiguousSuffixIsUnknownEvenWithIdenticalLineSets(t *testing.T) {
+	m := Map{
+		Lines: map[string]map[int]bool{
+			"pkgA/shared/p.go": {1: true, 2: true},
+			"pkgB/shared/p.go": {1: true, 2: true},
+		},
+		BySuffix:  map[string]map[int]bool{},
+		ambiguous: map[string]bool{},
+	}
+	m.buildSuffixIndex()
+	if _, known := m.Covered("shared/p.go", 1, 1); known {
+		t.Fatal("suffix shared by two distinct files must stay ambiguous even when their covered lines coincide")
+	}
+}

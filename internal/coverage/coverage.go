@@ -9,9 +9,10 @@ import (
 )
 
 type Map struct {
-	Lines     map[string]map[int]bool
-	BySuffix  map[string]map[int]bool
-	ambiguous map[string]bool
+	Lines       map[string]map[int]bool
+	BySuffix    map[string]map[int]bool
+	ambiguous   map[string]bool
+	suffixOwner map[string]string
 }
 
 func Parse(path, moduleRoot string) (Map, error) {
@@ -20,7 +21,7 @@ func Parse(path, moduleRoot string) (Map, error) {
 		return Map{}, err
 	}
 	defer f.Close()
-	m := Map{Lines: map[string]map[int]bool{}, BySuffix: map[string]map[int]bool{}, ambiguous: map[string]bool{}}
+	m := Map{Lines: map[string]map[int]bool{}, BySuffix: map[string]map[int]bool{}, ambiguous: map[string]bool{}, suffixOwner: map[string]string{}}
 	s := bufio.NewScanner(f)
 	first := true
 	for s.Scan() {
@@ -71,7 +72,21 @@ func Parse(path, moduleRoot string) (Map, error) {
 	return m, nil
 }
 
+// buildSuffixIndex indexes every path-suffix of each coverage file key so
+// that a shorter caller-supplied relative path (e.g. "pkg/file.go") can
+// resolve against a longer module-path-prefixed coverage key (e.g.
+// "example.com/mod/pkg/file.go"). A suffix is ambiguous, and therefore
+// excluded from BySuffix, as soon as it is claimed by more than one
+// distinct full file key — regardless of whether those files' covered
+// line sets happen to coincide. Line-set content is not a proxy for file
+// identity: two unrelated files can easily cover the same line numbers
+// (e.g. two small functions with the same statement/block shape), and
+// treating that coincidence as "unambiguous" would let the index silently
+// resolve a query to the wrong file's coverage data.
 func (m *Map) buildSuffixIndex() {
+	if m.suffixOwner == nil {
+		m.suffixOwner = map[string]string{}
+	}
 	for file, lines := range m.Lines {
 		parts := strings.Split(filepath.ToSlash(file), "/")
 		for i := range parts {
@@ -79,26 +94,16 @@ func (m *Map) buildSuffixIndex() {
 			if m.ambiguous[suffix] {
 				continue
 			}
-			if existing, ok := m.BySuffix[suffix]; ok && !sameLines(existing, lines) {
+			if owner, ok := m.suffixOwner[suffix]; ok && owner != file {
 				delete(m.BySuffix, suffix)
+				delete(m.suffixOwner, suffix)
 				m.ambiguous[suffix] = true
 				continue
 			}
+			m.suffixOwner[suffix] = file
 			m.BySuffix[suffix] = lines
 		}
 	}
-}
-
-func sameLines(a, b map[int]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for line := range a {
-		if !b[line] {
-			return false
-		}
-	}
-	return true
 }
 
 func normalize(file, root string) string {

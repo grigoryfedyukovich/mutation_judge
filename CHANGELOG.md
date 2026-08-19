@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed `internal/coverage`: the suffix-ambiguity index decided collisions by comparing covered-line-set content instead of file identity, so two distinct files sharing a path suffix (e.g. two same-shaped functions) with coincidentally identical covered lines could resolve silently instead of being marked ambiguous. Ambiguity is now tracked by which file currently owns each suffix.
+- Replaced heuristic English-substring compiler-output matching with structured `go test -json` event classification (see `ISSUES.md`). Fixes a real subtest-attribution gap in the old `--- FAIL: ` regex (it was anchored to line-start and never matched Go's indented subtest result lines) and distinguishes true build/vet failures from same-shaped runtime failures (init() panics, `TestMain` calling `os.Exit`) that were previously indistinguishable by exit code and output text alone.
+
 ## 0.1.2 — 2026-07-18
 
 - Resolved the external code review's confirmed rendering, UTF-8, configuration, atomic-write, cache-race, path-safety, timeout, and report-write defects.
