@@ -48,7 +48,7 @@ The analyzer does not directly construct processes outside the concrete backend.
 
 One temporary module copy is created for an analysis. The baseline runs in that copy. Each mutant is then applied and restored serially. This is much cheaper than copying the repository for every mutant while preserving the one-mutant-at-a-time invariant.
 
-The temporary copy excludes `.git`, `.mutation-judge`, and the configured cache path. General symlinks are preserved, but mutation targets are checked lexically and after symlink resolution; a source path that escapes the sandbox is rejected. Mutation and restoration use same-directory temporary files plus atomic rename and preserve the original file mode. Cleanup runs on every normal/error return from orchestration.
+The temporary copy excludes `.git`, `.mutation-judge`, and the configured cache path. General symlinks are preserved, but mutation targets are checked lexically and after symlink resolution; a source path that escapes the sandbox is rejected. Mutation and restoration use same-directory temporary files plus atomic rename and preserve the original file mode. Cleanup runs on every normal/error return from orchestration, and also on SIGINT/SIGTERM: `cmd/mutation-judge` cancels an explicit context on either signal rather than leaving the process to Go's default (immediate-termination) disposition, which would otherwise skip the deferred cleanup entirely. An interruption additionally appends one record to `.mutation-judge/journal.ndjson` (timestamp, signal, phase, and progress) for post-mortem debugging beyond the exit code.
 
 ## Cache key
 

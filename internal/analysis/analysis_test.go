@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,38 @@ func TestTestCommandIncludesTimeout(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v want %v", got, want)
 		}
+	}
+}
+
+// A cache write failure must not fail the whole analysis (the mutant was
+// still correctly executed and classified) but must not be silently
+// swallowed either: it needs to show up as an evidence field on the
+// report. CacheDir is pointed at a path blocked by an existing regular
+// file, which makes os.MkdirAll fail regardless of the user running the
+// test (a permission-bits-based approach would not reproduce reliably
+// when tests run as root).
+func TestCacheWriteFailureIsReportedAsWarningNotFatal(t *testing.T) {
+	d := testProject(t, "package p\nfunc Positive(n int) bool { return n > 0 }\n")
+	blocker := filepath.Join(d, "cache-blocked-by-a-file")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Cache = true
+	cfg.CacheDir = blocker
+	b := &sequenceBackend{}
+	r, err := (Engine{Version: "test", Backend: b}).Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatalf("cache write failure must be non-fatal, got error: %v", err)
+	}
+	if r.Summary.Generated != 1 || r.Summary.Killed != 1 {
+		t.Fatalf("the mutant result itself must still be correct despite the cache failure: %#v", r.Summary)
+	}
+	if len(r.Warnings) != 1 {
+		t.Fatalf("expected exactly one warning, got %v", r.Warnings)
+	}
+	if !strings.Contains(r.Warnings[0], "cache write failed") {
+		t.Fatalf("warning does not describe a cache write failure: %q", r.Warnings[0])
 	}
 }
 

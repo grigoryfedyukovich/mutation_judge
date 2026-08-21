@@ -23,6 +23,14 @@
   <p>Version {{.ToolVersion}} · {{.GeneratedAt}} · schema {{.SchemaVersion}}</p>
   {{if not .Complete}}<p><strong>INCOMPLETE REPORT</strong></p>{{end}}
 </header>
+{{if .Warnings}}
+<section class="warnings" style="border:1px solid #f9ab00;border-radius:8px;padding:0.75rem 1rem;margin-bottom:1.5rem;">
+  <strong>Warnings</strong>
+  <ul>
+    {{range .Warnings}}<li>{{.}}</li>{{end}}
+  </ul>
+</section>
+{{end}}
 <section class="summary">
   <strong>{{.Summary.Generated}} generated</strong>
   <span>{{.Summary.Killed}} killed</span>

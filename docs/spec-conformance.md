@@ -35,7 +35,7 @@ A valid mutant that causes a selected test to panic is `KILLED`: the test suite 
 
 ### Configuration syntax
 
-The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML. Unsupported tables, nested maps, block lists, anchors, and multiline strings fail with a diagnostic instead of being silently approximated. Replacing this subset parser with full standard parsers remains a publication/distribution decision.
+The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, plus YAML's native block-list style for list-valued keys. Unsupported tables, nested maps, anchors, and multiline strings fail with a diagnostic instead of being silently approximated. This is a permanent design decision, not an open publication question — see `docs/decisions/0001-config-parser-scope.md`.
 
 ## Not yet implemented
 

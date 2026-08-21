@@ -73,11 +73,11 @@ func TestUnsupportedNestedSyntaxIsRejected(t *testing.T) {
 		name, data string
 	}{
 		{"toml-table", "[report]\nformat = \"json\"\n"},
-		{"yaml-block-list", "operators:\n  - boundary\n"},
+		{"yaml-nested-map", "report:\n  format: json\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ext := ".toml"
-			if tc.name == "yaml-block-list" {
+			if tc.name == "yaml-nested-map" {
 				ext = ".yaml"
 			}
 			p := filepath.Join(d, tc.name+ext)
@@ -88,5 +88,63 @@ func TestUnsupportedNestedSyntaxIsRejected(t *testing.T) {
 				t.Fatal("expected strict subset error")
 			}
 		})
+	}
+}
+
+// See docs/decisions/0001-config-parser-scope.md: YAML's native
+// block-list style is accepted for list-valued keys specifically,
+// because it is unambiguous to parse for a single flat list without
+// adopting general nested-YAML parsing. Genuine nested maps/tables
+// (above) remain rejected.
+func TestYAMLBlockListIsAcceptedForListKeys(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "mutation-judge.yaml")
+	data := "operators:\n  - boundary\n  - arithmetic # trailing comment\n  - \"boolean\"\ntimeout: \"9s\"\n"
+	if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p, Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"boundary", "arithmetic", "boolean"}
+	if len(cfg.Operators) != len(want) {
+		t.Fatalf("operators = %v, want %v", cfg.Operators, want)
+	}
+	for i := range want {
+		if cfg.Operators[i] != want[i] {
+			t.Fatalf("operators = %v, want %v", cfg.Operators, want)
+		}
+	}
+	// The key after the block list must still parse normally: proves the
+	// lookahead correctly resumes the main loop past the consumed lines.
+	if cfg.Timeout.String() != "9s" {
+		t.Fatalf("timeout = %v, want 9s", cfg.Timeout)
+	}
+}
+
+func TestYAMLBlockListRejectsNestedItems(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "mutation-judge.yaml")
+	data := "operators:\n  - [boundary]\n"
+	if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p, Default()); err == nil {
+		t.Fatal("expected an error for a nested list item")
+	}
+}
+
+// An empty YAML value with nothing following it (not even an
+// unindented next line) is still an ordinary empty-value error, not
+// silently treated as an empty list.
+func TestYAMLEmptyValueWithNoBlockListIsStillAnError(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "mutation-judge.yaml")
+	if err := os.WriteFile(p, []byte("test_run:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p, Default()); err == nil {
+		t.Fatal("expected an error for an empty scalar value")
 	}
 }

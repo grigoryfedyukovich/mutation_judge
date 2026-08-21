@@ -69,11 +69,11 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 		return model.Report{}, err
 	}
 
-	results, complete, executionMS, err := e.executeMutants(ctx, req, prepared, coverage, coverageKnown)
+	results, complete, executionMS, warnings, err := e.executeMutants(ctx, req, prepared, coverage, coverageKnown)
 	if err != nil {
 		return model.Report{}, err
 	}
-	return buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, started), nil
+	return buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started), nil
 }
 
 func (e Engine) prepare(req Request) (preparedAnalysis, error) {
@@ -155,10 +155,10 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	return coverage, err == nil, elapsed, nil
 }
 
-func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, error) {
+func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, []string, error) {
 	cfgJSON, err := json.Marshal(req.Config.AsMap())
 	if err != nil {
-		return nil, false, 0, fmt.Errorf("marshal effective configuration for cache key: %w", err)
+		return nil, false, 0, nil, fmt.Errorf("marshal effective configuration for cache key: %w", err)
 	}
 	cacheDir := req.Config.CacheDir
 	if !filepath.IsAbs(cacheDir) {
@@ -168,6 +168,9 @@ func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnaly
 	results := make([]model.Result, 0, len(p.mutants))
 	complete := true
 	started := time.Now()
+	executedCount := 0
+	cacheWriteFailures := 0
+	var firstCacheErr error
 
 	for i, mut := range p.mutants {
 		if ctx.Err() != nil {
@@ -196,17 +199,30 @@ func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnaly
 		if !hit {
 			restore, err := workspace.Apply(p.sandbox, mut.Span.File, mut.Span.StartByte, mut.Span.EndByte, mut.Replacement)
 			if err != nil {
-				return nil, false, 0, err
+				return nil, false, 0, nil, err
 			}
 			backendResult = e.Backend.Run(ctx, runner.Request{
 				Root: p.sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
 				TestRun: req.Config.TestRun, Timeout: req.Config.Timeout,
 			})
 			if restoreErr := restore(); restoreErr != nil {
-				return nil, false, 0, fmt.Errorf("restore %s after %s: %w", mut.Span.File, mut.ID, restoreErr)
+				return nil, false, 0, nil, fmt.Errorf("restore %s after %s: %w", mut.Span.File, mut.ID, restoreErr)
 			}
-			// Cache failure does not invalidate a completed analysis result.
-			_ = store.Put(key, backendResult)
+			executedCount++
+			// A cache write failure does not invalidate this mutant's
+			// result -- it was still correctly executed and classified --
+			// so it stays non-fatal. But silently discarding the error
+			// left the person with no way to know caching stopped
+			// working (e.g. a full or permission-denied cache_dir), so
+			// it's now surfaced as an evidence field on the report (see
+			// model.Report.Warnings) plus a stderr line, deduplicated
+			// into one summary rather than one line per mutant.
+			if putErr := store.Put(key, backendResult); putErr != nil {
+				cacheWriteFailures++
+				if firstCacheErr == nil {
+					firstCacheErr = putErr
+				}
+			}
 		}
 		results = append(results, makeResult(mut, backendResult, hit, covered, known))
 		if ctx.Err() != nil {
@@ -214,10 +230,17 @@ func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnaly
 			break
 		}
 	}
-	return results, complete, time.Since(started).Milliseconds(), nil
+	var warnings []string
+	if cacheWriteFailures > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"cache write failed for %d of %d freshly executed mutant(s); those results are correct but were not cached for reuse (first error: %v)",
+			cacheWriteFailures, executedCount, firstCacheErr,
+		))
+	}
+	return results, complete, time.Since(started).Milliseconds(), warnings, nil
 }
 
-func buildReport(toolVersion string, req Request, p preparedAnalysis, results []model.Result, complete bool, baselineMS, executionMS int64, started time.Time) model.Report {
+func buildReport(toolVersion string, req Request, p preparedAnalysis, results []model.Result, complete bool, baselineMS, executionMS int64, warnings []string, started time.Time) model.Report {
 	return model.Report{
 		SchemaVersion:   model.SchemaVersion,
 		ToolVersion:     toolVersion,
@@ -243,8 +266,9 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 			"INVALID, TIMEOUT, UNKNOWN, and UNSUPPORTED mutants are excluded from the mutation-score denominator.",
 			"Coverage is baseline statement coverage from the selected tests and is explanatory, not a substitute for executing a mutant.",
 		},
-		Summary: summarize(results),
-		Results: results,
+		Warnings: warnings,
+		Summary:  summarize(results),
+		Results:  results,
 		Timing: model.Timing{
 			ParsingMS: p.parsingMS, BaselineMS: baselineMS, ExecutionMS: executionMS,
 			TotalMS: time.Since(started).Milliseconds(),

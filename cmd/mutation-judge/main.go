@@ -7,20 +7,25 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/example/mutation-judge/internal/analysis"
 	"github.com/example/mutation-judge/internal/config"
+	"github.com/example/mutation-judge/internal/model"
 	"github.com/example/mutation-judge/internal/report"
 )
 
 const version = "0.1.3"
 const (
-	exitOK       = 0
-	exitInput    = 2
-	exitInternal = 3
+	exitOK          = 0
+	exitInput       = 2
+	exitInternal    = 3
+	exitInterrupted = 130 // matches the conventional 128+SIGINT shell exit code
 )
 
 func main() { os.Exit(run()) }
@@ -119,10 +124,64 @@ func run() (code int) {
 			fmt.Fprintf(os.Stderr, "[%d/%d] %s %s %s:%d\n", p.Index, p.Total, p.Mutation.ID, p.Mutation.Operator, p.Mutation.Span.File, p.Mutation.Span.StartLine)
 		}
 	}
-	r, err := engine.Analyze(context.Background(), analysis.Request{CWD: cwd, Patterns: patterns, Config: cfg})
+	// Cancelling on SIGINT/SIGTERM (rather than leaving context.Background
+	// with no signal handler at all) is what actually lets the deferred
+	// sandbox cleanup in workspace/analysis run: Go's default disposition
+	// for an unhandled SIGINT/SIGTERM is immediate process termination,
+	// which never unwinds deferred functions. exec.CommandContext also
+	// kills any in-flight `go test` child the moment this context is done.
+	//
+	// This is written out explicitly (rather than using the equivalent
+	// signal.NotifyContext helper) so the specific signal that fired can
+	// be recorded in the interruption journal below -- SIGTERM usually
+	// means an orchestrator or CI timeout killed the process, SIGINT
+	// usually means a person hit Ctrl+C, and that distinction is useful
+	// for post-mortem debugging. caught is buffered so the send in the
+	// goroutine below can never block, and it happens strictly before the
+	// cancel() call that unblocks anything waiting on ctx.Done(), so a
+	// non-blocking receive from caught after observing ctx.Err() != nil
+	// is race-free: the value is guaranteed to already be there.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	caught := make(chan os.Signal, 1)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			caught <- sig
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		signal.Stop(sigCh)
+		cancel()
+	}()
+	r, err := engine.Analyze(ctx, analysis.Request{CWD: cwd, Patterns: patterns, Config: cfg})
+	interrupted := ctx.Err() != nil
+	var caughtSignal os.Signal
+	if interrupted {
+		select {
+		case caughtSignal = <-caught:
+		default:
+		}
+	}
 	if err != nil {
+		if interrupted {
+			fmt.Fprintln(os.Stderr, "mutation-judge: interrupted")
+			if jerr := appendJournalEntry(cwd, journalEntry{
+				Time: time.Now().UTC(), Signal: signalName(caughtSignal), Phase: "baseline",
+				ToolVersion: version, Patterns: patterns, Operators: cfg.Operators, ExitCode: exitInterrupted,
+			}); jerr != nil {
+				fmt.Fprintln(os.Stderr, "warning: could not write interruption journal:", jerr)
+			}
+			return exitInterrupted
+		}
 		fmt.Fprintln(os.Stderr, "analysis error:", err)
 		return exitInput
+	}
+	for _, w := range r.Warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	dst := os.Stdout
 	var f *os.File
@@ -150,6 +209,22 @@ func run() (code int) {
 			fmt.Fprintln(os.Stderr, "report error:", err)
 			return exitInternal
 		}
+	}
+	if interrupted {
+		// The report (possibly partial, with complete=false) has already
+		// been rendered above so the work done before the signal isn't
+		// lost. The exit code still needs to clearly say "interrupted"
+		// rather than being folded into the CI score policy below, so a
+		// script can tell "mutation score too low" apart from "the user
+		// hit Ctrl+C".
+		if jerr := appendJournalEntry(cwd, journalEntry{
+			Time: time.Now().UTC(), Signal: signalName(caughtSignal), Phase: "mutants",
+			ToolVersion: version, Patterns: patterns, Operators: cfg.Operators, ExitCode: exitInterrupted,
+			CompletedMutants: len(r.Results), RetainedMutants: retainedMutants(r),
+		}); jerr != nil {
+			fmt.Fprintln(os.Stderr, "warning: could not write interruption journal:", jerr)
+		}
+		return exitInterrupted
 	}
 	if cfg.CIMinScore > 0 && r.Summary.Killed+r.Summary.Survived > 0 && r.Summary.Score < cfg.CIMinScore {
 		return cfg.CIExitCode
@@ -185,4 +260,25 @@ func parentDir(path string) string {
 		return "./"
 	}
 	return d
+}
+
+// signalName returns a stable, lowercase name for the journal ("interrupt",
+// "terminated"), or "unknown" if a journal entry is written without a
+// captured signal (defensive; should not happen given how caughtSignal is
+// populated above).
+func signalName(sig os.Signal) string {
+	if sig == nil {
+		return "unknown"
+	}
+	return sig.String()
+}
+
+// retainedMutants reads the "retained_after_bound" bound recorded on a
+// partial report, if present, for the journal entry. It is best-effort:
+// a missing or wrong-typed value just means the journal omits the field.
+func retainedMutants(r model.Report) int {
+	if v, ok := r.Bounds["retained_after_bound"].(int); ok {
+		return v
+	}
+	return 0
 }

@@ -88,6 +88,7 @@ type Report struct {
 	EffectiveConfig map[string]any `json:"effective_config"`
 	Bounds          map[string]any `json:"bounds"`
 	Semantics       []string       `json:"semantics"`
+	Warnings        []string       `json:"warnings,omitempty"`
 	Summary         Summary        `json:"summary"`
 	Results         []Result       `json:"results"`
 	Timing          Timing         `json:"timing"`

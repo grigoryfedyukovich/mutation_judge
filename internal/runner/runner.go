@@ -170,21 +170,36 @@ func decodeTestEvents(data []byte) ([]testEvent, error) {
 	}
 }
 
+// packageFailSummaryRE matches the FAIL summary line `go test` itself
+// always emits for a package that failed before any test could run,
+// regardless of which specific diagnostic caused it or which reason
+// word appears in brackets. This was originally written checking only
+// for the literal "[build failed]" marker, but real-world testing (see
+// ISSUES.md) found `go test`'s toolchain uses at least one other reason
+// word for a different pre-test failure kind -- "[setup failed]" for a
+// build-constraint exclusion specifically, as opposed to "[build
+// failed]" for an actual compile/vet error -- so this matches the
+// general `FAIL <pkg> [<reason>]` structure rather than one hardcoded
+// phrase, since there is no reason to assume those are the only two
+// reason words this or a future Go version uses.
+var packageFailSummaryRE = regexp.MustCompile(`(?m)^FAIL\s+\S+\s+\[.+\]\s*$`)
+
 // classifyEvents turns a decoded -json event stream into a verdict and a
 // responsible-tests list, using the tool's own event protocol rather than
 // matching substrings of English compiler output:
 //
-//   - A package-level "output" event containing the literal "[build
-//     failed]" marker is exactly the FAIL summary line `go test` itself
-//     always emits for a build or vet failure, regardless of which
-//     specific diagnostic caused it. Its presence, combined with no test
-//     ever having started, means INVALID.
+//   - A package-level "output" event matching the `FAIL <pkg> [<reason>]`
+//     summary line `go test` itself always emits when a package failed
+//     before any test could run -- for a compile/vet error ("[build
+//     failed]"), a build-constraint exclusion ("[setup failed]"), or any
+//     other pre-test failure kind -- combined with no test ever having
+//     started, means INVALID.
 //   - If no test ever started and that marker is absent, the package
 //     still failed before any test ran, but for a runtime reason (a
 //     package-level init() panic, a TestMain that calls os.Exit, and
-//     similar) rather than a compile/vet failure: the mutant compiled
-//     and produced a real failure, so this is KILLED with no specific
-//     test attributed.
+//     similar) rather than a compile/vet/setup failure: the mutant
+//     compiled and produced a real failure, so this is KILLED with no
+//     specific test attributed.
 //   - Otherwise at least one test started; every test that reported
 //     "fail" is responsible. A test that started but never resolved
 //     before the stream ended was in flight when the process crashed
@@ -197,7 +212,7 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 	failed := map[string]bool{}
 	var order []string
 	sawRun := false
-	buildFailed := false
+	packageFailed := false
 	for _, e := range events {
 		switch e.Action {
 		case "run":
@@ -218,8 +233,8 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 				}
 			}
 		case "output":
-			if e.Test == "" && strings.Contains(e.Output, "[build failed]") {
-				buildFailed = true
+			if e.Test == "" && packageFailSummaryRE.MatchString(e.Output) {
+				packageFailed = true
 			}
 		}
 	}
@@ -231,7 +246,7 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 	}
 	sort.Strings(order)
 	if !sawRun {
-		if buildFailed {
+		if packageFailed {
 			return model.VerdictInvalid, nil
 		}
 		return model.VerdictKilled, nil

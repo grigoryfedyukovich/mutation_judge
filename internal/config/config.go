@@ -84,10 +84,14 @@ func FindAndLoad(start string) (Config, string, error) {
 	return cfg, "", nil
 }
 
-// Load accepts a deliberately strict flat subset of TOML or YAML. Nested
-// tables/maps, block lists, anchors, and multiline strings are rejected rather
-// than guessed. This keeps the dependency-free MVP deterministic while making
-// unsupported syntax fail visibly.
+// Load accepts a deliberately strict flat subset of TOML or YAML: one key
+// value pair per line, scalars and single-level [a, b, c] lists, quoted
+// strings, and (for YAML only) a list-valued key followed by its items in
+// YAML's native block-list style. Nested tables/maps, YAML anchors, and
+// multiline strings are rejected rather than guessed. See
+// docs/decisions/0001-config-parser-scope.md for why this is the
+// permanent design rather than an MVP placeholder for a full TOML/YAML
+// library.
 func Load(path string, base Config) (Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -101,16 +105,24 @@ func Load(path string, base Config) (Config, error) {
 		separator = ":"
 	}
 
-	cfg := base
+	var rawLines []string
 	s := bufio.NewScanner(f)
-	lineNo := 0
 	for s.Scan() {
-		lineNo++
-		line, err := stripComment(s.Text())
+		rawLines = append(rawLines, s.Text())
+	}
+	if err := s.Err(); err != nil {
+		return base, err
+	}
+
+	cfg := base
+	for i := 0; i < len(rawLines); i++ {
+		lineNo := i + 1
+		raw, err := stripComment(rawLines[i])
 		if err != nil {
 			return cfg, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 		}
-		line = strings.TrimSpace(line)
+		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
@@ -123,17 +135,77 @@ func Load(path string, base Config) (Config, error) {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		if key == "" || value == "" {
+		if key == "" {
+			return cfg, fmt.Errorf("%s:%d: key and value must be non-empty", path, lineNo)
+		}
+		if value == "" && isYAML {
+			// A YAML key with nothing after the colon is only accepted
+			// when followed by its items in native block-list style
+			// (each subsequent line indented deeper than this key and
+			// starting with "- "); anything else -- a nested map, or
+			// simply nothing -- is still rejected below.
+			items, consumed, ok, err := readYAMLBlockList(rawLines, i+1, indent)
+			if err != nil {
+				return cfg, fmt.Errorf("%s:%d: %w", path, i+2, err)
+			}
+			if ok {
+				if err := setList(&cfg, key, items); err != nil {
+					return cfg, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+				}
+				i += consumed
+				continue
+			}
+		}
+		if value == "" {
 			return cfg, fmt.Errorf("%s:%d: key and value must be non-empty", path, lineNo)
 		}
 		if err := set(&cfg, key, value); err != nil {
 			return cfg, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 		}
 	}
-	if err := s.Err(); err != nil {
-		return cfg, err
-	}
 	return cfg, Validate(cfg)
+}
+
+// readYAMLBlockList looks for a run of "- item" lines, each indented
+// deeper than parentIndent, starting at rawLines[start]. It returns the
+// unquoted item values, how many lines were consumed, and whether a
+// block list was found at all (ok is false, with no error, if the very
+// next line doesn't start a block list -- that's not this function's
+// problem to report, the caller decides what an empty value with no
+// following list means).
+func readYAMLBlockList(rawLines []string, start, parentIndent int) (items []string, consumed int, ok bool, err error) {
+	i := start
+	for i < len(rawLines) {
+		raw, cerr := stripComment(rawLines[i])
+		if cerr != nil {
+			return nil, 0, false, cerr
+		}
+		if strings.TrimSpace(raw) == "" {
+			break
+		}
+		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+		trimmed := strings.TrimSpace(raw)
+		if indent <= parentIndent || !strings.HasPrefix(trimmed, "-") {
+			break
+		}
+		item := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+		if item == "" || strings.ContainsAny(item, "[]{}") {
+			return nil, 0, false, errors.New("nested list/map values are unsupported")
+		}
+		q, uerr := unquote(item)
+		if uerr != nil {
+			return nil, 0, false, uerr
+		}
+		if q == "" {
+			return nil, 0, false, errors.New("list entries must be non-empty")
+		}
+		items = append(items, q)
+		i++
+	}
+	if len(items) == 0 {
+		return nil, 0, false, nil
+	}
+	return items, i - start, true, nil
 }
 
 func stripComment(s string) (string, error) {
@@ -158,7 +230,11 @@ func stripComment(s string) (string, error) {
 		case '"', '\'':
 			quote = r
 		case '#':
-			return strings.TrimSpace(s[:i]), nil
+			// Trailing whitespace only: leading whitespace is kept so
+			// callers can still measure indentation (needed for YAML
+			// block-list detection), matching what strings.TrimSpace(s)
+			// would have discarded from both ends before this change.
+			return strings.TrimRight(s[:i], " \t"), nil
 		}
 	}
 	if quote != 0 {
@@ -314,7 +390,7 @@ func set(c *Config, key, value string) error {
 		if err != nil {
 			return err
 		}
-		c.Operators = v
+		return setList(c, key, v)
 	case "timeout":
 		v, err := parseString()
 		if err != nil {
@@ -395,6 +471,20 @@ func set(c *Config, key, value string) error {
 		return fmt.Errorf("unknown configuration key %q", key)
 	}
 	return nil
+}
+
+// setList assigns an already-split list of items to a list-typed
+// configuration key, used both by set (for the inline `[a, b, c]` form)
+// and by Load's YAML block-list handling. Adding a new list-typed key in
+// the future means adding one case here.
+func setList(c *Config, key string, items []string) error {
+	switch key {
+	case "operators":
+		c.Operators = items
+		return nil
+	default:
+		return fmt.Errorf("%q does not accept a list value", key)
+	}
 }
 
 func Validate(c Config) error {

@@ -19,6 +19,95 @@ func TestFailingTests(t *testing.T) {
 	}
 }
 
+// classifyEvents is exercised directly (not only through GoTest.Run
+// against a real go binary) specifically because a real-world go
+// toolchain's exact -json output for a given failure kind can differ
+// across platforms/versions in ways that are impractical to reproduce
+// reliably in every CI environment -- which is exactly how the bug these
+// two tests pin down slipped past the original, integration-only test
+// suite: on Linux, "build constraints exclude all Go files" produced no
+// JSON events at all (exercising the separate toolchain-failure fallback
+// path in GoTest.Run, not classifyEvents), while on at least one other
+// platform/Go version it instead produces a real package-level "output"
+// event whose FAIL summary line reads "[setup failed]" rather than
+// "[build failed]" -- a distinct reason word classifyEvents didn't
+// recognize, so it fell through to KILLED instead of INVALID. These
+// tests construct that event stream directly so the fix doesn't depend
+// on which platform happens to run the test.
+func TestClassifyEventsRecognizesBuildFailedMarker(t *testing.T) {
+	events := []testEvent{
+		{Action: "start"},
+		{Action: "output", Output: "FAIL\texample.test/p [build failed]\n"},
+		{Action: "fail"},
+	}
+	verdict, tests := classifyEvents(events)
+	if verdict != model.VerdictInvalid {
+		t.Fatalf("verdict = %s, want %s", verdict, model.VerdictInvalid)
+	}
+	if len(tests) != 0 {
+		t.Fatalf("tests = %v, want none", tests)
+	}
+}
+
+// Reproduces, verbatim, the exact scenario reported from a real macOS
+// run: go test -json emitting a package-level FAIL summary line reading
+// "[setup failed]" (not "[build failed]") for a build-constraint
+// exclusion. Before the fix, this fell through to KILLED.
+func TestClassifyEventsRecognizesSetupFailedMarker(t *testing.T) {
+	events := []testEvent{
+		{Action: "start"},
+		{Action: "output", Output: "# example.test/runnerfixture\n"},
+		{Action: "output", Output: "package example.test/runnerfixture: build constraints exclude all Go files in /tmp/somewhere\n"},
+		{Action: "output", Output: "FAIL example.test/runnerfixture [setup failed]\n"},
+		{Action: "fail"},
+	}
+	verdict, tests := classifyEvents(events)
+	if verdict != model.VerdictInvalid {
+		t.Fatalf("verdict = %s, want %s", verdict, model.VerdictInvalid)
+	}
+	if len(tests) != 0 {
+		t.Fatalf("tests = %v, want none", tests)
+	}
+}
+
+// The FAIL-summary-line detection matches the general `FAIL <pkg>
+// [<reason>]` structure rather than a fixed list of known reason words,
+// specifically so a reason word neither of the two tests above knows
+// about (a future Go version, or a platform not tested here) is still
+// recognized rather than silently falling through to KILLED again.
+func TestClassifyEventsRecognizesUnknownReasonWordInFailBracket(t *testing.T) {
+	events := []testEvent{
+		{Action: "start"},
+		{Action: "output", Output: "FAIL\texample.test/p [some future reason nobody has seen yet]\n"},
+		{Action: "fail"},
+	}
+	verdict, _ := classifyEvents(events)
+	if verdict != model.VerdictInvalid {
+		t.Fatalf("verdict = %s, want %s", verdict, model.VerdictInvalid)
+	}
+}
+
+// A FAIL bracket line scoped to a specific test (Test != "") must never
+// be treated as a package-level setup/build failure marker -- only
+// package-level output (Test == "") counts. This guards against a
+// legitimate test that logs or asserts on text shaped like a FAIL
+// summary line being misclassified as INVALID.
+func TestClassifyEventsIgnoresFailBracketScopedToATest(t *testing.T) {
+	events := []testEvent{
+		{Action: "start"},
+		{Action: "run", Test: "TestWeird"},
+		{Action: "output", Test: "TestWeird", Output: "FAIL\tsomething [build failed]\n"},
+		{Action: "fail", Test: "TestWeird"},
+	}
+	verdict, tests := classifyEvents(events)
+	if verdict != model.VerdictKilled {
+		t.Fatalf("verdict = %s, want %s", verdict, model.VerdictKilled)
+	}
+	if len(tests) != 1 || tests[0] != "TestWeird" {
+		t.Fatalf("tests = %v, want [TestWeird]", tests)
+	}
+}
+
 func TestTrimOutputPreservesUTF8(t *testing.T) {
 	const max = 8
 	input := strings.Repeat("a", max-1) + "é" + "tail"
