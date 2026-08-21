@@ -32,6 +32,8 @@ type Package struct {
 	GoFiles    []string
 	CgoFiles   []string
 	ImportPath string
+	Deps       []string
+	ForTest    string
 	Error      *struct{ Err string }
 }
 
@@ -44,6 +46,89 @@ func ListPackages(cwd string, patterns []string) ([]Package, error) {
 		return nil, fmt.Errorf("go list failed: %w", err)
 	}
 	return decodePackages(out)
+}
+
+// TestScopes computes, for every package within patterns that has its
+// own tests, the minimal set of test package import paths needed to
+// safely validate a mutant in that package: itself, plus every other
+// package (within the same patterns) whose test binary transitively
+// depends on it. This is purely additive data used only to narrow an
+// individual mutant's own `go test` invocation when a person opts into
+// it (config.NarrowTestScope) -- it never changes which mutants are
+// discovered or which files are mutation candidates, and does not touch
+// ListPackages/SourceFiles above, which every other part of this tool
+// still uses unmodified.
+//
+// The transitive closure is asked of the go tool itself (`go list -deps
+// -test`) rather than computed by walking Imports by hand, specifically
+// because a naive walk of only "Imports" would miss a real and not even
+// unusual case: a package's dependency reachable only through an
+// external "foo_test" test file (e.g. an integration-style test),
+// which never appears in the package's own Imports at all. `go list`'s
+// ForTest field marks exactly the synthetic packages representing a
+// compiled test binary, and that package's own Deps field is the
+// correct, already-computed transitive closure including such
+// test-only edges -- confirmed against a synthetic fixture with an
+// external test package before this was written the way it is.
+func TestScopes(cwd string, patterns []string) (map[string][]string, error) {
+	args := append([]string{"list", "-json", "-deps", "-test", "-e"}, patterns...)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list -deps -test failed: %w", err)
+	}
+	pkgs, err := decodePackages(out)
+	if err != nil {
+		return nil, err
+	}
+
+	// depsByTarget[T] is the set of packages (including T itself) that a
+	// mutant in T needs tested -- built by unioning every test-binary
+	// variant's Deps for that target, since a package can have both an
+	// internal ("package foo") and external ("package foo_test") test
+	// file at once, each contributing its own, independently-computed
+	// Deps set that must be combined to get the whole picture.
+	depsByTarget := map[string]map[string]bool{}
+	for _, p := range pkgs {
+		if p.ForTest == "" {
+			continue
+		}
+		set := depsByTarget[p.ForTest]
+		if set == nil {
+			set = map[string]bool{p.ForTest: true}
+			depsByTarget[p.ForTest] = set
+		}
+		for _, d := range p.Deps {
+			if strings.Contains(d, " [") {
+				continue // a bracket-suffixed test-variant reference, never a real mutated package's plain import path
+			}
+			set[d] = true
+		}
+	}
+
+	// Invert: for each package a mutant could land in, which test
+	// targets' scopes include it.
+	index := map[string]map[string]bool{}
+	for target, deps := range depsByTarget {
+		for d := range deps {
+			if index[d] == nil {
+				index[d] = map[string]bool{}
+			}
+			index[d][target] = true
+		}
+	}
+
+	out2 := make(map[string][]string, len(index))
+	for pkg, testPkgs := range index {
+		list := make([]string, 0, len(testPkgs))
+		for t := range testPkgs {
+			list = append(list, t)
+		}
+		sort.Strings(list)
+		out2[pkg] = list
+	}
+	return out2, nil
 }
 
 func SourceFiles(root string, pkgs []Package) ([]string, error) {
@@ -244,7 +329,15 @@ func Digest(root string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// copyFile materializes dst as an independent copy of src with the given
+// mode. It first attempts a copy-on-write clone via tryReflink (a no-op
+// returning false on platforms/filesystems that don't support one, in
+// which case this always falls back to the byte-for-byte copy below --
+// see reflink_linux.go and reflink_other.go).
 func copyFile(src, dst string, mode os.FileMode) error {
+	if tryReflink(dst, src) {
+		return os.Chmod(dst, mode.Perm())
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err

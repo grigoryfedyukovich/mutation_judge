@@ -11,3 +11,5 @@ ci_exit_code = 10
 include_generated = false
 changed = ""
 progress = true
+narrow_test_scope = false
+workers = 1

@@ -69,6 +69,8 @@ func run() (code int) {
 	ciCode := fs.Int("ci-exit-code", cfg.CIExitCode, "exit code used for CI policy failure")
 	includeGenerated := fs.Bool("include-generated", cfg.IncludeGenerated, "include generated Go source")
 	progress := fs.Bool("progress", cfg.Progress, "emit one progress line per mutant to stderr")
+	narrowTestScope := fs.Bool("narrow-test-scope", cfg.NarrowTestScope, "run each mutant only against tests that can observe it, computed from the module's own dependency graph, instead of the full pattern set every time; opt-in, see docs/performance.md")
+	workers := fs.Int("workers", cfg.Workers, "run this many mutants concurrently, each in its own sandbox; 0 or 1 (the default) runs sequentially, unchanged from earlier versions; see docs/performance.md")
 	printConfig := fs.Bool("print-config", false, "print the effective configuration and exit")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	_ = fs.String("config", configPath, "configuration file (TOML or YAML)")
@@ -100,6 +102,8 @@ func run() (code int) {
 	cfg.CIExitCode = *ciCode
 	cfg.IncludeGenerated = *includeGenerated
 	cfg.Progress = *progress
+	cfg.NarrowTestScope = *narrowTestScope
+	cfg.Workers = *workers
 	if err := config.Validate(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "configuration error:", err)
 		return exitInput

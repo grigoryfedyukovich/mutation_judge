@@ -25,17 +25,20 @@ type Config struct {
 	IncludeGenerated bool
 	ChangedBase      string
 	Progress         bool
+	NarrowTestScope  bool
+	Workers          int
 }
 
 func Default() Config {
 	return Config{
 		Operators:  []string{"boundary", "boolean"},
 		Timeout:    20 * time.Second,
-		Format:     "text",
 		CacheDir:   ".mutation-judge/cache",
 		Cache:      true,
 		CIExitCode: 10,
+		Format:     "text",
 		Progress:   true,
+		Workers:    1,
 	}
 }
 
@@ -54,6 +57,8 @@ func (c Config) AsMap() map[string]any {
 		"include_generated": c.IncludeGenerated,
 		"changed":           c.ChangedBase,
 		"progress":          c.Progress,
+		"narrow_test_scope": c.NarrowTestScope,
+		"workers":           c.Workers,
 	}
 }
 
@@ -467,6 +472,18 @@ func set(c *Config, key, value string) error {
 			return err
 		}
 		c.Progress = v
+	case "narrow_test_scope":
+		v, err := parseBool()
+		if err != nil {
+			return err
+		}
+		c.NarrowTestScope = v
+	case "workers":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		c.Workers = v
 	default:
 		return fmt.Errorf("unknown configuration key %q", key)
 	}
@@ -511,6 +528,9 @@ func Validate(c Config) error {
 	}
 	if c.CIExitCode <= 0 || c.CIExitCode > 125 {
 		return errors.New("ci_exit_code must be between 1 and 125")
+	}
+	if c.Workers < 0 {
+		return errors.New("workers cannot be negative")
 	}
 	return nil
 }

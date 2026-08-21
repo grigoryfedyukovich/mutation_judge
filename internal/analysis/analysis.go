@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/example/mutation-judge/internal/cache"
@@ -50,6 +51,8 @@ type preparedAnalysis struct {
 	coveragePath   string
 	backendName    string
 	backendVersion string
+	filePackage    map[string]string   // relative file path -> owning package import path
+	testScopes     map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
 }
 
 func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) {
@@ -76,6 +79,30 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 	return buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started), nil
 }
 
+// mutantTestScope returns the go test patterns to use for one mutant's
+// execution. It is req.Patterns unchanged unless config.NarrowTestScope
+// is enabled and a scope was successfully computed for the mutant's own
+// package (see workspace.TestScopes) -- in which case that narrower,
+// safe scope is used instead. Any uncertainty at all (the mutant's file
+// couldn't be mapped to a package, or no scope was recorded for that
+// package) falls back to the full req.Patterns rather than risking
+// running too little; narrowing is only ever a speed optimization, never
+// something this function is willing to guess about.
+func mutantTestScope(req Request, p preparedAnalysis, mut model.Mutation) []string {
+	if !req.Config.NarrowTestScope {
+		return req.Patterns
+	}
+	pkg, ok := p.filePackage[mut.Span.File]
+	if !ok {
+		return req.Patterns
+	}
+	scope, ok := p.testScopes[pkg]
+	if !ok || len(scope) == 0 {
+		return req.Patterns
+	}
+	return scope
+}
+
 func (e Engine) prepare(req Request) (preparedAnalysis, error) {
 	root, err := workspace.ModuleRoot(req.CWD)
 	if err != nil {
@@ -92,6 +119,17 @@ func (e Engine) prepare(req Request) (preparedAnalysis, error) {
 	files, err := workspace.SourceFiles(root, pkgs)
 	if err != nil {
 		return preparedAnalysis{}, err
+	}
+	filePackage, err := fileOwningPackages(root, pkgs)
+	if err != nil {
+		return preparedAnalysis{}, err
+	}
+	var testScopes map[string][]string
+	if req.Config.NarrowTestScope {
+		testScopes, err = workspace.TestScopes(req.CWD, req.Patterns)
+		if err != nil {
+			return preparedAnalysis{}, err
+		}
 	}
 
 	parseStart := time.Now()
@@ -138,7 +176,32 @@ func (e Engine) prepare(req Request) (preparedAnalysis, error) {
 		root: root, workRel: filepath.ToSlash(workRel), sandbox: sandbox, cleanup: cleanup,
 		mutants: mutants, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
 		coveragePath: coveragePath, backendName: backendName, backendVersion: backendVersion,
+		filePackage: filePackage, testScopes: testScopes,
 	}, nil
+}
+
+// fileOwningPackages maps each source file SourceFiles would return
+// (relative to root, forward-slashed) to the import path of the package
+// it belongs to, for looking up a mutant's minimal safe test scope (see
+// workspace.TestScopes) by the file its span is in. Errors the same way
+// SourceFiles does on a package-loading failure, since both walk the
+// same pkgs slice.
+func fileOwningPackages(root string, pkgs []workspace.Package) (map[string]string, error) {
+	out := map[string]string{}
+	for _, p := range pkgs {
+		if p.Error != nil && p.Error.Err != "" {
+			return nil, fmt.Errorf("package %s: %s", p.ImportPath, p.Error.Err)
+		}
+		for _, name := range append(append([]string{}, p.GoFiles...), p.CgoFiles...) {
+			abs := filepath.Join(p.Dir, name)
+			rel, err := filepath.Rel(root, abs)
+			if err != nil {
+				return nil, err
+			}
+			out[filepath.ToSlash(rel)] = p.ImportPath
+		}
+	}
+	return out, nil
 }
 
 func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis) (covermap.Map, bool, int64, error) {
@@ -155,8 +218,93 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	return coverage, err == nil, elapsed, nil
 }
 
+// runOneMutant executes a single mutant against a given sandbox and is
+// shared, unmodified, by both the sequential and parallel execution
+// paths below -- extracted specifically so there is one place that
+// decides cache keys, applies/restores the mutation, and classifies the
+// result, rather than two independently-maintained copies that could
+// drift out of sync with each other over time.
+// cacheRelevantConfig is the subset of configuration whose value could
+// actually affect an individual mutant's own test outcome, used for the
+// cache key instead of the full Config.AsMap(). Fields that only affect
+// orchestration, reporting, or concurrency -- how many workers run
+// mutants, what format the report renders in, whether progress lines
+// print, the CI failure policy, which operators discover mutants in the
+// first place -- must not be part of this, or changing any of them
+// would wastefully invalidate every cached result despite the actual
+// `go test` command for a given, already-identified mutant being
+// completely unaffected. Exactly Timeout and TestRun are what actually
+// reach runner.Request in runOneMutant below; nothing else from Config
+// does (Patterns comes from the computed test scope, not directly from
+// Config, and is already captured separately in the cache key via that
+// scope string).
+//
+// This exists because of a real regression, found by testing the
+// finished --workers feature rather than assuming it worked: adding a
+// "workers" key to Config.AsMap() for --print-config visibility also
+// silently widened the cache key (which had been using the full
+// AsMap()) to be sensitive to worker count, so running the same
+// analysis with a different --workers value produced zero cache hits
+// despite every mutant's actual test outcome being identical.
+func cacheRelevantConfig(c config.Config) map[string]any {
+	return map[string]any{
+		"timeout":  c.Timeout.String(),
+		"test_run": c.TestRun,
+	}
+}
+
+func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysis, store cache.Store, cfgJSON []byte, sandbox string, mut model.Mutation, coverage covermap.Map, coverageKnown bool) (result model.Result, executed bool, cachePutErr error, hardErr error) {
+	covered, known := false, false
+	if coverageKnown {
+		covered, known = coverage.Covered(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine)
+	}
+	scope := mutantTestScope(req, p, mut)
+	key := cache.Key(
+		e.Version,
+		frontend.SemanticsVersion,
+		runtime.Version(),
+		p.sourceDigest,
+		string(cfgJSON),
+		p.backendName,
+		p.backendVersion,
+		mut.ID,
+		mut.Replacement,
+		strings.Join(scope, ","),
+	)
+	backendResult, hit := store.Get(key)
+	if !hit {
+		restore, err := workspace.Apply(sandbox, mut.Span.File, mut.Span.StartByte, mut.Span.EndByte, mut.Replacement)
+		if err != nil {
+			return model.Result{}, false, nil, err
+		}
+		backendResult = e.Backend.Run(ctx, runner.Request{
+			Root: sandbox, WorkRel: p.workRel, Patterns: scope,
+			TestRun: req.Config.TestRun, Timeout: req.Config.Timeout,
+		})
+		if restoreErr := restore(); restoreErr != nil {
+			return model.Result{}, false, nil, fmt.Errorf("restore %s after %s: %w", mut.Span.File, mut.ID, restoreErr)
+		}
+		executed = true
+		// A cache write failure does not invalidate this mutant's
+		// result -- it was still correctly executed and classified --
+		// so it stays non-fatal; the caller aggregates these into the
+		// report's Warnings evidence field instead of failing outright.
+		if putErr := store.Put(key, backendResult); putErr != nil {
+			cachePutErr = putErr
+		}
+	}
+	return makeResult(mut, backendResult, hit, covered, known), executed, cachePutErr, nil
+}
+
 func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, []string, error) {
-	cfgJSON, err := json.Marshal(req.Config.AsMap())
+	if req.Config.Workers > 1 {
+		return e.executeMutantsParallel(ctx, req, p, coverage, coverageKnown)
+	}
+	return e.executeMutantsSequential(ctx, req, p, coverage, coverageKnown)
+}
+
+func (e Engine) executeMutantsSequential(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, []string, error) {
+	cfgJSON, err := json.Marshal(cacheRelevantConfig(req.Config))
 	if err != nil {
 		return nil, false, 0, nil, fmt.Errorf("marshal effective configuration for cache key: %w", err)
 	}
@@ -180,51 +328,20 @@ func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnaly
 		if e.Progress != nil {
 			e.Progress(Progress{Index: i + 1, Total: len(p.mutants), Mutation: mut})
 		}
-		covered, known := false, false
-		if coverageKnown {
-			covered, known = coverage.Covered(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine)
+		result, executed, cachePutErr, hardErr := e.runOneMutant(ctx, req, p, store, cfgJSON, p.sandbox, mut, coverage, coverageKnown)
+		if hardErr != nil {
+			return nil, false, 0, nil, hardErr
 		}
-		key := cache.Key(
-			e.Version,
-			frontend.SemanticsVersion,
-			runtime.Version(),
-			p.sourceDigest,
-			string(cfgJSON),
-			p.backendName,
-			p.backendVersion,
-			mut.ID,
-			mut.Replacement,
-		)
-		backendResult, hit := store.Get(key)
-		if !hit {
-			restore, err := workspace.Apply(p.sandbox, mut.Span.File, mut.Span.StartByte, mut.Span.EndByte, mut.Replacement)
-			if err != nil {
-				return nil, false, 0, nil, err
-			}
-			backendResult = e.Backend.Run(ctx, runner.Request{
-				Root: p.sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
-				TestRun: req.Config.TestRun, Timeout: req.Config.Timeout,
-			})
-			if restoreErr := restore(); restoreErr != nil {
-				return nil, false, 0, nil, fmt.Errorf("restore %s after %s: %w", mut.Span.File, mut.ID, restoreErr)
-			}
+		if executed {
 			executedCount++
-			// A cache write failure does not invalidate this mutant's
-			// result -- it was still correctly executed and classified --
-			// so it stays non-fatal. But silently discarding the error
-			// left the person with no way to know caching stopped
-			// working (e.g. a full or permission-denied cache_dir), so
-			// it's now surfaced as an evidence field on the report (see
-			// model.Report.Warnings) plus a stderr line, deduplicated
-			// into one summary rather than one line per mutant.
-			if putErr := store.Put(key, backendResult); putErr != nil {
+			if cachePutErr != nil {
 				cacheWriteFailures++
 				if firstCacheErr == nil {
-					firstCacheErr = putErr
+					firstCacheErr = cachePutErr
 				}
 			}
 		}
-		results = append(results, makeResult(mut, backendResult, hit, covered, known))
+		results = append(results, result)
 		if ctx.Err() != nil {
 			complete = false
 			break
@@ -238,6 +355,159 @@ func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnaly
 		))
 	}
 	return results, complete, time.Since(started).Milliseconds(), warnings, nil
+}
+
+// executeMutantsParallel is the opt-in (config.Workers > 1) counterpart
+// to executeMutantsSequential above, sharing the exact same per-mutant
+// logic via runOneMutant. Each worker gets its own fully independent
+// sandbox (created the same way the single sequential sandbox is,
+// cheaply where the platform supports copy-on-write cloning -- see
+// docs/performance.md), which is what makes concurrent execution safe:
+// nothing in the workspace/runner/cache packages holds shared mutable
+// state, so two workers applying/running/restoring mutations on two
+// DIFFERENT sandbox directories can never conflict with each other. That
+// was verified by review before this was written, not assumed -- see
+// docs/performance.md for the specific things checked.
+//
+// Output ordering is deterministic despite parallel, out-of-order
+// completion: results are written into a slice pre-sized and indexed by
+// each mutant's position in the (already deterministically ordered)
+// discovery order, then collected back into a plain slice in that same
+// order at the end -- never in whichever order workers happened to
+// finish. Running the same analysis twice with the same worker count
+// produces results in the same order every time (see
+// TestParallelExecutionIsDeterministic).
+//
+// A hard error from any one worker (an Apply or restore failure, as
+// opposed to an ordinary mutant verdict) cancels an inner context
+// derived from ctx, which every worker and the work-dispatching
+// goroutine observe on their next iteration -- reusing the same
+// cancellation mechanism that already stops in-flight `go test`
+// processes on SIGINT/SIGTERM, rather than inventing a second one.
+func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, []string, error) {
+	started := time.Now()
+	if len(p.mutants) == 0 {
+		return nil, true, 0, nil, nil
+	}
+	cfgJSON, err := json.Marshal(cacheRelevantConfig(req.Config))
+	if err != nil {
+		return nil, false, 0, nil, fmt.Errorf("marshal effective configuration for cache key: %w", err)
+	}
+	cacheDir := req.Config.CacheDir
+	if !filepath.IsAbs(cacheDir) {
+		cacheDir = filepath.Join(p.root, cacheDir)
+	}
+	store := cache.Store{Dir: cacheDir, Enabled: req.Config.Cache}
+
+	workers := req.Config.Workers
+	if workers > len(p.mutants) {
+		workers = len(p.mutants) // no point creating more sandboxes than there are mutants to run
+	}
+
+	sandboxes := make([]string, 0, workers)
+	var sandboxCleanups []func()
+	defer func() {
+		for _, c := range sandboxCleanups {
+			c()
+		}
+	}()
+	for i := 0; i < workers; i++ {
+		sandbox, cleanup, err := workspace.CopyModule(p.root, req.Config.CacheDir)
+		if err != nil {
+			return nil, false, 0, nil, fmt.Errorf("create sandbox for worker %d: %w", i, err)
+		}
+		sandboxes = append(sandboxes, sandbox)
+		sandboxCleanups = append(sandboxCleanups, cleanup)
+	}
+
+	innerCtx, cancelInner := context.WithCancel(ctx)
+	defer cancelInner()
+
+	results := make([]*model.Result, len(p.mutants))
+	var mu sync.Mutex // guards results, hardErr, executedCount, cacheWriteFailures, firstCacheErr
+	var hardErr error
+	executedCount := 0
+	cacheWriteFailures := 0
+	var firstCacheErr error
+	var progressMu sync.Mutex // guards e.Progress calls only, kept separate from mu so a slow progress callback never blocks result bookkeeping
+
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for _, sandbox := range sandboxes {
+		wg.Add(1)
+		go func(sandbox string) {
+			defer wg.Done()
+			for idx := range work {
+				if innerCtx.Err() != nil {
+					continue // drain the rest of the channel without processing; the dispatcher below has also already stopped sending
+				}
+				mut := p.mutants[idx]
+				if e.Progress != nil {
+					progressMu.Lock()
+					e.Progress(Progress{Index: idx + 1, Total: len(p.mutants), Mutation: mut})
+					progressMu.Unlock()
+				}
+				result, executed, cachePutErr, err := e.runOneMutant(innerCtx, req, p, store, cfgJSON, sandbox, mut, coverage, coverageKnown)
+				if err != nil {
+					mu.Lock()
+					if hardErr == nil {
+						hardErr = err
+					}
+					mu.Unlock()
+					cancelInner()
+					continue
+				}
+				mu.Lock()
+				results[idx] = &result
+				if executed {
+					executedCount++
+					if cachePutErr != nil {
+						cacheWriteFailures++
+						if firstCacheErr == nil {
+							firstCacheErr = cachePutErr
+						}
+					}
+				}
+				mu.Unlock()
+			}
+		}(sandbox)
+	}
+
+	go func() {
+		defer close(work)
+		for i := range p.mutants {
+			select {
+			case work <- i:
+			case <-innerCtx.Done():
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	if hardErr != nil {
+		return nil, false, 0, nil, hardErr
+	}
+
+	final := make([]model.Result, 0, len(p.mutants))
+	complete := true
+	for _, r := range results {
+		if r == nil {
+			complete = false
+			continue
+		}
+		final = append(final, *r)
+	}
+
+	var warnings []string
+	if cacheWriteFailures > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"cache write failed for %d of %d freshly executed mutant(s); those results are correct but were not cached for reuse (first error: %v)",
+			cacheWriteFailures, executedCount, firstCacheErr,
+		))
+	}
+	return final, complete, time.Since(started).Milliseconds(), warnings, nil
 }
 
 func buildReport(toolVersion string, req Request, p preparedAnalysis, results []model.Result, complete bool, baselineMS, executionMS int64, warnings []string, started time.Time) model.Report {

@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -172,6 +174,164 @@ func TestBuildTagExcludedFileIsNeverMutatedEndToEnd(t *testing.T) {
 	if !strings.HasSuffix(report.Results[0].Mutation.Span.File, "included.go") {
 		t.Fatalf("mutant came from %q, want included.go; the build-tag-excluded file must never be mutated", report.Results[0].Mutation.Span.File)
 	}
+}
+
+// TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency is the
+// critical correctness test for --narrow-test-scope: a mutation-testing
+// tool that silently reports a false SURVIVED because it narrowed test
+// scope incorrectly would be actively harmful, worse than not narrowing
+// at all. tests/integration/testdata/scoping is built specifically so a
+// mutant in package a is *not* caught by a's own test, and *is* caught
+// only by package d's external ("package d_test") test file -- a
+// dependency reachable only through a _test.go file in a different
+// package, which a naive walk of ordinary build Imports would miss
+// entirely. With scoping enabled, this must still be KILLED.
+func TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
+		"--narrow-test-scope", "./tests/integration/testdata/scoping/...")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, text)
+	}
+	if !strings.Contains(text, "KILLED") {
+		t.Fatalf("expected the mutant to be KILLED via d's external test even with scoping on:\n%s", text)
+	}
+	if strings.Contains(text, "SURVIVED") {
+		t.Fatalf("a SURVIVED result here would mean scoping silently missed a real cross-package dependency:\n%s", text)
+	}
+	if !strings.Contains(text, "killed by: TestClassifyBoundary") {
+		t.Fatalf("expected attribution to d's TestClassifyBoundary specifically:\n%s", text)
+	}
+
+	// The unambiguous proof that scoping actually narrowed something
+	// (not just "safely did nothing"): package unrelated's test sleeps
+	// 3s and has no relationship to package a. Baseline always validates
+	// the *full* pattern set regardless of scoping (it's checking the
+	// person's whole test suite passes before any mutation happens, not
+	// something scoping should ever skip) so overall wall time alone
+	// isn't the right signal -- it will always include that 3s+ from
+	// baseline. The mutant-execution phase specifically must not.
+	mutantsMS := parseMutantsTimingMS(t, text)
+	if mutantsMS >= 3000 {
+		t.Fatalf("mutants phase took %dms; --narrow-test-scope should have excluded the unrelated package's slow, irrelevant test from mutant execution specifically (full output:\n%s)", mutantsMS, text)
+	}
+}
+
+// TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage is the control
+// for the timing assertion above: it proves the fixture's 3-second
+// signal is real -- caused by scoping, not some other reason the
+// unrelated package's test wouldn't run anyway -- by confirming the
+// *default* (scoping off) behavior does pay that cost.
+func TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
+		"./tests/integration/testdata/scoping/...")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, text)
+	}
+	// Without scoping, every mutant re-runs the full pattern set, which
+	// includes the unrelated package's 3s test -- this is the direct
+	// counterpart of the mutants-phase assertion in the scoped test
+	// above, isolating the same phase for a fair comparison.
+	mutantsMS := parseMutantsTimingMS(t, text)
+	if mutantsMS < 3000 {
+		t.Fatalf("mutants phase took only %dms without --narrow-test-scope; expected the unrelated package's 3s test to run as part of the default full pattern set (full output:\n%s)", mutantsMS, text)
+	}
+}
+
+// parseMutantsTimingMS extracts the "mutants=Nms" component from a text
+// report's trailing timing line, to assert on the mutant-execution
+// phase specifically rather than total wall time, which always includes
+// baseline (see the two tests above for why that distinction matters
+// here).
+func parseMutantsTimingMS(t *testing.T, text string) int {
+	t.Helper()
+	re := regexp.MustCompile(`mutants=(\d+)ms`)
+	m := re.FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("could not find a mutants=Nms timing component in output:\n%s", text)
+	}
+	ms, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("mutants timing %q did not parse as an integer: %v", m[1], err)
+	}
+	return ms
+}
+
+// TestWorkersProducesSameResultsAsSequential is the real-toolchain
+// counterpart to the fake-backend-based parallel tests in
+// internal/analysis: the same fixture (four independent boundary
+// mutants, some killed, some surviving) run once with the default
+// sequential execution and once with --workers 3 must produce identical
+// per-mutant verdicts in identical order, this time through the actual
+// compiled binary and real go test invocations rather than a
+// content-aware fake backend.
+func TestWorkersProducesSameResultsAsSequential(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	runJSON := func(extraArgs ...string) reportSummary {
+		args := append([]string{"--no-cache", "--progress=false", "--operators", "boundary", "--format", "json"}, extraArgs...)
+		args = append(args, "./tests/integration/testdata/workers")
+		cmd := exec.Command(binary, args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command failed: %v\n%s", err, out)
+		}
+		var report reportSummary
+		if err := json.Unmarshal(out, &report); err != nil {
+			t.Fatalf("decode report: %v\n%s", err, out)
+		}
+		return report
+	}
+
+	sequential := runJSON()
+	parallel := runJSON("--workers", "3")
+
+	if !parallel.Complete {
+		t.Fatal("parallel run reported incomplete")
+	}
+	if len(sequential.Results) != len(parallel.Results) {
+		t.Fatalf("result count differs: sequential=%d parallel=%d", len(sequential.Results), len(parallel.Results))
+	}
+	for i := range sequential.Results {
+		s, p := sequential.Results[i], parallel.Results[i]
+		if s.Mutation.ID != p.Mutation.ID {
+			t.Fatalf("result %d: order differs: sequential=%s parallel=%s", i, s.Mutation.ID, p.Mutation.ID)
+		}
+		if s.Verdict != p.Verdict {
+			t.Fatalf("result %d (%s): verdict differs: sequential=%s parallel=%s", i, s.Mutation.ID, s.Verdict, p.Verdict)
+		}
+	}
+	if sequential.Summary != parallel.Summary {
+		t.Fatalf("summary differs: sequential=%#v parallel=%#v", sequential.Summary, parallel.Summary)
+	}
+}
+
+type reportSummary struct {
+	Complete bool `json:"complete"`
+	Summary  struct {
+		Generated int     `json:"generated"`
+		Killed    int     `json:"killed"`
+		Survived  int     `json:"survived"`
+		Invalid   int     `json:"invalid"`
+		Score     float64 `json:"score"`
+	} `json:"summary"`
+	Results []struct {
+		Mutation struct {
+			ID string `json:"id"`
+		} `json:"mutation"`
+		Verdict string `json:"verdict"`
+	} `json:"results"`
 }
 
 func projectRoot() string {
