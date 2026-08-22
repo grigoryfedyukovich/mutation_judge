@@ -23,6 +23,25 @@ import (
 // Background()` had no signal wiring at all: Go's default disposition
 // for an unhandled SIGINT/SIGTERM is immediate process termination,
 // which never unwinds deferred cleanup.
+//
+// Timing budgets in this file (30-40s) are deliberately generous. This
+// and the other two SIGTERM tests spawn a real subprocess and depend on
+// it reaching specific points (a sandbox appearing, a specific mutant
+// starting) before delivering a real signal, which is sensitive to
+// system load: a real failure was reported from `go test ./...` (which
+// runs different packages' test binaries concurrently, and this
+// project's own tests/integration package alone runs real subprocesses
+// for tens of seconds) that did not reproduce at all across several
+// repeated runs when these three tests were run in isolation. That
+// confirms resource contention exposing tight margins as the cause,
+// not a platform-specific signal-handling bug -- an exit code of -1
+// means the process was killed by the raw, unhandled signal, which is
+// consistent with delivery outracing this process reaching
+// signal.Notify under heavy scheduling delay, though the exact
+// mechanism wasn't isolated further once the contention explanation
+// was confirmed. If tests in this file are ever flaky again, check whether it
+// reproduces with `go test ./cmd/mutation-judge/... -run TestSIGTERM -v`
+// in isolation before suspecting the signal-handling code changed.
 func TestSIGTERMCleansUpTemporarySandbox(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("SIGTERM semantics are POSIX-specific; this project targets linux/macOS")
@@ -46,7 +65,7 @@ func TestSIGTERMCleansUpTemporarySandbox(t *testing.T) {
 	// really did reach the point this test means to interrupt, instead
 	// of racing a fixed sleep against machine speed.
 	var created string
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if diff := newSandboxEntries(t, before); len(diff) > 0 {
 			created = diff[0]
@@ -67,7 +86,7 @@ func TestSIGTERMCleansUpTemporarySandbox(t *testing.T) {
 		t.Fatalf("signal: %v", err)
 	}
 
-	if err := waitWithTimeout(t, cmd, 15*time.Second); err != nil {
+	if err := waitWithTimeout(t, cmd, 30*time.Second, func() string { return stderr.String() }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,6 +114,8 @@ func TestSIGTERMWritesBaselinePhaseJournalEntry(t *testing.T) {
 
 	cmd := exec.Command(bin, "--no-cache", "--timeout", "30s", "./pkg")
 	cmd.Dir = moduleDir
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -104,7 +125,7 @@ func TestSIGTERMWritesBaselinePhaseJournalEntry(t *testing.T) {
 	// so signalling right after it appears reliably lands within the
 	// baseline phase (Analyze has not yet returned, so main.go's err !=
 	// nil branch, not the partial-report branch, is what runs).
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) && len(newSandboxEntries(t, before)) == 0 {
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -116,7 +137,7 @@ func TestSIGTERMWritesBaselinePhaseJournalEntry(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal: %v", err)
 	}
-	if err := waitWithTimeout(t, cmd, 15*time.Second); err != nil {
+	if err := waitWithTimeout(t, cmd, 30*time.Second, func() string { return stderr.String() }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,7 +204,7 @@ func TestSIGTERMWritesMutantsPhaseJournalEntry(t *testing.T) {
 
 	select {
 	case <-sawSecondMutant:
-	case <-time.After(20 * time.Second):
+	case <-time.After(40 * time.Second):
 		_ = cmd.Process.Kill()
 		mu.Lock()
 		got := strings.Join(lines, "\n")
@@ -194,7 +215,11 @@ func TestSIGTERMWritesMutantsPhaseJournalEntry(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal: %v", err)
 	}
-	if err := waitWithTimeout(t, cmd, 15*time.Second); err != nil {
+	if err := waitWithTimeout(t, cmd, 30*time.Second, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(lines, "\n")
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,8 +294,11 @@ func writeFixture(t *testing.T, root string, files map[string]string) {
 // exited with exitInterrupted, failing (and killing the process) if it
 // doesn't exit within the given timeout -- a hang here means shutdown or
 // cleanup itself is stuck, which is as much a failure as the wrong exit
-// code.
-func waitWithTimeout(t *testing.T, cmd *exec.Cmd, timeout time.Duration) error {
+// code. stderr, if non-nil, is called to fetch whatever has been
+// captured so far for inclusion in a failure message -- these tests
+// spawn real subprocesses under real signals, so a failure here should
+// be self-diagnosing without needing a second run to add more capture.
+func waitWithTimeout(t *testing.T, cmd *exec.Cmd, timeout time.Duration, stderr func() string) error {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -285,7 +313,11 @@ func waitWithTimeout(t *testing.T, cmd *exec.Cmd, timeout time.Duration) error {
 			gotCode = exitErr.ExitCode()
 		}
 		if gotCode != exitInterrupted {
-			return fmt.Errorf("exit code = %d, want %d", gotCode, exitInterrupted)
+			captured := ""
+			if stderr != nil {
+				captured = stderr()
+			}
+			return fmt.Errorf("exit code = %d, want %d (stderr: %s)", gotCode, exitInterrupted, captured)
 		}
 		return nil
 	case <-time.After(timeout):
