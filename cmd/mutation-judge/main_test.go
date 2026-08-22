@@ -32,16 +32,28 @@ import (
 // runs different packages' test binaries concurrently, and this
 // project's own tests/integration package alone runs real subprocesses
 // for tens of seconds) that did not reproduce at all across several
-// repeated runs when these three tests were run in isolation. That
-// confirms resource contention exposing tight margins as the cause,
-// not a platform-specific signal-handling bug -- an exit code of -1
-// means the process was killed by the raw, unhandled signal, which is
-// consistent with delivery outracing this process reaching
-// signal.Notify under heavy scheduling delay, though the exact
-// mechanism wasn't isolated further once the contention explanation
-// was confirmed. If tests in this file are ever flaky again, check whether it
-// reproduces with `go test ./cmd/mutation-judge/... -run TestSIGTERM -v`
-// in isolation before suspecting the signal-handling code changed.
+// repeated runs when these three tests were run in isolation.
+//
+// Root cause, found by inspecting the sandbox-detection helper rather
+// than just widening timing budgets further: sandboxEntries/
+// newSandboxEntries matched *any* OS-temp-directory entry with the
+// "mutation-judge-" prefix (see workspace.CopyModule), the same prefix
+// every invocation of the tool uses. Under `go test ./...`, this
+// package's own tests run concurrently, as separate OS processes, with
+// tests/integration (which builds and runs the real binary against
+// several real fixtures) and internal/workspace's own sandbox tests --
+// any of which can create a same-prefixed temp directory at the same
+// moment. A prefix-only match could pick up *someone else's* sandbox as
+// "the" one this test is waiting for, sending SIGTERM to this test's own
+// child before it had necessarily reached signal.Notify, producing
+// exactly the observed exit code -1 (a raw, unhandled-signal
+// termination) instead of the graceful 130. sandboxEntries now also
+// requires the candidate directory's copied go.mod to name this test's
+// own fixture module, which no concurrently-running unrelated instance
+// of the tool can ever match. If tests in this file are ever flaky
+// again, check whether it reproduces with `go test ./cmd/mutation-judge/...
+// -run TestSIGTERM -v` in isolation before suspecting the
+// signal-handling code changed.
 func TestSIGTERMCleansUpTemporarySandbox(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("SIGTERM semantics are POSIX-specific; this project targets linux/macOS")
@@ -49,7 +61,7 @@ func TestSIGTERMCleansUpTemporarySandbox(t *testing.T) {
 	bin := buildMutationJudge(t)
 	moduleDir := slowTestModule(t)
 
-	before := sandboxEntries(t)
+	before := sandboxEntries(t, sigtermFixtureModule)
 
 	cmd := exec.Command(bin, "--no-cache", "--timeout", "30s", "./pkg")
 	cmd.Dir = moduleDir
@@ -67,7 +79,7 @@ func TestSIGTERMCleansUpTemporarySandbox(t *testing.T) {
 	var created string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if diff := newSandboxEntries(t, before); len(diff) > 0 {
+		if diff := newSandboxEntries(t, sigtermFixtureModule, before); len(diff) > 0 {
 			created = diff[0]
 			break
 		}
@@ -110,7 +122,7 @@ func TestSIGTERMWritesBaselinePhaseJournalEntry(t *testing.T) {
 	}
 	bin := buildMutationJudge(t)
 	moduleDir := slowTestModule(t)
-	before := sandboxEntries(t)
+	before := sandboxEntries(t, sigtermFixtureModule)
 
 	cmd := exec.Command(bin, "--no-cache", "--timeout", "30s", "./pkg")
 	cmd.Dir = moduleDir
@@ -126,10 +138,10 @@ func TestSIGTERMWritesBaselinePhaseJournalEntry(t *testing.T) {
 	// baseline phase (Analyze has not yet returned, so main.go's err !=
 	// nil branch, not the partial-report branch, is what runs).
 	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) && len(newSandboxEntries(t, before)) == 0 {
+	for time.Now().Before(deadline) && len(newSandboxEntries(t, sigtermFixtureModule, before)) == 0 {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(newSandboxEntries(t, before)) == 0 {
+	if len(newSandboxEntries(t, sigtermFixtureModule, before)) == 0 {
 		_ = cmd.Process.Kill()
 		t.Fatal("sandbox directory never appeared")
 	}
@@ -249,11 +261,17 @@ func buildMutationJudge(t *testing.T) string {
 	return bin
 }
 
+// sigtermFixtureModule is slowTestModule's module name, used by
+// sandboxEntries/newSandboxEntries to confirm a candidate sandbox is
+// actually a copy of this fixture and not some other concurrently
+// running instance of the tool.
+const sigtermFixtureModule = "sigtermfixture"
+
 func slowTestModule(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	files := map[string]string{
-		"go.mod":        "module sigtermfixture\n\ngo 1.22\n",
+		"go.mod":        "module " + sigtermFixtureModule + "\n\ngo 1.22\n",
 		"pkg/p.go":      "package pkg\n\nfunc F(n int) int { return n + 1 }\n",
 		"pkg/p_test.go": "package pkg\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) {\n\ttime.Sleep(6 * time.Second)\n\tif F(1) != 2 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n",
 	}
@@ -344,7 +362,17 @@ func lastJournalEntry(t *testing.T, moduleDir string) journalEntry {
 	return entry
 }
 
-func sandboxEntries(t *testing.T) map[string]bool {
+// sandboxEntries lists OS-temp-directory entries that are both a
+// mutation-judge sandbox (the "mutation-judge-" prefix from
+// workspace.CopyModule) AND a copy of this test's own fixture module,
+// identified by the module name in the sandbox's copied go.mod. The
+// module-name check is what makes this safe under `go test ./...`,
+// where other packages (tests/integration, internal/workspace) can be
+// creating same-prefixed sandboxes for entirely different modules at
+// the same moment -- a prefix-only match previously could and did pick
+// up one of those instead of this test's own child, see the comment
+// above TestSIGTERMCleansUpTemporarySandbox.
+func sandboxEntries(t *testing.T, wantModule string) map[string]bool {
 	t.Helper()
 	entries, err := os.ReadDir(os.TempDir())
 	if err != nil {
@@ -352,17 +380,37 @@ func sandboxEntries(t *testing.T) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "mutation-judge-") {
-			out[e.Name()] = true
+		if !strings.HasPrefix(e.Name(), "mutation-judge-") {
+			continue
 		}
+		if !isFixtureSandbox(filepath.Join(os.TempDir(), e.Name()), wantModule) {
+			continue
+		}
+		out[e.Name()] = true
 	}
 	return out
 }
 
-func newSandboxEntries(t *testing.T, before map[string]bool) []string {
+// isFixtureSandbox reports whether dir looks like a mutation-judge
+// sandbox copied from a module named wantModule: CopyModule copies the
+// whole module tree, go.mod included, so a real match's go.mod always
+// starts with "module <wantModule>". The copy is not instantaneous, so
+// a candidate whose go.mod hasn't been written yet (or belongs to a
+// different module entirely) is simply not a match yet -- callers keep
+// polling rather than treating that as an error.
+func isFixtureSandbox(dir, wantModule string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	first := strings.SplitN(string(data), "\n", 2)[0]
+	return strings.TrimSpace(first) == "module "+wantModule
+}
+
+func newSandboxEntries(t *testing.T, wantModule string, before map[string]bool) []string {
 	t.Helper()
 	var out []string
-	for name := range sandboxEntries(t) {
+	for name := range sandboxEntries(t, wantModule) {
 		if !before[name] {
 			out = append(out, name)
 		}
