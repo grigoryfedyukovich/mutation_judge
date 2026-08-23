@@ -43,7 +43,7 @@ SURVIVED M-... examples/boundary/counter.go:5:7 replace comparison > with >=
     +    if n >= 0 {
 ```
 
-The [full tutorial](docs/tutorial.md) follows this survivor through test repair, then covers selected-test scope, arithmetic invalids, generated source, Git-diff mode, JSON/HTML reports, caching, and CI policy.
+The [full tutorial](docs/tutorial.md) follows this survivor through test repair, then covers selected-test scope, arithmetic invalids, generated source, Git-diff mode, JSON/HTML/SARIF/GitHub-annotations reports, caching, and CI policy.
 
 ## Installation
 
@@ -85,7 +85,7 @@ Important flags:
 | `--test-run REGEXP` | Pass a test selection regexp to `go test -run` |
 | `--timeout DURATION` | Per-baseline and per-mutant command deadline |
 | `--max-mutants N` | Deterministic execution bound; `0` is unlimited |
-| `--format` | `text`, `json`, or `html` |
+| `--format` | `text`, `json`, `html`, `sarif` (GitHub code scanning), or `github` (inline PR annotations via workflow commands, no upload step) |
 | `--output PATH` | Write the report to a file |
 | `--no-cache` | Disable content-addressed result reuse |
 | `--ci-min-score PCT` | Return the configured CI failure code below this score |

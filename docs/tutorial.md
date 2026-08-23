@@ -1,6 +1,6 @@
 # Mutation Judge tutorial
 
-This tutorial starts with a deliberately weak test suite, uses a surviving mutant to identify the missing case, repairs the tests, and then moves through boolean attribution, test selection, invalid mutants, generated code, Git-diff analysis, reports, caching, and CI policy.
+This tutorial starts with a deliberately weak test suite, uses a surviving mutant to identify the missing case, repairs the tests, and then moves through boolean attribution, test selection, invalid mutants, generated code, Git-diff analysis, reports, caching, CI policy, and SARIF/GitHub annotations.
 
 All commands are intended to run from the repository root.
 
@@ -589,7 +589,47 @@ A minimal GitHub Actions step is:
 
 For an incremental pull-request job, fetch the target branch and add `--changed origin/main`. For early adoption, first archive reports without enforcing a threshold. Establish the policy only after reviewing invalid rates, equivalent survivors, runtime, and selection scope on the actual repository.
 
-## 15. Diagnose common outcomes
+## 15. Emit SARIF or inline GitHub annotations
+
+Two more `--format` values exist specifically for surfacing survivors where a reviewer will actually see them, without requiring `jq` against the JSON report:
+
+```bash
+./bin/mutation-judge --operators boundary --format sarif --output mutation-report.sarif ./...
+```
+
+`--format sarif` produces a SARIF 2.1.0 log. Uploading it makes each survived mutant a GitHub code scanning alert, with the file, line, and suggested test attached, and dismissible/trackable like any other code scanning finding:
+
+```yaml
+- name: Run Mutation Judge
+  run: |
+    mkdir -p ./bin
+    go build -o ./bin/mutation-judge ./cmd/mutation-judge
+    ./bin/mutation-judge --format sarif --output mutation-report.sarif ./...
+
+- name: Upload SARIF
+  if: always()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: mutation-report.sarif
+```
+
+Only `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts appear as SARIF results (`warning`, `note`, and `note` respectively) -- these are the three verdicts that mean "not positively confirmed as tested" (see [`docs/semantics.md`](semantics.md)). `KILLED` and `INVALID` never appear; there's nothing actionable to flag. Each result's `partialFingerprints` carries the mutant's own content-addressed ID, so GitHub can track one alert across commits instead of treating every run as entirely new findings.
+
+For a lighter-weight integration with no separate upload step, `--format github` writes GitHub Actions workflow commands directly to stdout:
+
+```bash
+./bin/mutation-judge --operators boolean --test-run '^TestVIPDiscount$' ./examples/test_selection --format github
+```
+
+```text
+::warning file=examples/test_selection/discount.go,line=5,endLine=5,col=9,title=MJ-BOOL-DROP-RIGHT M-3e1468a21c0a::mutation survived: delete the right operand of ||
+suggested test: add a case where vip is false and hasCoupon is true, then assert the disjunction remains true
+::notice title=mutation-judge summary::50.0% excluding invalid/timeout/unknown/unsupported (1 killed, 1 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported, 1 flagged)
+```
+
+(The `%0A` line break and `%25` percent sign in the tool's actual raw output are GitHub's own workflow-command escaping for newlines and `%` inside a message; shown here unescaped for readability.) Run inside any workflow step and these lines become inline PR annotations immediately, no artifact upload required. A run with nothing to flag still emits the summary `::notice::` line, so a clean pass is visible in the log rather than producing silent output.
+
+## 16. Diagnose common outcomes
 
 ### Baseline tests fail
 
@@ -630,7 +670,7 @@ Increase the explicit timeout only after deciding that the test is expected to c
 
 The process may have failed before Go printed a `--- FAIL:` line, for example during package initialization or from a process-wide crash. Inspect `diagnostic.evidence.backend_output` in JSON.
 
-## 16. Apply Mutation Judge to a real package
+## 17. Apply Mutation Judge to a real package
 
 A practical sequence is:
 
@@ -664,7 +704,7 @@ For every survivor, record one of three conclusions:
 2. **Equivalent or unreachable:** document the guard or invariant that makes the mutation irrelevant.
 3. **Operator not useful here:** exclude the operator from the policy scope rather than inflating the score with noise.
 
-## 17. Run all packaged examples
+## 18. Run all packaged examples
 
 The example runner builds a temporary executable and exercises all examples that do not require a Git diff:
 

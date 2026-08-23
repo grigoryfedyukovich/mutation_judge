@@ -517,7 +517,9 @@ func Validate(c Config) error {
 	if c.Timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
-	if c.Format != "text" && c.Format != "json" && c.Format != "html" {
+	switch c.Format {
+	case "text", "json", "html", "sarif", "github":
+	default:
 		return fmt.Errorf("unsupported format %q", c.Format)
 	}
 	if c.MaxMutants < 0 {

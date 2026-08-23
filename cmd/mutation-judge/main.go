@@ -59,7 +59,7 @@ func run() (code int) {
 	operators := fs.String("operators", strings.Join(cfg.Operators, ","), "comma-separated operators: boundary,boolean,arithmetic,errorreturn,switch,loop,channel")
 	timeout := fs.Duration("timeout", cfg.Timeout, "maximum time for each test run")
 	testRun := fs.String("test-run", cfg.TestRun, "Go test -run regular expression")
-	format := fs.String("format", cfg.Format, "report format: text, json, html")
+	format := fs.String("format", cfg.Format, "report format: text, json, html, sarif, github")
 	output := fs.String("output", cfg.Output, "write report to this path instead of stdout")
 	cacheDir := fs.String("cache-dir", cfg.CacheDir, "content-addressed cache directory")
 	noCache := fs.Bool("no-cache", !cfg.Cache, "disable the result cache")

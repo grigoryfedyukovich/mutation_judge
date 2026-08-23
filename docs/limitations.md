@@ -20,10 +20,11 @@ None outstanding. The last item, a persistent journal for abnormal process termi
 
 The four operators formerly listed under "Optional expansion" as future work -- error-return, switch-case deletion, loop-bound changes, and channel/select behavior -- are now implemented (`errorreturn`, `switch`, `loop`, `channel`; all opt-in, none in `Default()`). See `docs/semantics.md` for what each one matches and, for `loop` and `channel`, what each deliberately does *not* mutate to avoid producing slow, uninformative `TIMEOUT` verdicts.
 
+"GitHub annotations and SARIF output," also formerly listed under "Optional expansion," is now implemented as two more `--format` values: `sarif` (SARIF 2.1.0, for `github/codeql-action/upload-sarif`) and `github` (workflow-command annotations written directly to stdout, no upload step). Both apply the same inclusion policy -- only `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts produce a finding, since those are the only three verdicts that mean "not positively confirmed as tested" (`KILLED` and `INVALID` are not actionable findings). See `docs/tutorial.md` section 15.
+
 ## Optional expansion
 
 - Mutant-to-package and mutant-to-test selection using coverage.
 - Parallel isolated workers and distributed CI manifests.
 - Assertion/contract attribution beyond failing test names.
-- GitHub annotations and SARIF output.
 - Cross-run HTML comparison and trend visualization.

@@ -86,3 +86,15 @@ git diff --unified=0 HEAD -- examples/incremental/parser.go
 ```
 
 Only mutation spans overlapping the changed current-source line are retained.
+
+## Report formats for CI
+
+`--format sarif` and `--format github` reuse any example; the ones in `run-all.sh` demonstrate them against `boundary` (one survivor) and `boundary_fixed` (a clean, fully-killed run) so you can see both an actual finding and the "nothing to flag" case:
+
+```bash
+./bin/mutation-judge --no-cache --operators boundary --format sarif ./examples/boundary
+./bin/mutation-judge --no-cache --operators boundary --format github ./examples/boundary
+./bin/mutation-judge --no-cache --operators boundary --format github ./examples/boundary_fixed
+```
+
+SARIF output is meant for `github/codeql-action/upload-sarif`, turning survivors into GitHub code scanning alerts. `--format github` writes workflow-command annotations straight to stdout for inline PR annotations with no upload step. Both only report `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts -- see `docs/tutorial.md` section 15 and `docs/semantics.md`.

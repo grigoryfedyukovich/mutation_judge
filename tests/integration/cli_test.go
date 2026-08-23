@@ -334,6 +334,89 @@ type reportSummary struct {
 	} `json:"results"`
 }
 
+func TestSARIFOutputEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "sarif", "./examples/boundary")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var log struct {
+		Version string `json:"version"`
+		Runs    []struct {
+			Results []struct {
+				RuleID  string `json:"ruleId"`
+				Level   string `json:"level"`
+				Message struct {
+					Text string `json:"text"`
+				} `json:"message"`
+				Locations []struct {
+					PhysicalLocation struct {
+						ArtifactLocation struct {
+							URI string `json:"uri"`
+						} `json:"artifactLocation"`
+						Region struct {
+							StartLine int `json:"startLine"`
+						} `json:"region"`
+					} `json:"physicalLocation"`
+				} `json:"locations"`
+				PartialFingerprints map[string]string `json:"partialFingerprints"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(out, &log); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if log.Version != "2.1.0" {
+		t.Fatalf("version = %q, want 2.1.0", log.Version)
+	}
+	if len(log.Runs) != 1 || len(log.Runs[0].Results) != 1 {
+		t.Fatalf("expected exactly 1 run with 1 result (the boundary survivor), got: %s", out)
+	}
+	res := log.Runs[0].Results[0]
+	if res.Level != "warning" || res.Locations[0].PhysicalLocation.ArtifactLocation.URI != "examples/boundary/counter.go" {
+		t.Fatalf("unexpected result: %+v\nfull output:\n%s", res, out)
+	}
+	if res.PartialFingerprints["mutationJudgeMutantId/v1"] == "" {
+		t.Fatalf("missing mutant-id fingerprint: %+v", res)
+	}
+}
+
+func TestGitHubAnnotationsOutputEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	survivor := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "github", "./examples/boundary")
+	survivor.Dir = root
+	out, err := survivor.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "::warning file=examples/boundary/counter.go,line=5") {
+		t.Fatalf("expected a warning annotation at the survivor's location:\n%s", text)
+	}
+	if !strings.Contains(text, "::notice title=mutation-judge summary::") {
+		t.Fatalf("expected a summary notice line:\n%s", text)
+	}
+
+	clean := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "github", "./examples/boundary_fixed")
+	clean.Dir = root
+	out, err = clean.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	text = string(out)
+	if strings.Contains(text, "::warning ") {
+		t.Fatalf("a fully-killed run must not produce any warning annotations:\n%s", text)
+	}
+	if !strings.Contains(text, "::notice title=mutation-judge summary::") {
+		t.Fatalf("a clean run must still emit a summary line:\n%s", text)
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

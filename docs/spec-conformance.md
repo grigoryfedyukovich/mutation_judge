@@ -13,7 +13,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | Exact survivor diff and suggestion | Implemented | Every surviving result carries a unified diff and operator-specific scenario. |
 | Git diff mode | Implemented | Zero-context changed-line mapping with deleted-file and zero-count handling. |
 | Coverage explanation | Implemented | Baseline statement coverage annotates each mutation span. |
-| Text, JSON, HTML | Implemented | JSON schema `mutation-judge.report/v1`; embedded maintainable HTML template. |
+| Text, JSON, HTML, SARIF, GitHub annotations | Implemented | JSON schema `mutation-judge.report/v1`; embedded maintainable HTML template; SARIF 2.1.0 (`internal/report/sarif.go`) and GitHub workflow-command annotations (`internal/report/github.go`) for `SURVIVED`/`TIMEOUT`/`UNKNOWN` verdicts. |
 | Strict project configuration | Implemented as a documented subset | Flat scalar/list TOML or YAML syntax, strict unknown-key rejection, CLI overrides, `--print-config`. |
 | Content-addressed cache | Implemented | Tool version, operator-semantics version, source digest, effective config, backend identity/version, and mutant identity. |
 | Deterministic bounds | Implemented | Reports distinguish candidates discovered before and retained after `max_mutants`. |

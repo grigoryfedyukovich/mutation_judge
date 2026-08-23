@@ -30,6 +30,10 @@ func Render(w io.Writer, format string, r model.Report) error {
 		return renderHTML(w, r)
 	case "text":
 		return renderText(w, r)
+	case "sarif":
+		return renderSARIF(w, r)
+	case "github":
+		return renderGitHubAnnotations(w, r)
 	default:
 		return fmt.Errorf("unsupported report format %q", format)
 	}

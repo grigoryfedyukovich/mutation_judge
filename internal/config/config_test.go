@@ -164,3 +164,21 @@ func TestValidateRejectsUnknownOperator(t *testing.T) {
 		t.Fatal("expected an error for an unknown operator")
 	}
 }
+
+func TestValidateAcceptsNewReportFormats(t *testing.T) {
+	for _, f := range []string{"sarif", "github"} {
+		c := Default()
+		c.Format = f
+		if err := Validate(c); err != nil {
+			t.Fatalf("format %q: expected it to validate, got: %v", f, err)
+		}
+	}
+}
+
+func TestValidateRejectsUnknownFormat(t *testing.T) {
+	c := Default()
+	c.Format = "yaml"
+	if err := Validate(c); err == nil {
+		t.Fatal("expected an error for an unknown format")
+	}
+}
