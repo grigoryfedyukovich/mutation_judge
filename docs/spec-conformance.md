@@ -6,7 +6,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 
 | Specification area | Status | Evidence |
 |---|---|---|
-| Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, and opt-in arithmetic operators in `internal/frontend`. |
+| Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and four further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`) in `internal/frontend`. |
 | One mutant at a time | Implemented | Atomic apply/run/restore in one isolated temporary module copy. |
 | Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, and `UNSUPPORTED` model values. |
 | Responsible tests | Implemented with documented limits | Standard `--- FAIL:` events are extracted and sorted. |
@@ -20,7 +20,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | Backend abstraction | Implemented | Narrow `runner.Backend`, optional backend name/version descriptor, deterministic fakes in tests. |
 | Local/privacy boundary | Implemented | No shell interpolation or source upload; normal execution requires no network. |
 | CI policy exit | Implemented | Successful analysis returns zero unless an explicit score policy fails. |
-| Three running examples | Exceeded | Seven examples plus `examples/run-all.sh`. |
+| Three running examples | Exceeded | Eleven examples plus `examples/run-all.sh`. |
 | Real-world evaluation | Implemented, bounded | Self-hosting slice in `docs/evaluation.md`. |
 
 ## Clarifications

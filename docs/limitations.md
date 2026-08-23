@@ -18,11 +18,12 @@
 
 None outstanding. The last item, a persistent journal for abnormal process termination, is now implemented: `cmd/mutation-judge` appends one NDJSON entry (timestamp, signal, phase, patterns, operators, and progress counts) to `.mutation-judge/journal.ndjson` on every SIGINT/SIGTERM, independent of `--no-cache`. See `ISSUES.md`.
 
+The four operators formerly listed under "Optional expansion" as future work -- error-return, switch-case deletion, loop-bound changes, and channel/select behavior -- are now implemented (`errorreturn`, `switch`, `loop`, `channel`; all opt-in, none in `Default()`). See `docs/semantics.md` for what each one matches and, for `loop` and `channel`, what each deliberately does *not* mutate to avoid producing slow, uninformative `TIMEOUT` verdicts.
+
 ## Optional expansion
 
 - Mutant-to-package and mutant-to-test selection using coverage.
 - Parallel isolated workers and distributed CI manifests.
 - Assertion/contract attribution beyond failing test names.
-- Additional carefully scoped operators: error-return removal, switch-case deletion, channel/select behavior, and loop-bound changes.
 - GitHub annotations and SARIF output.
 - Cross-run HTML comparison and trend visualization.

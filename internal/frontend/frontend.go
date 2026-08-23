@@ -16,7 +16,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v1"
+const SemanticsVersion = "mutation-judge-operators/v2"
 
 type Options struct {
 	Operators        map[string]bool
@@ -127,6 +127,82 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				add("boolean", "MJ-BOOL-LITERAL", x.Pos(), x.End(), repl,
 					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant")
 			}
+		case *ast.IfStmt:
+			if opts.Operators["errorreturn"] {
+				if checked, ok := notNilOperand(x.Cond); ok {
+					checkedIdent, ok := checked.(*ast.Ident)
+					if ok {
+						for _, stmt := range x.Body.List {
+							ret, ok := stmt.(*ast.ReturnStmt)
+							if !ok || len(ret.Results) == 0 {
+								continue
+							}
+							last := ret.Results[len(ret.Results)-1]
+							lastIdent, ok := last.(*ast.Ident)
+							if !ok || lastIdent.Name != checkedIdent.Name {
+								continue
+							}
+							add("errorreturn", "MJ-ERR-SWALLOW", last.Pos(), last.End(), "nil",
+								fmt.Sprintf("swallow the checked value: replace returned %s with nil", checkedIdent.Name),
+								fmt.Sprintf("add a test that triggers this branch and asserts the propagated %s is actually non-nil, not just that the call fails", checkedIdent.Name))
+						}
+					}
+				}
+			}
+		case *ast.CaseClause:
+			if opts.Operators["switch"] && len(x.Body) > 0 {
+				label := "default"
+				if len(x.List) > 0 {
+					label = compact(source(src, fset, x.List[0].Pos(), x.List[len(x.List)-1].End()))
+				}
+				add("switch", "MJ-SWITCH-DROP-CASE", x.Pos(), x.End(), "",
+					fmt.Sprintf("delete case %s", label),
+					fmt.Sprintf("add a test that exercises case %s and would fail if that case were missing", label))
+			}
+		case *ast.ForStmt:
+			if opts.Operators["loop"] {
+				if x.Cond != nil {
+					add("loop", "MJ-LOOP-COND-FALSE", x.Cond.Pos(), x.Cond.End(), "false",
+						"force the loop condition false (loop body never executes)",
+						"add a test that depends on the loop body actually running at least once")
+				} else if len(x.Body.List) > 0 {
+					first := x.Body.List[0]
+					add("loop", "MJ-LOOP-BREAK-FIRST", first.Pos(), first.End(), "break",
+						"insert an immediate break (loop body never executes)",
+						"add a test that depends on the loop body actually running")
+				}
+			}
+		case *ast.RangeStmt:
+			if opts.Operators["loop"] && len(x.Body.List) > 0 {
+				first := x.Body.List[0]
+				add("loop", "MJ-LOOP-BREAK-FIRST", first.Pos(), first.End(), "break",
+					"insert an immediate break (loop body never executes)",
+					"add a test that depends on the loop body actually running")
+			}
+		case *ast.CallExpr:
+			if opts.Operators["channel"] {
+				if fn, ok := x.Fun.(*ast.Ident); ok && fn.Name == "make" && len(x.Args) == 2 {
+					if _, ok := x.Args[0].(*ast.ChanType); ok {
+						capArg := x.Args[1]
+						capSrc := compact(source(src, fset, capArg.Pos(), capArg.End()))
+						if capSrc != "0" {
+							add("channel", "MJ-CHAN-UNBUFFER", capArg.Pos(), capArg.End(), "0",
+								fmt.Sprintf("replace channel capacity %s with 0 (make it unbuffered)", capSrc),
+								"add a test that depends on the channel being buffered, e.g. a non-blocking send before any receiver is ready")
+						}
+					}
+				}
+			}
+		case *ast.CommClause:
+			if opts.Operators["channel"] && len(x.Body) > 0 {
+				label := "default"
+				if x.Comm != nil {
+					label = compact(source(src, fset, x.Comm.Pos(), x.Comm.End()))
+				}
+				add("channel", "MJ-CHAN-SELECT-DROP-CASE", x.Pos(), x.End(), "",
+					fmt.Sprintf("delete select case %s", label),
+					fmt.Sprintf("add a test that exercises the %s communication and would fail if that case were missing", label))
+			}
 		}
 		return true
 	})
@@ -172,6 +248,36 @@ func arithmeticReplacement(op token.Token) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// notNilOperand returns the non-nil side of a top-level `X != nil` (or
+// `nil != X`) comparison -- the shape the errorreturn operator targets
+// for the canonical `if err != nil { return err }` pattern. This pass
+// has no type information, so it cannot confirm the checked value is
+// actually an error; anything else guarded the same way (a nil-checked
+// pointer, map, or slice returned directly by the same statement) is
+// matched too, which is intentional -- an early return whose value gets
+// silently swallowed is a meaningful mutant regardless of the checked
+// value's exact type.
+func notNilOperand(cond ast.Expr) (ast.Expr, bool) {
+	be, ok := cond.(*ast.BinaryExpr)
+	if !ok || be.Op != token.NEQ {
+		return nil, false
+	}
+	xNil, yNil := isNilIdent(be.X), isNilIdent(be.Y)
+	switch {
+	case yNil && !xNil:
+		return be.X, true
+	case xNil && !yNil:
+		return be.Y, true
+	default:
+		return nil, false
+	}
+}
+
+func isNilIdent(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
 }
 
 func boundarySuggestion(x *ast.BinaryExpr, src []byte, fset *token.FileSet) string {

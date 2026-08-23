@@ -49,6 +49,13 @@ Baseline statement coverage is collected once. It annotates whether the mutated 
 
 Boundary mutations alter strictness while preserving operands. Boolean connector deletion replaces a complete `&&` or `||` expression by either parenthesized operand. Negation deletion removes unary `!`; literal mutation flips boolean constants. Arithmetic mutation is optional because its semantic distance and invalid-mutant rate are higher.
 
+Four further operators are opt-in, each targeting a Go-specific control-flow pattern rather than a single expression:
+
+- **errorreturn** matches `if X != nil { ... return ...X }` -- an early return whose last result is exactly the value just checked against nil -- and replaces that returned value with `nil`, silently swallowing it. This pass carries no type information, so it cannot confirm `X` is specifically an `error`; anything else guarded and returned the same way is matched too, which is intentional, since the mutant is meaningful regardless of the checked value's exact type.
+- **switch** deletes an entire `case` clause (its label and body together), including `default`, from a `switch` or type-switch statement.
+- **loop** forces a `for` loop's body to never execute: a conditional `for` has its condition replaced with `false`; an unconditional `for {}` or a `range` loop has its first body statement replaced with `break`. Deliberately excluded is any mutation that could make a loop run forever (e.g. forcing a condition to `true`), since it produces a slow, uninformative TIMEOUT verdict on every occurrence rather than a fast KILLED or SURVIVED.
+- **channel** replaces a `make(chan T, N)` capacity expression with `0` (buffered becomes unbuffered), and deletes an entire `select` `case` clause (comm statement and body together), including `default`. Deliberately excluded is deleting a `close(ch)` call: unlike the buffered-to-unbuffered mutation, which Go's runtime deadlock detector generally catches quickly if it stops all progress, a receiver still waiting on a channel that's never closed can block for the entire configured timeout with nothing left to detect, for the same reason the loop operator avoids ever-true conditions.
+
 ## Trust and reproducibility
 
 - The original working tree is read-only from the analyzer's perspective. Mutation writes are atomic inside a temporary copy, source path escapes are rejected, and source symlinks cannot redirect writes outside the sandbox.

@@ -56,7 +56,7 @@ func run() (code int) {
 
 	fs := flag.NewFlagSet("mutation-judge", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	operators := fs.String("operators", strings.Join(cfg.Operators, ","), "comma-separated operators: boundary,boolean,arithmetic")
+	operators := fs.String("operators", strings.Join(cfg.Operators, ","), "comma-separated operators: boundary,boolean,arithmetic,errorreturn,switch,loop,channel")
 	timeout := fs.Duration("timeout", cfg.Timeout, "maximum time for each test run")
 	testRun := fs.String("test-run", cfg.TestRun, "Go test -run regular expression")
 	format := fs.String("format", cfg.Format, "report format: text, json, html")

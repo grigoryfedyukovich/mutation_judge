@@ -108,3 +108,225 @@ func TestBooleanSuggestionsDescribeDistinguishingAssignments(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscoverErrorReturn(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func f() error {
+	err := step()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func step() error { return nil }
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"errorreturn": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("expected exactly 1 mutant, got %d: %#v", len(ms), ms)
+	}
+	m := ms[0]
+	if m.RuleID != "MJ-ERR-SWALLOW" || m.Replacement != "nil" || m.Original != "err" {
+		t.Fatalf("unexpected mutant: %#v", m)
+	}
+}
+
+func TestDiscoverErrorReturnIgnoresUnrelatedReturn(t *testing.T) {
+	d := t.TempDir()
+	// The if-body's return does not return the checked identifier, so no
+	// errorreturn mutant should be produced.
+	src := []byte(`package p
+
+func f() int {
+	err := step()
+	if err != nil {
+		return -1
+	}
+	return 0
+}
+
+func step() error { return nil }
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"errorreturn": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 0 {
+		t.Fatalf("expected no mutants, got %d: %#v", len(ms), ms)
+	}
+}
+
+func TestDiscoverSwitchDropsCase(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func label(n int) string {
+	switch {
+	case n > 0:
+		return "positive"
+	case n < 0:
+		return "negative"
+	default:
+		return "zero"
+	}
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"switch": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 3 {
+		t.Fatalf("expected 3 case-deletion mutants (2 cases + default), got %d: %#v", len(ms), ms)
+	}
+	sawDefault := false
+	for _, m := range ms {
+		if m.RuleID != "MJ-SWITCH-DROP-CASE" || m.Replacement != "" {
+			t.Fatalf("unexpected mutant: %#v", m)
+		}
+		if strings.Contains(m.Description, "default") {
+			sawDefault = true
+		}
+	}
+	if !sawDefault {
+		t.Fatal("expected one mutant to delete the default case")
+	}
+}
+
+func TestDiscoverLoopForcesConditionFalse(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func sum(xs []int) int {
+	total := 0
+	for i := 0; i < len(xs); i++ {
+		total += xs[i]
+	}
+	return total
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"loop": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("expected exactly 1 mutant, got %d: %#v", len(ms), ms)
+	}
+	if ms[0].RuleID != "MJ-LOOP-COND-FALSE" || ms[0].Replacement != "false" {
+		t.Fatalf("unexpected mutant: %#v", ms[0])
+	}
+}
+
+func TestDiscoverLoopBreaksFirstStatementInRangeAndInfiniteFor(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func rangeSum(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+func infinite() int {
+	n := 0
+	for {
+		n++
+		if n > 10 {
+			return n
+		}
+	}
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"loop": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 2 {
+		t.Fatalf("expected 2 mutants (range + infinite for), got %d: %#v", len(ms), ms)
+	}
+	for _, m := range ms {
+		if m.RuleID != "MJ-LOOP-BREAK-FIRST" || m.Replacement != "break" {
+			t.Fatalf("unexpected mutant: %#v", m)
+		}
+	}
+}
+
+func TestDiscoverChannelUnbuffer(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func newQueue() chan int {
+	return make(chan int, 8)
+}
+
+func newSignal() chan struct{} {
+	return make(chan struct{})
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"channel": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("expected exactly 1 mutant (unbuffered make must not be re-mutated), got %d: %#v", len(ms), ms)
+	}
+	if ms[0].RuleID != "MJ-CHAN-UNBUFFER" || ms[0].Replacement != "0" || ms[0].Original != "8" {
+		t.Fatalf("unexpected mutant: %#v", ms[0])
+	}
+}
+
+func TestDiscoverChannelSelectDropsCase(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func recvOne(a, b chan int) int {
+	select {
+	case v := <-a:
+		return v
+	case v := <-b:
+		return v
+	default:
+		return -1
+	}
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"channel": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 3 {
+		t.Fatalf("expected 3 select-case-deletion mutants, got %d: %#v", len(ms), ms)
+	}
+	for _, m := range ms {
+		if m.RuleID != "MJ-CHAN-SELECT-DROP-CASE" || m.Replacement != "" {
+			t.Fatalf("unexpected mutant: %#v", m)
+		}
+	}
+}

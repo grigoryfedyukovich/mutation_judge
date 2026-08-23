@@ -148,3 +148,19 @@ func TestYAMLEmptyValueWithNoBlockListIsStillAnError(t *testing.T) {
 		t.Fatal("expected an error for an empty scalar value")
 	}
 }
+
+func TestValidateAcceptsAllKnownOperators(t *testing.T) {
+	c := Default()
+	c.Operators = []string{"boundary", "boolean", "arithmetic", "errorreturn", "switch", "loop", "channel"}
+	if err := Validate(c); err != nil {
+		t.Fatalf("expected all seven known operators to validate, got: %v", err)
+	}
+}
+
+func TestValidateRejectsUnknownOperator(t *testing.T) {
+	c := Default()
+	c.Operators = []string{"boundary", "not-a-real-operator"}
+	if err := Validate(c); err == nil {
+		t.Fatal("expected an error for an unknown operator")
+	}
+}

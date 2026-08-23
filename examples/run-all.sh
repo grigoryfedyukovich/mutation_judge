@@ -22,5 +22,9 @@ run "filtered selected tests" --operators boolean --test-run '^TestVIPDiscount$'
 run "arithmetic and invalid" --operators arithmetic ./examples/arithmetic
 run "generated excluded" --operators boolean ./examples/generated
 run "generated included" --operators boolean --include-generated ./examples/generated
+run "error-return survivor" --operators errorreturn ./examples/errorreturn
+run "switch case deletion" --operators switch ./examples/switch
+run "loop skip" --operators loop ./examples/loop
+run "channel buffer mutation" --operators channel ./examples/channel
 
 printf '\n\nAll non-Git examples completed successfully.\n'

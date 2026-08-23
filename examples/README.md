@@ -24,6 +24,10 @@ Or execute all non-Git examples:
 | `arithmetic` | Numeric kills and a compile-invalid string mutation | `./bin/mutation-judge --no-cache --operators arithmetic ./examples/arithmetic` | 2 killed, 1 invalid |
 | `generated` | Generated source excluded by default and included explicitly | `./bin/mutation-judge --no-cache --operators boolean --include-generated ./examples/generated` | 4 killed |
 | `incremental` | Mutation candidates restricted to changed Git lines | `./bin/mutation-judge --changed HEAD ./examples/incremental` | Depends on the current diff |
+| `errorreturn` | A swallowed error (`err` replaced with `nil`) that a weak test never notices | `./bin/mutation-judge --no-cache --operators errorreturn ./examples/errorreturn` | 1 survived |
+| `switch` | Deleting a `case` clause: killed, an untested case surviving, and `default` removal breaking compilation | `./bin/mutation-judge --no-cache --operators switch ./examples/switch` | 1 killed, 1 survived, 1 invalid |
+| `loop` | Forcing a `for` loop's condition false, and breaking out of a `range` loop's body immediately | `./bin/mutation-judge --no-cache --operators loop ./examples/loop` | 1 killed, 1 survived |
+| `channel` | A buffered channel's capacity replaced with 0, probed safely with `select`/`default` | `./bin/mutation-judge --no-cache --operators channel ./examples/channel` | 1 killed |
 
 The examples are intentionally small enough that each mutant can be reasoned about manually. The exact timing fields vary by machine; mutant IDs remain stable only for the same path, source offset, original text, and replacement.
 
