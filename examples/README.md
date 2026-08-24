@@ -98,3 +98,16 @@ Only mutation spans overlapping the changed current-source line are retained.
 ```
 
 SARIF output is meant for `github/codeql-action/upload-sarif`, turning survivors into GitHub code scanning alerts. `--format github` writes workflow-command annotations straight to stdout for inline PR annotations with no upload step. Both only report `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts -- see `docs/tutorial.md` section 15 and `docs/semantics.md`.
+
+## Tracking survivors across runs
+
+`run-all.sh`'s "compare and trend" section is self-contained: it copies `boundary`'s production file into a scratch module, analyzes it once with the checked-in weak test (a real survivor), patches only the test file in place, and analyzes again -- since the production file never moves, the mutant's ID stays the same between the two reports, so the comparison shows a genuine fix, not just two unrelated packages that happen to share a mutation pattern:
+
+```bash
+./bin/mutation-judge compare --baseline baseline.json --current current.json
+./bin/mutation-judge record --label "PR #101" baseline.json
+./bin/mutation-judge record --label "PR #102" current.json
+./bin/mutation-judge trend
+```
+
+`compare` and `record`/`trend` are subcommands (they come before any flags), and they only read existing `--format json` reports -- no analysis runs, so they work on any two reports you already have. See `docs/tutorial.md` section 16, in particular the mutant-ID matching caveat before relying on `compare` across a file a change actually edits.

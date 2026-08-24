@@ -28,7 +28,46 @@ const (
 	exitInterrupted = 130 // matches the conventional 128+SIGINT shell exit code
 )
 
-func main() { os.Exit(run()) }
+func main() {
+	// "compare", "record", and "trend" are subcommands layered on top
+	// of the single default analysis command below -- see
+	// docs/tutorial.md section 16. Checking os.Args[1] here, before
+	// any of the default command's own flag parsing or config
+	// loading, is what lets them coexist with the original
+	// `mutation-judge [flags] [patterns]` invocation without changing
+	// its behavior at all. The one edge case this creates: a package
+	// pattern literally named "compare", "record", or "trend" as the
+	// first argument would previously have been analyzed as a
+	// package; it's now intercepted as a subcommand instead.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "compare":
+			os.Exit(withRecover(os.Args[1:], func() int { return runCompare(os.Args[2:]) }))
+		case "record":
+			os.Exit(withRecover(os.Args[1:], func() int { return runRecord(os.Args[2:]) }))
+		case "trend":
+			os.Exit(withRecover(os.Args[1:], func() int { return runTrend(os.Args[2:]) }))
+		}
+	}
+	os.Exit(run())
+}
+
+// withRecover runs fn with the same panic-to-exitInternal recovery
+// behavior run() gives the default command, so a bug in one of the
+// newer subcommands fails the same predictable way instead of an
+// unhandled panic and stack trace with no exit-code guidance.
+// argsForRepro is echoed back in the error text verbatim (it should
+// include the subcommand name itself, e.g. os.Args[1:]) so the
+// printed repro command is actually correct to copy and paste.
+func withRecover(argsForRepro []string, fn func() int) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "mutation-judge internal error: %v\nreproduce with: mutation-judge %s\nversion: %s\n%s", r, strings.Join(argsForRepro, " "), version, debug.Stack())
+			code = exitInternal
+		}
+	}()
+	return fn()
+}
 
 func run() (code int) {
 	defer func() {
@@ -77,6 +116,7 @@ func run() (code int) {
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: mutation-judge [flags] [package patterns]")
 		fmt.Fprintln(fs.Output(), "Examples:\n  mutation-judge ./...\n  mutation-judge --changed origin/main ./...\n  mutation-judge --operators boundary,boolean ./pkg/...")
+		fmt.Fprintln(fs.Output(), "\nSubcommands:\n  mutation-judge compare --baseline old.json --current new.json\n  mutation-judge record <report.json> --label <label>\n  mutation-judge trend\nRun any of these with -h for its own flags.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(os.Args[1:]); err != nil {

@@ -417,6 +417,136 @@ func TestGitHubAnnotationsOutputEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCompareEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	moduleDir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module comparefixture\n\ngo 1.22\n",
+		"counter.go": `package comparefixture
+
+func CountPositive(n int, f func(int)) {
+	if n > 0 {
+		f(n)
+	}
+}
+`,
+		"counter_test.go": `package comparefixture
+
+import "testing"
+
+// Deliberately omits n == 0 so the > to >= mutant survives.
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(moduleDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("baseline run failed: %v\n%s", err, out)
+	}
+
+	// Fix the test in place -- the production file (and so the
+	// mutant's byte offset and ID) is untouched, so the comparison
+	// below should show a genuine KILLED fix, not a REMOVED one.
+	fixedTest := `package comparefixture
+
+import "testing"
+
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	CountPositive(0, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(moduleDir, "counter_test.go"), []byte(fixedTest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	currentPath := filepath.Join(t.TempDir(), "current.json")
+	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("current run failed: %v\n%s", err, out)
+	}
+
+	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compare failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "fixed survivors: 1") {
+		t.Fatalf("expected exactly 1 fixed survivor:\n%s", text)
+	}
+	if !strings.Contains(text, "KILLED") || strings.Contains(text, "REMOVED") {
+		t.Fatalf("expected a genuine KILLED fix (same mutant ID), not a REMOVED one:\n%s", text)
+	}
+	if !strings.Contains(text, "new survivors: 0") {
+		t.Fatalf("expected zero new survivors:\n%s", text)
+	}
+
+	// Reversing the direction turns the fix into a regression, and
+	// --fail-on-new-survivors must actually fail the command.
+	cmd = exec.Command(binary, "compare", "--baseline", currentPath, "--current", baselinePath, "--fail-on-new-survivors", "--fail-exit-code", "7")
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("expected exit code 7 for a regression with --fail-on-new-survivors, got err=%v", err)
+	}
+}
+
+func TestRecordAndTrendEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", reportPath, "./examples/boundary")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("analysis run failed: %v\n%s", err, out)
+	}
+
+	historyPath := filepath.Join(t.TempDir(), "history.ndjson")
+	for _, label := range []string{"PR #101", "PR #102"} {
+		cmd := exec.Command(binary, "record", "--label", label, "--history-file", historyPath, reportPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("record %s failed: %v\n%s", label, err, out)
+		}
+	}
+
+	cmd = exec.Command(binary, "trend", "--history-file", historyPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("trend failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "PR #101") || !strings.Contains(text, "PR #102") {
+		t.Fatalf("expected both recorded labels in the trend output:\n%s", text)
+	}
+	if !strings.Contains(text, "0.0%") {
+		t.Fatalf("expected the boundary example's known 0%% score in the trend output:\n%s", text)
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

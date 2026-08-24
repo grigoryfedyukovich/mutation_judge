@@ -1,6 +1,6 @@
 # Mutation Judge tutorial
 
-This tutorial starts with a deliberately weak test suite, uses a surviving mutant to identify the missing case, repairs the tests, and then moves through boolean attribution, test selection, invalid mutants, generated code, Git-diff analysis, reports, caching, CI policy, and SARIF/GitHub annotations.
+This tutorial starts with a deliberately weak test suite, uses a surviving mutant to identify the missing case, repairs the tests, and then moves through boolean attribution, test selection, invalid mutants, generated code, Git-diff analysis, reports, caching, CI policy, SARIF/GitHub annotations, and tracking survivors across runs.
 
 All commands are intended to run from the repository root.
 
@@ -629,7 +629,51 @@ suggested test: add a case where vip is false and hasCoupon is true, then assert
 
 (The `%0A` line break and `%25` percent sign in the tool's actual raw output are GitHub's own workflow-command escaping for newlines and `%` inside a message; shown here unescaped for readability.) Run inside any workflow step and these lines become inline PR annotations immediately, no artifact upload required. A run with nothing to flag still emits the summary `::notice::` line, so a clean pass is visible in the log rather than producing silent output.
 
-## 16. Diagnose common outcomes
+## 16. Track survivors and score across runs
+
+Three more subcommands turn one-shot reports into a quality-tracking history: `compare` diffs two reports at the mutant level, and `record`/`trend` keep a running score log. Unlike the main command, these read `--format json` reports that already exist rather than running analysis themselves -- they're pure post-processing, so they're fast regardless of package size.
+
+```bash
+./bin/mutation-judge --operators boundary --format json --output baseline.json ./pkg
+# ... fix a test ...
+./bin/mutation-judge --operators boundary --format json --output current.json ./pkg
+
+./bin/mutation-judge compare --baseline baseline.json --current current.json
+```
+
+```text
+compare: baseline vs current
+  baseline score: 0.0% excluding invalid/timeout/unknown/unsupported
+  current score:  100.0% excluding invalid/timeout/unknown/unsupported
+
+new survivors: 0
+
+fixed survivors: 1
+  KILLED counter.go:5:7 replace comparison > with >=
+
+unchanged: 0
+```
+
+`new survivors` are mutants actionable (`SURVIVED`, `TIMEOUT`, or `UNKNOWN`) in `current` but not in `baseline` -- either a previously-killed mutant regressed, or a brand-new mutant from new code was actionable from the start. `fixed survivors` are the reverse. Both get per-mutant detail; `unchanged` is just a count, since that's normally the overwhelming majority. Add `--fail-on-new-survivors` (with `--fail-exit-code`, default 10) to fail a CI step specifically when a change introduces a new gap, distinct from the overall `--ci-min-score` threshold.
+
+**Matching is by mutant ID, and that has a real limitation worth understanding before relying on it.** A mutant's ID hashes its file path and its raw byte offset in that file -- not an AST-stable identity (see `internal/frontend.mutationID`). Editing anything earlier in the same file shifts the byte offset, and so the ID, of every mutant after that point, even ones whose actual code never changed. A file the change never touches at all compares perfectly; a file the change edits will show some ID churn below the edit point that isn't a real gap or a real fix, just noise from the shift. This is why the example above patches `counter_test.go`, not `counter.go` -- keeping the production file untouched is what keeps the mutant's ID, and so its identity across the two reports, stable.
+
+For a running score history:
+
+```bash
+./bin/mutation-judge record --label "PR #101" baseline.json
+./bin/mutation-judge record --label "PR #102" current.json
+./bin/mutation-judge trend
+```
+
+```text
+PR #101  0.0%
+PR #102  100.0%
+```
+
+`record` appends one entry per call to `.mutation-judge/history.ndjson` by default (`--history-file` to use another path); `trend` reads it back, oldest first. The label is entirely the caller's choice -- a PR number, branch name, or commit SHA are all reasonable, and Mutation Judge doesn't try to infer one itself, since which is meaningful is a property of the caller's CI, not of a report. Both subcommands also take `--format json` for scripting.
+
+## 17. Diagnose common outcomes
 
 ### Baseline tests fail
 
@@ -670,7 +714,7 @@ Increase the explicit timeout only after deciding that the test is expected to c
 
 The process may have failed before Go printed a `--- FAIL:` line, for example during package initialization or from a process-wide crash. Inspect `diagnostic.evidence.backend_output` in JSON.
 
-## 17. Apply Mutation Judge to a real package
+## 18. Apply Mutation Judge to a real package
 
 A practical sequence is:
 
@@ -704,7 +748,7 @@ For every survivor, record one of three conclusions:
 2. **Equivalent or unreachable:** document the guard or invariant that makes the mutation irrelevant.
 3. **Operator not useful here:** exclude the operator from the policy scope rather than inflating the score with noise.
 
-## 18. Run all packaged examples
+## 19. Run all packaged examples
 
 The example runner builds a temporary executable and exercises all examples that do not require a Git diff:
 

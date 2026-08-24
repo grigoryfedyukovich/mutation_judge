@@ -13,6 +13,7 @@
 9. **Serial execution.** This deliberately preserves simple isolation. Progress lines are available, but distributed CI and parallel sandboxes are future work.
 10. **Flat configuration subset.** The strict dependency-free parser supports the documented scalar/list keys, not the full TOML or YAML language; YAML's native block-list style is additionally accepted for list-valued keys. Other unsupported nested syntax is an error. This is a permanent design decision, not a placeholder — see `docs/decisions/0001-config-parser-scope.md`.
 11. **Conservative I/O.** Every run hashes relevant module source and copies the module tree. This favors stale-cache prevention and sandbox fidelity over large-repository startup speed.
+12. **Mutant IDs are byte-offset identity, not AST identity.** A mutant's ID hashes its file path and raw byte offset in that file (plus operator, rule, and replacement text) -- not a structural identity that survives unrelated edits. `compare` (see `docs/tutorial.md` section 16) relies on this ID to match mutants across two reports; an edit anywhere earlier in a file shifts the byte offset, and so the ID, of every later mutant in that file, even ones whose own code never changed. Comparisons across files a change never touches are unaffected.
 
 ## Correctness priorities
 
@@ -22,9 +23,10 @@ The four operators formerly listed under "Optional expansion" as future work -- 
 
 "GitHub annotations and SARIF output," also formerly listed under "Optional expansion," is now implemented as two more `--format` values: `sarif` (SARIF 2.1.0, for `github/codeql-action/upload-sarif`) and `github` (workflow-command annotations written directly to stdout, no upload step). Both apply the same inclusion policy -- only `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts produce a finding, since those are the only three verdicts that mean "not positively confirmed as tested" (`KILLED` and `INVALID` are not actionable findings). See `docs/tutorial.md` section 15.
 
+"Cross-run HTML comparison and trend visualization," also from that original "Optional expansion" list, is now implemented as three subcommands: `compare` (diffs two `--format json` reports at the mutant level into new/fixed/unchanged survivors), and `record`/`trend` (an NDJSON score-history log and a table over it). See limitation 12 above for the ID-matching caveat `compare` inherits, and `docs/tutorial.md` section 16.
+
 ## Optional expansion
 
 - Mutant-to-package and mutant-to-test selection using coverage.
-- Parallel isolated workers and distributed CI manifests.
+- Distributed CI manifests (splitting one run's mutants across separate CI jobs/machines, distinct from the already-implemented `--workers`, which parallelizes within one run/machine -- see `docs/performance.md`).
 - Assertion/contract attribution beyond failing test names.
-- Cross-run HTML comparison and trend visualization.

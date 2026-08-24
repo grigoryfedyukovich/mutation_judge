@@ -22,6 +22,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | CI policy exit | Implemented | Successful analysis returns zero unless an explicit score policy fails. |
 | Three running examples | Exceeded | Eleven examples plus `examples/run-all.sh`. |
 | Real-world evaluation | Implemented, bounded | Self-hosting slice in `docs/evaluation.md`. |
+| Cross-run comparison and score trend | Implemented | `compare` (`internal/compare`) diffs two reports into new/fixed/unchanged survivors by mutant ID; `record`/`trend` (`internal/history`) keep an NDJSON score-history log. See `docs/limitations.md` limitation 12 for the ID-matching caveat `compare` inherits. |
 
 ## Clarifications
 
@@ -40,7 +41,6 @@ The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, 
 ## Not yet implemented
 
 - Distributed CI execution (M4).
-- Parallel isolated workers.
 - Structured `go test -json` classification for all build/test failure modes.
 - Assertion or contract attribution beyond named failing tests.
 - Equivalent-mutant proofs.

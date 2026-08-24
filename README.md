@@ -43,7 +43,7 @@ SURVIVED M-... examples/boundary/counter.go:5:7 replace comparison > with >=
     +    if n >= 0 {
 ```
 
-The [full tutorial](docs/tutorial.md) follows this survivor through test repair, then covers selected-test scope, arithmetic invalids, generated source, Git-diff mode, JSON/HTML/SARIF/GitHub-annotations reports, caching, and CI policy.
+The [full tutorial](docs/tutorial.md) follows this survivor through test repair, then covers selected-test scope, arithmetic invalids, generated source, Git-diff mode, JSON/HTML/SARIF/GitHub-annotations reports, caching, CI policy, and tracking survivors across runs.
 
 ## Installation
 
@@ -95,6 +95,18 @@ Important flags:
 | `--workers N` | Run N mutants concurrently, each in its own sandbox; default 1 (sequential, unchanged from earlier versions), see `docs/performance.md` |
 
 A successful analysis returns `0` regardless of survivors. Invalid input and baseline failures return `2`; internal failures return `3`; an enabled CI score policy uses its configured code.
+
+### Subcommands: tracking survivors across runs
+
+`compare`, `record`, and `trend` are subcommands, not flags -- they must come first (`mutation-judge compare ...`, not `mutation-judge ... compare`). Unlike the default command, they read `--format json` reports that already exist rather than running analysis themselves.
+
+```bash
+mutation-judge compare --baseline old.json --current new.json [--fail-on-new-survivors]
+mutation-judge record --label "PR #104" report.json
+mutation-judge trend
+```
+
+`compare` diffs two reports at the mutant level: `new survivors`, `fixed survivors`, and an `unchanged` count. `record`/`trend` keep a running score log at `.mutation-judge/history.ndjson`. See `docs/tutorial.md` section 16 -- in particular the mutant-ID matching caveat there before relying on `compare` across a heavily-edited file.
 
 ## Supported mutations
 
