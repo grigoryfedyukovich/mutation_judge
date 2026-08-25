@@ -9,8 +9,9 @@ import (
 )
 
 // RenderText writes a human-readable diff summary, with per-mutant
-// detail for new and fixed survivors (the actionable entries) and a
-// bare count for the unchanged majority.
+// detail for new survivors, fixed survivors, and removed mutants (the
+// three buckets with something to say) and a bare count for the
+// unchanged majority.
 func RenderText(w io.Writer, d Diff) error {
 	ew := &errWriter{w: w}
 	ew.printf("compare: baseline vs current\n  baseline score: %s\n  current score:  %s\n\n", d.BaselineText, d.CurrentText)
@@ -30,14 +31,14 @@ func RenderText(w io.Writer, d Diff) error {
 	ew.printf("\nfixed survivors: %d\n", len(d.FixedSurvivors))
 	for _, md := range d.FixedSurvivors {
 		m := md.Mutation()
-		status := "REMOVED"
-		if md.Current != nil {
-			status = string(md.Current.Verdict)
-		}
-		ew.printf("  %s %s:%d:%d %s\n", status, m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
-		if md.Current == nil {
-			ew.printf("    (no longer present in the current report)\n")
-		}
+		ew.printf("  %s %s:%d:%d %s\n", string(md.Current.Verdict), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
+	}
+
+	ew.printf("\nremoved mutants: %d\n", len(d.RemovedMutants))
+	for _, md := range d.RemovedMutants {
+		m := md.Mutation()
+		ew.printf("  was %s %s:%d:%d %s\n", string(md.Baseline.Verdict), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
+		ew.printf("    (no longer present in the current report)\n")
 	}
 
 	ew.printf("\nunchanged: %d\n", d.UnchangedCount)
@@ -55,13 +56,18 @@ func currentVerdict(md MutantDiff, fallback string) model.Verdict {
 }
 
 // RenderJSON writes the Diff as JSON for scripting (e.g. a CI step
-// that fails a build only on len(new_survivors) > 0).
+// that fails a build only on len(new_survivors) > 0). Every list
+// field is guaranteed to serialize as [] rather than null when empty,
+// so a consumer never needs a null-check before iterating.
 func RenderJSON(w io.Writer, d Diff) error {
 	if d.NewSurvivors == nil {
 		d.NewSurvivors = []MutantDiff{}
 	}
 	if d.FixedSurvivors == nil {
 		d.FixedSurvivors = []MutantDiff{}
+	}
+	if d.RemovedMutants == nil {
+		d.RemovedMutants = []MutantDiff{}
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

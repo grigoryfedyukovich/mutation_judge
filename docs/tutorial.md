@@ -621,13 +621,17 @@ For a lighter-weight integration with no separate upload step, `--format github`
 ./bin/mutation-judge --operators boolean --test-run '^TestVIPDiscount$' ./examples/test_selection --format github
 ```
 
+This is the tool's actual, byte-for-byte raw output -- nothing cleaned up or unescaped for readability:
+
 ```text
-::warning file=examples/test_selection/discount.go,line=5,endLine=5,col=9,title=MJ-BOOL-DROP-RIGHT M-3e1468a21c0a::mutation survived: delete the right operand of ||
-suggested test: add a case where vip is false and hasCoupon is true, then assert the disjunction remains true
-::notice title=mutation-judge summary::50.0% excluding invalid/timeout/unknown/unsupported (1 killed, 1 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported, 1 flagged)
+::warning file=examples/test_selection/discount.go,line=5,endLine=5,col=9,title=MJ-BOOL-DROP-RIGHT M-3e1468a21c0a::mutation survived: delete the right operand of ||%0Asuggested test: add a case where vip is false and hasCoupon is true, then assert the disjunction remains true
+::notice title=mutation-judge summary::50.0%25 excluding invalid/timeout/unknown/unsupported/equivalent (1 killed, 1 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported, 1 flagged)
+::debug::mutation-judge timing rendering_ms=0 total_ms=2304
 ```
 
-(The `%0A` line break and `%25` percent sign in the tool's actual raw output are GitHub's own workflow-command escaping for newlines and `%` inside a message; shown here unescaped for readability.) Run inside any workflow step and these lines become inline PR annotations immediately, no artifact upload required. A run with nothing to flag still emits the summary `::notice::` line, so a clean pass is visible in the log rather than producing silent output.
+The `%0A` and `%25` are not a bug and not something to work around -- they're GitHub's own required workflow-command escaping (`%` -> `%25`, `\n` -> `%0A`, `\r` -> `%0D`; see `internal/report/github.go`'s `ghEscapeData`/`ghEscapeProperty`, which match the escaping in GitHub's own `actions/toolkit` reference implementation exactly). GitHub's own log parser decodes these back when it renders the annotation -- that decode step is precisely why the escaping exists in the first place, not an extra safety net on top of it. If you run this exact command yourself, expect to see literal `%25`/`%0A` in your terminal too; that only turns back into `%`/a real line break inside an actual GitHub Actions run, once GitHub's runner has parsed the command. (Timing in the `::debug::` line varies run to run; it's shown here for completeness, not as a value to expect exactly.)
+
+Run inside any workflow step and these lines become inline PR annotations immediately, no artifact upload required. A run with nothing to flag still emits the summary `::notice::` line, so a clean pass is visible in the log rather than producing silent output.
 
 ## 16. Track survivors and score across runs
 
@@ -643,20 +647,52 @@ Three more subcommands turn one-shot reports into a quality-tracking history: `c
 
 ```text
 compare: baseline vs current
-  baseline score: 0.0% excluding invalid/timeout/unknown/unsupported
-  current score:  100.0% excluding invalid/timeout/unknown/unsupported
+  baseline score: 0.0% excluding invalid/timeout/unknown/unsupported/equivalent
+  current score:  100.0% excluding invalid/timeout/unknown/unsupported/equivalent
 
 new survivors: 0
 
 fixed survivors: 1
   KILLED counter.go:5:7 replace comparison > with >=
 
+removed mutants: 0
+
 unchanged: 0
 ```
 
-`new survivors` are mutants actionable (`SURVIVED`, `TIMEOUT`, or `UNKNOWN`) in `current` but not in `baseline` -- either a previously-killed mutant regressed, or a brand-new mutant from new code was actionable from the start. `fixed survivors` are the reverse. Both get per-mutant detail; `unchanged` is just a count, since that's normally the overwhelming majority. Add `--fail-on-new-survivors` (with `--fail-exit-code`, default 10) to fail a CI step specifically when a change introduces a new gap, distinct from the overall `--ci-min-score` threshold.
+`compare` distinguishes four cases for every mutant ID appearing in either report:
 
-**Matching is by mutant ID, and that has a real limitation worth understanding before relying on it.** A mutant's ID hashes its file path and its raw byte offset in that file -- not an AST-stable identity (see `internal/frontend.mutationID`). Editing anything earlier in the same file shifts the byte offset, and so the ID, of every mutant after that point, even ones whose actual code never changed. A file the change never touches at all compares perfectly; a file the change edits will show some ID churn below the edit point that isn't a real gap or a real fix, just noise from the shift. This is why the example above patches `counter_test.go`, not `counter.go` -- keeping the production file untouched is what keeps the mutant's ID, and so its identity across the two reports, stable.
+- **new survivors** -- actionable (`SURVIVED`, `TIMEOUT`, or `UNKNOWN`) in `current` but not in `baseline`: either a previously-killed mutant regressed, or a brand-new mutant from new code was actionable from the start. These are what a reviewer needs to see.
+- **fixed survivors** -- actionable in `baseline`, still present in `current`, but no longer actionable there: killed by an improved test. A genuine test-quality signal.
+- **removed mutants** -- present in `baseline`, absent from `current` entirely: that mutation site doesn't exist anymore, usually because the code was deleted or rewritten. This holds regardless of the mutant's prior verdict -- a removed survivor and a removed kill are both here, since neither says anything about test quality, only that the code isn't there to test anymore. Folding this into "fixed" would overstate what actually happened; deleting code isn't the same accomplishment as killing a mutant with a real test.
+- **unchanged** -- everything else: same actionable-status in both reports, or new code with nothing to flag. Just a count, since that's normally the overwhelming majority.
+
+New, fixed, and removed each get per-mutant detail; add `--fail-on-new-survivors` (with `--fail-exit-code`, default 10) to fail a CI step specifically when a change introduces a new gap, distinct from the overall `--ci-min-score` threshold.
+
+For scripting, `--format json` gives the same four buckets as clean fields -- `new_survivors`, `fixed_survivors`, and `removed_mutants` always serialize as `[]`, never `null`, when empty:
+
+```bash
+./bin/mutation-judge compare --baseline baseline.json --current current.json --format json
+```
+
+```json
+{
+  "new_survivors": [],
+  "fixed_survivors": [
+    { "id": "M-...", "baseline": { "verdict": "SURVIVED", "..." : "..." }, "current": { "verdict": "KILLED", "...": "..." } }
+  ],
+  "removed_mutants": [],
+  "unchanged_count": 0,
+  "baseline_score": 0,
+  "current_score": 100,
+  "baseline_score_text": "0.0% excluding invalid/timeout/unknown/unsupported/equivalent",
+  "current_score_text": "100.0% excluding invalid/timeout/unknown/unsupported/equivalent"
+}
+```
+
+(Each entry's `baseline`/`current` is a full `model.Result` -- mutation span, description, suggestion, diff, verdict, and diagnostic -- trimmed above for space; a `removed_mutants` entry has `current: null`.)
+
+**Matching is by mutant ID, and that has a real limitation worth understanding before relying on it.** A mutant's ID hashes its file path and its raw byte offset in that file -- not an AST-stable identity (see `internal/frontend.mutationID`). Editing anything earlier in the same file shifts the byte offset, and so the ID, of every mutant after that point, even ones whose actual code never changed. A file the change never touches at all compares perfectly; a file the change edits will show some ID churn below the edit point that isn't a real gap, fix, or removal, just noise from the shift. This is why the example above patches `counter_test.go`, not `counter.go` -- keeping the production file untouched is what keeps the mutant's ID, and so its identity across the two reports, stable.
 
 For a running score history:
 

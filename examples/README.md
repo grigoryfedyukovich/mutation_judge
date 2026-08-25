@@ -102,7 +102,7 @@ SARIF output is meant for `github/codeql-action/upload-sarif`, turning survivors
 
 ## Tracking survivors across runs
 
-`run-all.sh`'s "compare and trend" section is self-contained: it copies `boundary`'s production file into a scratch module, analyzes it once with the checked-in weak test (a real survivor), patches only the test file in place, and analyzes again -- since the production file never moves, the mutant's ID stays the same between the two reports, so the comparison shows a genuine fix, not just two unrelated packages that happen to share a mutation pattern:
+`run-all.sh`'s "compare and trend" section is self-contained: it copies `boundary`'s production file into a scratch module, analyzes it once with the checked-in weak test (a real survivor), patches only the test file in place, and analyzes again -- since the production file never moves, the mutant's ID stays the same between the two reports, so the comparison shows a genuine fix (`fixed_survivors`), not just two unrelated packages that happen to share a mutation pattern:
 
 ```bash
 ./bin/mutation-judge compare --baseline baseline.json --current current.json
@@ -110,5 +110,9 @@ SARIF output is meant for `github/codeql-action/upload-sarif`, turning survivors
 ./bin/mutation-judge record --label "PR #102" current.json
 ./bin/mutation-judge trend
 ```
+
+A second, separate scratch module right after it (`compare: a removed mutant, not a fix`) shows the other half of the distinction: this time the production code itself is deleted between the two runs rather than its test improved, so the same survivor lands in `removed_mutants` instead. `compare` treats these as genuinely different -- a fix is a real test-quality signal; a removed mutant is code churn with nothing to say about test quality either way, and folding it into "fixed" would overstate what actually happened.
+
+`compare --format json` gives all four buckets (`new_survivors`, `fixed_survivors`, `removed_mutants`, `unchanged_count`) as clean, always-present fields -- `new_survivors`/`fixed_survivors`/`removed_mutants` serialize as `[]` rather than `null` when empty, so a CI script never needs a null-check before iterating.
 
 `compare` and `record`/`trend` are subcommands (they come before any flags), and they only read existing `--format json` reports -- no analysis runs, so they work on any two reports you already have. See `docs/tutorial.md` section 16, in particular the mutant-ID matching caveat before relying on `compare` across a file a change actually edits.

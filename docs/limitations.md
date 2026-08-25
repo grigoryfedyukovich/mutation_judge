@@ -23,7 +23,7 @@ The four operators formerly listed under "Optional expansion" as future work -- 
 
 "GitHub annotations and SARIF output," also formerly listed under "Optional expansion," is now implemented as two more `--format` values: `sarif` (SARIF 2.1.0, for `github/codeql-action/upload-sarif`) and `github` (workflow-command annotations written directly to stdout, no upload step). Both apply the same inclusion policy -- only `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts produce a finding, since those are the only three verdicts that mean "not positively confirmed as tested" (`KILLED` and `INVALID` are not actionable findings). See `docs/tutorial.md` section 15.
 
-"Cross-run HTML comparison and trend visualization," also from that original "Optional expansion" list, is now implemented as three subcommands: `compare` (diffs two `--format json` reports at the mutant level into new/fixed/unchanged survivors), and `record`/`trend` (an NDJSON score-history log and a table over it). See limitation 12 above for the ID-matching caveat `compare` inherits, and `docs/tutorial.md` section 16.
+"Cross-run HTML comparison and trend visualization," also from that original "Optional expansion" list, is now implemented as three subcommands: `compare` (diffs two `--format json` reports at the mutant level into new/fixed/removed/unchanged, with `--format json` for the same four buckets as clean fields), and `record`/`trend` (an NDJSON score-history log and a table over it). See limitation 12 above for the ID-matching caveat `compare` inherits, and `docs/tutorial.md` section 16.
 
 ## Optional expansion
 

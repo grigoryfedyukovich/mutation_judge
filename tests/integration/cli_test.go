@@ -497,11 +497,14 @@ func TestCountPositive(t *testing.T) {
 	if !strings.Contains(text, "fixed survivors: 1") {
 		t.Fatalf("expected exactly 1 fixed survivor:\n%s", text)
 	}
-	if !strings.Contains(text, "KILLED") || strings.Contains(text, "REMOVED") {
-		t.Fatalf("expected a genuine KILLED fix (same mutant ID), not a REMOVED one:\n%s", text)
+	if !strings.Contains(text, "KILLED") {
+		t.Fatalf("expected a genuine KILLED fix (same mutant ID):\n%s", text)
 	}
 	if !strings.Contains(text, "new survivors: 0") {
 		t.Fatalf("expected zero new survivors:\n%s", text)
+	}
+	if !strings.Contains(text, "removed mutants: 0") {
+		t.Fatalf("this scenario is a genuine fix, not a removal -- the production file never changed, so its mutant's ID didn't either:\n%s", text)
 	}
 
 	// Reversing the direction turns the fix into a regression, and
@@ -511,6 +514,103 @@ func TestCountPositive(t *testing.T) {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("expected exit code 7 for a regression with --fail-on-new-survivors, got err=%v", err)
+	}
+}
+
+// TestCompareDistinguishesRemovedFromFixedEndToEnd is
+// TestCompareEndToEnd's counterpart for the other half of the
+// distinction --format json needs to make cleanly: this time the
+// production code itself is deleted between the two runs (not just
+// its test improved), so the survivor's mutant ID has nowhere to
+// exist in the current report at all. That must land in
+// removed_mutants, not fixed_survivors -- deleting the code proves
+// nothing about test quality, unlike actually killing the mutant.
+func TestCompareDistinguishesRemovedFromFixedEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	moduleDir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module removedfixture\n\ngo 1.22\n",
+		"counter.go": `package removedfixture
+
+func CountPositive(n int, f func(int)) {
+	if n > 0 {
+		f(n)
+	}
+}
+`,
+		"counter_test.go": `package removedfixture
+
+import "testing"
+
+// Deliberately omits n == 0 so the > to >= mutant survives.
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(moduleDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("baseline run failed: %v\n%s", err, out)
+	}
+
+	// Delete CountPositive (and its test) entirely, replacing it with
+	// something unrelated -- the survivor's mutation site genuinely no
+	// longer exists anywhere in the current code.
+	if err := os.Remove(filepath.Join(moduleDir, "counter_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := `package removedfixture
+
+func AlwaysTrue() bool { return true }
+`
+	if err := os.WriteFile(filepath.Join(moduleDir, "counter.go"), []byte(unrelated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	currentPath := filepath.Join(t.TempDir(), "current.json")
+	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("current run failed: %v\n%s", err, out)
+	}
+
+	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compare failed: %v\n%s", err, out)
+	}
+	var d struct {
+		NewSurvivors   []json.RawMessage `json:"new_survivors"`
+		FixedSurvivors []json.RawMessage `json:"fixed_survivors"`
+		RemovedMutants []json.RawMessage `json:"removed_mutants"`
+		UnchangedCount int               `json:"unchanged_count"`
+	}
+	if err := json.Unmarshal(out, &d); err != nil {
+		t.Fatalf("compare --format json produced invalid JSON: %v\n%s", err, out)
+	}
+	if len(d.RemovedMutants) != 1 {
+		t.Fatalf("expected exactly 1 removed mutant, got %d: %s", len(d.RemovedMutants), out)
+	}
+	if len(d.FixedSurvivors) != 0 {
+		t.Fatalf("deleting the code is not a fix; expected 0 fixed survivors, got %d: %s", len(d.FixedSurvivors), out)
+	}
+	if len(d.NewSurvivors) != 0 {
+		t.Fatalf("expected 0 new survivors, got %d: %s", len(d.NewSurvivors), out)
 	}
 }
 

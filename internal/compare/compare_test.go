@@ -20,15 +20,16 @@ func mutantResult(id string, verdict model.Verdict, file string, line int) model
 	}
 }
 
-func TestCompareClassifiesAllFourCases(t *testing.T) {
+func TestCompareClassifiesAllFourBuckets(t *testing.T) {
 	baseline := model.Report{
 		Summary: model.Summary{Score: 50, ScoreText: "50.0%"},
 		Results: []model.Result{
 			mutantResult("M-still-killed", model.VerdictKilled, "a.go", 1),
 			mutantResult("M-still-survived", model.VerdictSurvived, "b.go", 2),
 			mutantResult("M-regressed", model.VerdictKilled, "c.go", 3),          // killed -> survived: NEW survivor
-			mutantResult("M-fixed", model.VerdictSurvived, "d.go", 4),            // survived -> killed: FIXED
-			mutantResult("M-removed-survivor", model.VerdictSurvived, "e.go", 5), // gone in current: FIXED (removed)
+			mutantResult("M-fixed", model.VerdictSurvived, "d.go", 4),            // survived -> killed, still present: FIXED
+			mutantResult("M-removed-survivor", model.VerdictSurvived, "e.go", 5), // gone entirely: REMOVED
+			mutantResult("M-removed-killed", model.VerdictKilled, "g.go", 7),     // also gone entirely: REMOVED, not unchanged
 		},
 	}
 	current := model.Report{
@@ -55,15 +56,28 @@ func TestCompareClassifiesAllFourCases(t *testing.T) {
 		t.Fatalf("wrong new survivors: %+v", d.NewSurvivors)
 	}
 
-	if len(d.FixedSurvivors) != 2 {
-		t.Fatalf("expected 2 fixed survivors, got %d: %+v", len(d.FixedSurvivors), d.FixedSurvivors)
+	if len(d.FixedSurvivors) != 1 {
+		t.Fatalf("expected exactly 1 fixed survivor (still present, no longer actionable), got %d: %+v", len(d.FixedSurvivors), d.FixedSurvivors)
 	}
-	fixedIDs := map[string]bool{}
-	for _, md := range d.FixedSurvivors {
-		fixedIDs[md.ID] = true
+	if d.FixedSurvivors[0].ID != "M-fixed" {
+		t.Fatalf("wrong fixed survivor: %+v", d.FixedSurvivors[0])
 	}
-	if !fixedIDs["M-fixed"] || !fixedIDs["M-removed-survivor"] {
-		t.Fatalf("wrong fixed survivors: %+v", d.FixedSurvivors)
+	if d.FixedSurvivors[0].Current == nil {
+		t.Fatal("a fixed survivor must still have a Current result -- that's what distinguishes it from removed")
+	}
+
+	if len(d.RemovedMutants) != 2 {
+		t.Fatalf("expected 2 removed mutants (one formerly-survived, one formerly-killed), got %d: %+v", len(d.RemovedMutants), d.RemovedMutants)
+	}
+	removedIDs := map[string]bool{}
+	for _, md := range d.RemovedMutants {
+		removedIDs[md.ID] = true
+		if md.Current != nil {
+			t.Fatalf("a removed mutant must have a nil Current: %+v", md)
+		}
+	}
+	if !removedIDs["M-removed-survivor"] || !removedIDs["M-removed-killed"] {
+		t.Fatalf("wrong removed mutants: %+v", d.RemovedMutants)
 	}
 
 	// still-killed and still-survived: 2 unchanged.
@@ -72,24 +86,44 @@ func TestCompareClassifiesAllFourCases(t *testing.T) {
 	}
 
 	// Every distinct ID across both reports must land in exactly one bucket.
-	total := len(d.NewSurvivors) + len(d.FixedSurvivors) + d.UnchangedCount
-	if total != 6 { // 5 baseline + 1 brand-new not in baseline = 6 distinct IDs
+	total := len(d.NewSurvivors) + len(d.FixedSurvivors) + len(d.RemovedMutants) + d.UnchangedCount
+	if total != 7 { // 6 baseline + 1 brand-new not in baseline = 7 distinct IDs
 		t.Fatalf("buckets don't partition the full ID set: total=%d", total)
 	}
 }
 
-func TestCompareRemovedSurvivorHasNilCurrent(t *testing.T) {
+func TestCompareRemovedMutantHasNilCurrentAndReadableMutation(t *testing.T) {
 	baseline := model.Report{Results: []model.Result{mutantResult("M-gone", model.VerdictSurvived, "a.go", 1)}}
 	current := model.Report{}
 	d := Compare(baseline, current)
-	if len(d.FixedSurvivors) != 1 {
-		t.Fatalf("expected 1 fixed survivor, got %d", len(d.FixedSurvivors))
+	if len(d.RemovedMutants) != 1 {
+		t.Fatalf("expected 1 removed mutant, got %d", len(d.RemovedMutants))
 	}
-	if d.FixedSurvivors[0].Current != nil {
+	if d.RemovedMutants[0].Current != nil {
 		t.Fatal("removed mutant must have a nil Current side")
 	}
-	if d.FixedSurvivors[0].Mutation().Span.File != "a.go" {
+	if d.RemovedMutants[0].Baseline == nil {
+		t.Fatal("removed mutant must retain its Baseline side")
+	}
+	if d.RemovedMutants[0].Mutation().Span.File != "a.go" {
 		t.Fatal("Mutation() must still be readable from the Baseline side alone")
+	}
+}
+
+// TestCompareRemovedKilledMutantIsNotCountedUnchanged is the specific
+// case that makes RemovedMutants a distinct bucket at all rather than
+// splitting off only removed survivors: a mutant that was KILLED (no
+// story) and then its code disappeared is still real churn worth
+// surfacing, not silently folded into "nothing changed here".
+func TestCompareRemovedKilledMutantIsNotCountedUnchanged(t *testing.T) {
+	baseline := model.Report{Results: []model.Result{mutantResult("M-gone", model.VerdictKilled, "a.go", 1)}}
+	current := model.Report{}
+	d := Compare(baseline, current)
+	if len(d.RemovedMutants) != 1 || d.RemovedMutants[0].ID != "M-gone" {
+		t.Fatalf("expected the formerly-killed mutant in RemovedMutants, got: %+v", d.RemovedMutants)
+	}
+	if d.UnchangedCount != 0 {
+		t.Fatalf("a removed mutant must not also be counted unchanged, got UnchangedCount=%d", d.UnchangedCount)
 	}
 }
 
@@ -111,8 +145,34 @@ func TestRenderTextShowsSuggestionForNewSurvivorsOnly(t *testing.T) {
 	if !strings.Contains(out, "suggested test: exercise the zero case") {
 		t.Fatalf("missing suggestion text:\n%s", out)
 	}
-	if !strings.Contains(out, "fixed survivors: 0") || !strings.Contains(out, "unchanged: 0") {
+	if !strings.Contains(out, "fixed survivors: 0") || !strings.Contains(out, "removed mutants: 0") || !strings.Contains(out, "unchanged: 0") {
 		t.Fatalf("missing zero-count sections:\n%s", out)
+	}
+}
+
+func TestRenderTextDistinguishesFixedFromRemoved(t *testing.T) {
+	baseline := model.Report{
+		Summary: model.Summary{ScoreText: "0.0%"},
+		Results: []model.Result{
+			mutantResult("M-fixed", model.VerdictSurvived, "a.go", 1),
+			mutantResult("M-removed", model.VerdictSurvived, "b.go", 2),
+		},
+	}
+	current := model.Report{
+		Summary: model.Summary{ScoreText: "100.0%"},
+		Results: []model.Result{mutantResult("M-fixed", model.VerdictKilled, "a.go", 1)},
+	}
+	d := Compare(baseline, current)
+	var b bytes.Buffer
+	if err := RenderText(&b, d); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "fixed survivors: 1") || !strings.Contains(out, "KILLED a.go:1:1") {
+		t.Fatalf("missing fixed-survivor detail:\n%s", out)
+	}
+	if !strings.Contains(out, "removed mutants: 1") || !strings.Contains(out, "was SURVIVED b.go:2:1") {
+		t.Fatalf("missing removed-mutant detail:\n%s", out)
 	}
 }
 
@@ -137,6 +197,20 @@ func TestRenderJSONEmptyBucketsAreArraysNotNull(t *testing.T) {
 	}
 	out := b.String()
 	if strings.Contains(out, "null") {
-		t.Fatalf("new_survivors/fixed_survivors must serialize as [], not null:\n%s", out)
+		t.Fatalf("new_survivors/fixed_survivors/removed_mutants must serialize as [], not null:\n%s", out)
+	}
+}
+
+func TestRenderJSONIncludesAllFourBucketKeys(t *testing.T) {
+	d := Compare(model.Report{}, model.Report{})
+	var b bytes.Buffer
+	if err := RenderJSON(&b, d); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, key := range []string{`"new_survivors"`, `"fixed_survivors"`, `"removed_mutants"`, `"unchanged_count"`} {
+		if !strings.Contains(out, key) {
+			t.Fatalf("expected JSON key %s for CI to consume, got:\n%s", key, out)
+		}
 	}
 }

@@ -62,16 +62,31 @@ type Diff struct {
 	// brand-new mutant (from new code) was actionable from the start.
 	// These are the entries worth a reviewer's attention.
 	NewSurvivors []MutantDiff `json:"new_survivors"`
-	// FixedSurvivors are the reverse: actionable in Baseline but not
-	// in Current -- a mutant that got killed by improved tests, or
-	// that no longer exists at all (its code was removed or
-	// refactored away).
+	// FixedSurvivors are mutant IDs actionable in Baseline that are
+	// still present in Current but no longer actionable there --
+	// killed (or otherwise reclassified) by an improved test, not
+	// merely removed. This is a genuine test-quality signal; a
+	// removed mutant is not, which is why it's a separate bucket
+	// below rather than folded in here.
 	FixedSurvivors []MutantDiff `json:"fixed_survivors"`
+	// RemovedMutants are mutant IDs present in Baseline that are
+	// absent from Current entirely -- that mutation site no longer
+	// exists, usually because the code there was deleted, rewritten,
+	// or moved (which, given ID-matching's own limitation, also
+	// covers a site whose ID merely shifted due to an earlier edit in
+	// the same file; see the package doc comment). This holds
+	// regardless of the mutant's prior verdict: a removed survivor
+	// and a removed kill are both here, distinguished by each entry's
+	// own Baseline.Verdict, since neither is a "fix" by a better
+	// test -- the code just isn't there to test anymore.
+	RemovedMutants []MutantDiff `json:"removed_mutants"`
 	// UnchangedCount is every other mutant ID appearing in either
 	// report: present in both sides with the same actionable-status,
-	// so there's nothing to report about it. NewSurvivors,
-	// FixedSurvivors, and UnchangedCount always sum to the total
-	// number of distinct mutant IDs across both reports.
+	// or present only in Current and not actionable (new code with
+	// nothing to flag) -- so there's nothing to report about it.
+	// NewSurvivors, FixedSurvivors, RemovedMutants, and
+	// UnchangedCount always sum to the total number of distinct
+	// mutant IDs across both reports.
 	UnchangedCount int     `json:"unchanged_count"`
 	BaselineScore  float64 `json:"baseline_score"`
 	CurrentScore   float64 `json:"current_score"`
@@ -81,7 +96,16 @@ type Diff struct {
 
 // Compare builds a Diff between a baseline report (e.g. the base
 // branch) and a current report (e.g. a pull request), matched by
-// mutant ID.
+// mutant ID. Every distinct mutant ID across both reports lands in
+// exactly one of Diff's four buckets, classified in this order:
+//
+//  1. Absent from Current entirely -> RemovedMutants, regardless of
+//     its Baseline verdict.
+//  2. Actionable in Current, and not (or not present) in Baseline ->
+//     NewSurvivors.
+//  3. Actionable in Baseline, present but not actionable in Current
+//     -> FixedSurvivors.
+//  4. Everything else -> UnchangedCount.
 func Compare(baseline, current model.Report) Diff {
 	baseByID := map[string]model.Result{}
 	for _, r := range baseline.Results {
@@ -105,8 +129,18 @@ func Compare(baseline, current model.Report) Diff {
 		seen[id] = true
 		b, hasB := baseByID[id]
 		c, hasC := curByID[id]
+
+		if !hasC {
+			// Removed takes priority over every other classification:
+			// there is no "current" state to call fixed or unchanged,
+			// only a baseline one that no longer has anywhere to
+			// apply.
+			d.RemovedMutants = append(d.RemovedMutants, MutantDiff{ID: id, Baseline: resultPtr(b, hasB)})
+			return
+		}
+
 		bActionable := hasB && Actionable(b.Verdict)
-		cActionable := hasC && Actionable(c.Verdict)
+		cActionable := Actionable(c.Verdict)
 		switch {
 		case cActionable && !bActionable:
 			md := MutantDiff{ID: id, Current: resultPtr(c, hasC)}
@@ -115,11 +149,7 @@ func Compare(baseline, current model.Report) Diff {
 			}
 			d.NewSurvivors = append(d.NewSurvivors, md)
 		case bActionable && !cActionable:
-			md := MutantDiff{ID: id, Baseline: resultPtr(b, hasB)}
-			if hasC {
-				md.Current = resultPtr(c, hasC)
-			}
-			d.FixedSurvivors = append(d.FixedSurvivors, md)
+			d.FixedSurvivors = append(d.FixedSurvivors, MutantDiff{ID: id, Baseline: resultPtr(b, hasB), Current: resultPtr(c, hasC)})
 		default:
 			d.UnchangedCount++
 		}
@@ -133,6 +163,7 @@ func Compare(baseline, current model.Report) Diff {
 
 	sortByLocation(d.NewSurvivors)
 	sortByLocation(d.FixedSurvivors)
+	sortByLocation(d.RemovedMutants)
 	return d
 }
 

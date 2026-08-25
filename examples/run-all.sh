@@ -93,4 +93,41 @@ EOF
 printf '\n'
 "$tmp/mutation-judge" trend --history-file "$demo/history.ndjson"
 
+# A third phase, in a separate scratch copy: this time the production
+# code itself is deleted rather than its test improved, so the same
+# survivor's mutant ID has nowhere to exist in the new report at all.
+# That must show up as a removed mutant, not a fixed one -- deleting
+# code proves nothing about test quality, unlike actually killing the
+# mutant above.
+printf '\n\n=== compare: a removed mutant, not a fix ===\n'
+removed="$tmp/removed-demo"
+mkdir -p "$removed"
+cp "$demo/go.mod" "$demo/counter.go" "$removed/"
+sed -i.bak 's/^module comparedemo$/module removeddemo/' "$removed/go.mod" && rm "$removed/go.mod.bak"
+sed -i.bak 's/^package comparedemo$/package removeddemo/' "$removed/counter.go" && rm "$removed/counter.go.bak"
+cat > "$removed/counter_test.go" <<'EOF'
+package removeddemo
+
+import "testing"
+
+// Deliberately omits n == 0 so the > to >= mutant survives.
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+EOF
+(cd "$removed" && "$tmp/mutation-judge" --no-cache --operators boundary --format json --output baseline.json .)
+rm "$removed/counter_test.go"
+cat > "$removed/counter.go" <<'EOF'
+package removeddemo
+
+func AlwaysTrue() bool { return true }
+EOF
+(cd "$removed" && "$tmp/mutation-judge" --no-cache --operators boundary --format json --output current.json .)
+"$tmp/mutation-judge" compare --baseline "$removed/baseline.json" --current "$removed/current.json"
+
 printf '\n\nAll non-Git examples completed successfully.\n'

@@ -22,7 +22,7 @@ func runCompare(args []string) int {
 	failExitCode := fs.Int("fail-exit-code", 10, "exit code used when --fail-on-new-survivors triggers")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: mutation-judge compare --baseline old.json --current new.json [flags]")
-		fmt.Fprintln(fs.Output(), "Diffs two --format json reports at the mutant level: which mutants became\nnewly actionable (SURVIVED, TIMEOUT, or UNKNOWN), which were fixed, and how\nmany are unchanged. Matching is by mutant ID, which hashes each mutant's file\nand byte offset -- an edit anywhere earlier in a file shifts every later\nmutant's ID even if that mutation site itself didn't change; see\ndocs/limitations.md before relying on this across a large, heavily-edited\nfile.")
+		fmt.Fprintln(fs.Output(), "Diffs two --format json reports at the mutant level into four buckets: new\nsurvivors (newly actionable -- SURVIVED, TIMEOUT, or UNKNOWN), fixed survivors\n(still present, no longer actionable), removed mutants (no longer present at\nall, regardless of prior verdict), and an unchanged count. Matching is by\nmutant ID, which hashes each mutant's file and byte offset -- an edit\nanywhere earlier in a file shifts every later mutant's ID even if that\nmutation site itself didn't change; see docs/limitations.md before relying on\nthis across a large, heavily-edited file.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
