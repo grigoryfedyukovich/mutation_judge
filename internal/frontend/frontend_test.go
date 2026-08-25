@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/example/mutation-judge/internal/model"
 )
 
 func TestDiscoverBoundaryAndBoolean(t *testing.T) {
@@ -328,5 +330,211 @@ func recvOne(a, b chan int) int {
 		if m.RuleID != "MJ-CHAN-SELECT-DROP-CASE" || m.Replacement != "" {
 			t.Fatalf("unexpected mutant: %#v", m)
 		}
+	}
+}
+
+// boundaryMutant finds the single boundary mutant whose Original text
+// contains needle, failing the test if there isn't exactly one match
+// -- the guarded-comparison tests below each construct a fixture with
+// exactly one comparison of interest, and want to fail loudly if that
+// assumption ever stops holding rather than silently checking the
+// wrong mutant.
+func boundaryMutant(t *testing.T, ms []model.Mutation, needle string) model.Mutation {
+	t.Helper()
+	var found []model.Mutation
+	for _, m := range ms {
+		if m.Operator == "boundary" && strings.Contains(m.Diff, needle) {
+			found = append(found, m)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly 1 boundary mutant whose diff contains %q, got %d: %#v", needle, len(found), found)
+	}
+	return found[0]
+}
+
+func discoverGuardFixture(t *testing.T, src string) []model.Mutation {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"boundary": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms
+}
+
+func TestGuardedComparisonSuppressesEquivalentBoundaryMutant(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+type Item struct{ X, Y int }
+
+func Less(a, b Item) bool {
+	if a.X != b.X {
+		return a.X < b.X
+	}
+	return a.Y < b.Y
+}
+`)
+	guarded := boundaryMutant(t, ms, "a.X < b.X")
+	if guarded.EquivalentReason == "" {
+		t.Fatalf("expected the guarded comparison to be marked equivalent: %#v", guarded)
+	}
+	if !strings.Contains(guarded.EquivalentReason, "a.X != b.X") {
+		t.Fatalf("reason should cite the actual guard, got: %q", guarded.EquivalentReason)
+	}
+
+	unguarded := boundaryMutant(t, ms, "a.Y < b.Y")
+	if unguarded.EquivalentReason != "" {
+		t.Fatalf("the fallback comparison has no dominating guard and must not be marked equivalent: %#v", unguarded)
+	}
+}
+
+// TestGuardedComparisonMatchesRealWorldIndexedComparatorShape mirrors
+// this project's own sort.Slice comparator in Discover (see
+// discoverFile's caller) -- slice-indexed struct-field operands, not
+// bare identifiers or single-level selectors -- to prove the operand
+// matcher isn't just validated against a toy shape.
+func TestGuardedComparisonMatchesRealWorldIndexedComparatorShape(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+type Span struct{ StartByte int }
+type Mutation struct{ Span Span }
+
+func lessByOffset(all []Mutation, i, j int) bool {
+	if all[i].Span.StartByte != all[j].Span.StartByte {
+		return all[i].Span.StartByte < all[j].Span.StartByte
+	}
+	return true
+}
+`)
+	guarded := boundaryMutant(t, ms, "all[i].Span.StartByte < all[j].Span.StartByte")
+	if guarded.EquivalentReason == "" {
+		t.Fatalf("expected the indexed-comparator mutant to be marked equivalent: %#v", guarded)
+	}
+}
+
+// TestGuardedComparisonMatchesEitherOperandOrder proves the "either
+// order" half of the matcher: b.X > a.X is the same relation as
+// a.X != b.X guards, just with its operands swapped, and must still
+// be recognized.
+func TestGuardedComparisonMatchesEitherOperandOrder(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+type Item struct{ X int }
+
+func Less(a, b Item) bool {
+	if a.X != b.X {
+		return b.X > a.X
+	}
+	return false
+}
+`)
+	guarded := boundaryMutant(t, ms, "b.X > a.X")
+	if guarded.EquivalentReason == "" {
+		t.Fatalf("expected the swapped-operand comparison to still be recognized: %#v", guarded)
+	}
+}
+
+func TestGuardedComparisonDoesNotSuppressWhenOperandsDiffer(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+type Item struct{ X, Y int }
+
+// The guard is on X but the comparison is on Y -- these are
+// genuinely unrelated fields, so nothing here proves equality of Y is
+// unreachable.
+func Less(a, b Item) bool {
+	if a.X != b.X {
+		return a.Y < b.Y
+	}
+	return false
+}
+`)
+	m := boundaryMutant(t, ms, "a.Y < b.Y")
+	if m.EquivalentReason != "" {
+		t.Fatalf("guard and comparison operands differ; must not suppress: %#v", m)
+	}
+}
+
+func TestGuardedComparisonDoesNotSuppressMultiStatementBody(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+type Item struct{ X int }
+
+// A second statement in the guarded body -- logging, a side effect,
+// anything -- means the single-statement "nothing could have
+// intervened" guarantee no longer holds, even though the return
+// itself looks identical to the simple case.
+func Less(a, b Item) bool {
+	if a.X != b.X {
+		_ = 1
+		return a.X < b.X
+	}
+	return false
+}
+`)
+	m := boundaryMutant(t, ms, "a.X < b.X")
+	if m.EquivalentReason != "" {
+		t.Fatalf("multi-statement guarded body must not be suppressed: %#v", m)
+	}
+}
+
+func TestGuardedComparisonDoesNotSuppressWithInitStatement(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+func classify(f func() int) bool {
+	if v := f(); v != 0 {
+		return v < 0
+	}
+	return false
+}
+`)
+	m := boundaryMutant(t, ms, "v < 0")
+	if m.EquivalentReason != "" {
+		t.Fatalf("an if with an Init statement must not be suppressed: %#v", m)
+	}
+}
+
+func TestGuardedComparisonDoesNotSuppressFunctionCallOperands(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+// f is a stand-in for anything that could return a different value on
+// each call (a counter, a clock, a channel read wrapped in a
+// function) -- re-evaluating f(a) and f(b) inside the guarded body is
+// not guaranteed to read the same values the guard's own calls did.
+func Less(a, b int, f func(int) int) bool {
+	if f(a) != f(b) {
+		return f(a) < f(b)
+	}
+	return false
+}
+`)
+	m := boundaryMutant(t, ms, "f(a) < f(b)")
+	if m.EquivalentReason != "" {
+		t.Fatalf("function-call operands must never be suppressed: %#v", m)
+	}
+}
+
+func TestGuardedComparisonDoesNotSuppressEqualityGuard(t *testing.T) {
+	ms := discoverGuardFixture(t, `package p
+
+type Item struct{ X int }
+
+// A == guard proves the opposite of what suppression needs -- if this
+// ever matched, it would be a real bug, not just an overly cautious
+// miss.
+func Less(a, b Item) bool {
+	if a.X == b.X {
+		return false
+	}
+	return a.X < b.X
+}
+`)
+	m := boundaryMutant(t, ms, "a.X < b.X")
+	if m.EquivalentReason != "" {
+		t.Fatalf("an == guard (and an unguarded fallback comparison) must not be suppressed: %#v", m)
 	}
 }

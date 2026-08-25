@@ -23,6 +23,37 @@ func TestTextIncludesSuggestion(t *testing.T) {
 	}
 }
 
+func TestTextIncludesEquivalentProof(t *testing.T) {
+	r := model.Report{
+		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{"max_mutants": 0, "per_mutant_timeout": "1s"},
+		Summary: model.Summary{Generated: 1, Equivalent: 1, ScoreText: "n/a (no scoreable mutants)"},
+		Results: []model.Result{{
+			Verdict: model.VerdictEquivalent,
+			Mutation: model.Mutation{
+				ID: "M-1", Span: model.Span{File: "a.go", StartLine: 1, StartCol: 1},
+				Description: "replace comparison < with <=", EquivalentReason: "dominated by the enclosing guard \"a.X != b.X\"",
+			},
+		}},
+	}
+	var b bytes.Buffer
+	if err := Render(&b, "text", r); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "EQUIVALENT M-1") {
+		t.Fatalf("expected the EQUIVALENT verdict line: %s", out)
+	}
+	if !strings.Contains(out, `proof: dominated by the enclosing guard "a.X != b.X"`) {
+		t.Fatalf("expected the proof line, got: %s", out)
+	}
+	if strings.Contains(out, "suggested test:") {
+		t.Fatalf("an EQUIVALENT result has no suggestion to print: %s", out)
+	}
+	if !strings.Contains(out, "1 equivalent") {
+		t.Fatalf("expected the summary line to count equivalent mutants: %s", out)
+	}
+}
+
 func TestTextGolden(t *testing.T) {
 	r := model.Report{
 		ToolVersion: "test", Complete: true, Patterns: []string{"./pkg"},

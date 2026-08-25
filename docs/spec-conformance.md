@@ -8,7 +8,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 |---|---|---|
 | Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and four further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`) in `internal/frontend`. |
 | One mutant at a time | Implemented | Atomic apply/run/restore in one isolated temporary module copy. |
-| Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, and `UNSUPPORTED` model values. |
+| Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, `UNSUPPORTED`, and `EQUIVALENT` model values. |
 | Responsible tests | Implemented with documented limits | Standard `--- FAIL:` events are extracted and sorted. |
 | Exact survivor diff and suggestion | Implemented | Every surviving result carries a unified diff and operator-specific scenario. |
 | Git diff mode | Implemented | Zero-context changed-line mapping with deleted-file and zero-count handling. |
@@ -23,6 +23,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | Three running examples | Exceeded | Eleven examples plus `examples/run-all.sh`. |
 | Real-world evaluation | Implemented, bounded | Self-hosting slice in `docs/evaluation.md`. |
 | Cross-run comparison and score trend | Implemented | `compare` (`internal/compare`) diffs two reports into new/fixed/unchanged survivors by mutant ID; `record`/`trend` (`internal/history`) keep an NDJSON score-history log. See `docs/limitations.md` limitation 12 for the ID-matching caveat `compare` inherits. |
+| Conservative equivalent-mutant suppression | Implemented, narrow by design | The boundary operator recognizes one exact, locally provable pattern -- a comparison dominated by an `if X != Y { return X < Y }`-shaped guard on the same two operands (`internal/frontend.detectGuardedComparison`) -- and marks it `EQUIVALENT`, skipping execution, rather than generating an ordinary mutant. Confirmed against this project's own previously-documented case (`docs/evaluation.md`, "Guarded sort comparisons"): the real `sort.Slice` comparator in `internal/frontend.Discover` is now correctly suppressed. See `docs/limitations.md` limitation 7 for exactly what this does and does not claim. |
 
 ## Clarifications
 
@@ -43,5 +44,5 @@ The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, 
 - Distributed CI execution (M4).
 - Structured `go test -json` classification for all build/test failure modes.
 - Assertion or contract attribution beyond named failing tests.
-- Equivalent-mutant proofs.
+- General equivalent-mutant proofs (only the one narrow boundary-operator case above is implemented; most equivalence remains undecided by design -- see `docs/limitations.md` limitation 7).
 - Full TOML and YAML language support.

@@ -19,6 +19,7 @@ Or execute all non-Git examples:
 |---|---|---|---|
 | `boundary` | A covered boundary mutant surviving because zero is omitted | `./bin/mutation-judge --no-cache --operators boundary ./examples/boundary` | 1 survived |
 | `boundary_fixed` | The same mutant killed after adding the exact boundary case | `./bin/mutation-judge --no-cache --operators boundary ./examples/boundary_fixed` | 1 killed |
+| `equivalent` | A guarded comparison proved equivalent and never executed, alongside an ordinary killed one | `./bin/mutation-judge --no-cache --operators boundary ./examples/equivalent` | 1 killed, 1 equivalent |
 | `boolean` | Deleting either side of `&&` and attributing each kill | `./bin/mutation-judge --no-cache --operators boolean ./examples/boolean` | 2 killed |
 | `test_selection` | The verdict depends on the selected test command | `./bin/mutation-judge --no-cache --operators boolean --test-run '^TestVIPDiscount$' ./examples/test_selection` | 1 killed, 1 survived |
 | `arithmetic` | Numeric kills and a compile-invalid string mutation | `./bin/mutation-judge --no-cache --operators arithmetic ./examples/arithmetic` | 2 killed, 1 invalid |

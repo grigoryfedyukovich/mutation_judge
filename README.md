@@ -117,6 +117,8 @@ mutation-judge trend
 - `>` → `>=`
 - `>=` → `>`
 
+A comparison dominated by an exact `if X != Y { return X < Y }`-shaped guard on the same two operands is provably equivalent under this mutation and is classified `EQUIVALENT` instead -- never executed. This is deliberately narrow; see `docs/semantics.md`, "Conservative equivalent-mutant suppression."
+
 ### Boolean
 
 - `a && b` → `(a)` and `(b)`
@@ -131,6 +133,28 @@ mutation-judge trend
 
 Arithmetic mutants can be compile-invalid or panic at runtime. Compile/type failures are `INVALID`; a runtime panic observed by the selected tests is `KILLED` because the tests distinguished the valid mutant.
 
+### Error-return, opt-in
+
+- `if X != nil { ...return ...X }` → the returned `X` is replaced with `nil`, silently swallowing it.
+
+### Switch, opt-in
+
+- An entire `case` clause (label and body together), including `default`, is deleted from a `switch` or type-switch statement.
+
+### Loop, opt-in
+
+- A conditional `for`'s condition is replaced with `false`.
+- An unconditional `for {}` or a `range` loop has its first body statement replaced with `break`.
+
+Deliberately excluded: any mutation that could make a loop run forever (e.g. forcing a condition to `true`) -- it would produce a slow `TIMEOUT` on every occurrence instead of a fast `KILLED`/`SURVIVED`.
+
+### Channel, opt-in
+
+- A `make(chan T, N)` capacity expression is replaced with `0` (buffered becomes unbuffered).
+- An entire `select` `case` clause (comm statement and body together), including `default`, is deleted.
+
+Deliberately excluded: deleting a `close(ch)` call, for the same slow-`TIMEOUT` reason as the loop operator's exclusion above.
+
 ## Verdicts and score
 
 - **KILLED:** selected tests fail under the mutant. Named failing tests are extracted when Go reports them.
@@ -138,8 +162,9 @@ Arithmetic mutants can be compile-invalid or panic at runtime. Compile/type fail
 - **INVALID:** the mutant does not compile or type-check.
 - **TIMEOUT:** the explicit command deadline expired.
 - **UNKNOWN / UNSUPPORTED:** reserved first-class report values for future backends.
+- **EQUIVALENT:** discovery itself proved the mutant behaviorally identical to the original before any test ran; never executed. Currently only the boundary operator's one narrow guarded-comparison case (see "Supported mutations" above and `docs/limitations.md` limitation 7).
 
-The score is `killed / (killed + survived)`. Invalid and timeout mutants are excluded. The report always prints the configured mutant and timeout bounds.
+The score is `killed / (killed + survived)`. Invalid, timeout, and equivalent mutants are excluded. The report always prints the configured mutant and timeout bounds.
 
 ## Configuration
 

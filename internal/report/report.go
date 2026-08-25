@@ -128,6 +128,9 @@ func renderText(dst io.Writer, r model.Report) error {
 				w.printf("    %s\n", line)
 			}
 		}
+		if x.Verdict == model.VerdictEquivalent {
+			w.printf("  proof: %s\n", x.Mutation.EquivalentReason)
+		}
 	}
 	if len(r.Warnings) > 0 {
 		w.printf("\nwarnings\n")
@@ -136,7 +139,7 @@ func renderText(dst io.Writer, r model.Report) error {
 		}
 	}
 	s := r.Summary
-	w.printf("\nsummary\n  %d mutants generated\n  %d killed, %d survived, %d invalid, %d timeout, %d unknown, %d unsupported\n  score: %s\n", s.Generated, s.Killed, s.Survived, s.Invalid, s.Timeout, s.Unknown, s.Unsupported, s.ScoreText)
+	w.printf("\nsummary\n  %d mutants generated\n  %d killed, %d survived, %d invalid, %d timeout, %d unknown, %d unsupported, %d equivalent\n  score: %s\n", s.Generated, s.Killed, s.Survived, s.Invalid, s.Timeout, s.Unknown, s.Unsupported, s.Equivalent, s.ScoreText)
 	w.printf("timing: parse=%dms baseline=%dms mutants=%dms render=%dms total=%dms\n", r.Timing.ParsingMS, r.Timing.BaselineMS, r.Timing.ExecutionMS, r.Timing.RenderingMS, r.Timing.TotalMS)
 	return w.err
 }

@@ -1,6 +1,6 @@
 # Mutation Judge tutorial
 
-This tutorial starts with a deliberately weak test suite, uses a surviving mutant to identify the missing case, repairs the tests, and then moves through boolean attribution, test selection, invalid mutants, generated code, Git-diff analysis, reports, caching, CI policy, SARIF/GitHub annotations, and tracking survivors across runs.
+This tutorial starts with a deliberately weak test suite, uses a surviving mutant to identify the missing case, repairs the tests, and then moves through boolean attribution, test selection, invalid mutants, generated code, Git-diff analysis, reports, caching, CI policy, SARIF/GitHub annotations, tracking survivors across runs, and recognizing a genuinely equivalent mutant.
 
 All commands are intended to run from the repository root.
 
@@ -673,7 +673,44 @@ PR #102  100.0%
 
 `record` appends one entry per call to `.mutation-judge/history.ndjson` by default (`--history-file` to use another path); `trend` reads it back, oldest first. The label is entirely the caller's choice -- a PR number, branch name, or commit SHA are all reasonable, and Mutation Judge doesn't try to infer one itself, since which is meaningful is a property of the caller's CI, not of a report. Both subcommands also take `--format json` for scripting.
 
-## 17. Diagnose common outcomes
+## 17. Recognize an equivalent mutant
+
+Section 3 built a lexicographic comparator and found its boundary mutant with a survivor. A closely related shape -- a comparison inside an explicit inequality guard -- can make a boundary mutant genuinely unobservable, not merely untested:
+
+```go
+func Less(a, b Item) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	return a.SubmittedAt < b.SubmittedAt
+}
+```
+
+Inside that guarded body, `a.Priority != b.Priority` already excludes equality, so `a.Priority < b.Priority` and `a.Priority <= b.Priority` are the exact same relation there -- the one case strict and non-strict comparison disagree on can never occur. The boundary operator recognizes this exact shape and reports it as `EQUIVALENT`, skipping execution entirely, rather than generating an ordinary mutant a test would need to (impossibly) kill:
+
+```bash
+./bin/mutation-judge --no-cache --operators boundary ./examples/equivalent
+```
+
+```text
+EQUIVALENT M-a82d82c8f22d examples/equivalent/item.go:16:21 replace comparison < with <=
+  coverage: covered
+  proof: dominated by the enclosing guard "a.Priority != b.Priority" (line 15): that check already establishes the two operands are unequal, so this comparison's strict/non-strict boundary can never be observed
+KILLED M-af698edd8dc9 examples/equivalent/item.go:18:23 replace comparison < with <=
+  coverage: covered
+  killed by: TestLessBySubmittedAt
+
+summary
+  2 mutants generated
+  1 killed, 0 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported, 1 equivalent
+  score: 100.0% excluding invalid/timeout/unknown/unsupported/equivalent
+```
+
+The unguarded `SubmittedAt` comparison is an ordinary boundary mutant and needs a real test to kill it, same as always.
+
+**This is deliberately the narrowest slice of "equivalent-mutant detection" that's still a genuine proof, not a heuristic.** A survivor that doesn't match this exact shape -- no init statement on the `if`, a single bare `return` as the entire guarded body, a literal `X != Y` guard (not `&&`/`||`, not `!(X == Y)`), and side-effect-free operands that are exactly the guard's own operands -- is generated and executed as an ordinary mutant, same as before this feature existed. Every one of those restrictions exists specifically to rule out a way the "proof" could be wrong; see `docs/semantics.md`, "Conservative equivalent-mutant suppression," and `docs/limitations.md` limitation 7 for what this does and does not claim more broadly. Most equivalence remains genuinely undecided, on purpose.
+
+## 18. Diagnose common outcomes
 
 ### Baseline tests fail
 
@@ -714,7 +751,7 @@ Increase the explicit timeout only after deciding that the test is expected to c
 
 The process may have failed before Go printed a `--- FAIL:` line, for example during package initialization or from a process-wide crash. Inspect `diagnostic.evidence.backend_output` in JSON.
 
-## 18. Apply Mutation Judge to a real package
+## 19. Apply Mutation Judge to a real package
 
 A practical sequence is:
 
@@ -748,7 +785,7 @@ For every survivor, record one of three conclusions:
 2. **Equivalent or unreachable:** document the guard or invariant that makes the mutation irrelevant.
 3. **Operator not useful here:** exclude the operator from the policy scope rather than inflating the score with noise.
 
-## 19. Run all packaged examples
+## 20. Run all packaged examples
 
 The example runner builds a temporary executable and exercises all examples that do not require a Git diff:
 

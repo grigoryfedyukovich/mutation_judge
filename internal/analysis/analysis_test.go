@@ -502,3 +502,100 @@ func testProject(t *testing.T, source string) string {
 	}
 	return d
 }
+
+// countingBackend fails the test outright if it's ever called more
+// times than expected -- the exact mechanism this test needs, since
+// the property under test is "the equivalent mutant's backend.Run is
+// never invoked at all", not just "the final result is correct despite
+// however many times it ran".
+type countingBackend struct {
+	t          *testing.T
+	maxCalls   int
+	calls      int
+	baseline   runner.Result
+	afterwards runner.Result
+}
+
+func (b *countingBackend) Run(_ context.Context, _ runner.Request) runner.Result {
+	b.calls++
+	if b.calls > b.maxCalls {
+		b.t.Fatalf("backend.Run called a %dth time; expected at most %d -- an EQUIVALENT-classified mutant must never reach the backend", b.calls, b.maxCalls)
+	}
+	if b.calls == 1 {
+		return b.baseline
+	}
+	return b.afterwards
+}
+func (b *countingBackend) Name() string    { return "counting" }
+func (b *countingBackend) Version() string { return "v1" }
+
+// TestGuardedComparisonSkipsExecutionEntirely is the analysis-level
+// counterpart to internal/frontend's discovery-level guarded-comparison
+// tests: it proves the EQUIVALENT verdict actually short-circuits
+// execution end to end, not just that discovery attaches the right
+// annotation. Less has exactly two boundary mutants: a.X < b.X, guarded
+// by "a.X != b.X" and so provably equivalent, and the un-guarded
+// a.Y < b.Y fallback, which must still run normally.
+func TestGuardedComparisonSkipsExecutionEntirely(t *testing.T) {
+	d := testProject(t, `package p
+
+type Item struct {
+	X int
+	Y int
+}
+
+func Less(a, b Item) bool {
+	if a.X != b.X {
+		return a.X < b.X
+	}
+	return a.Y < b.Y
+}
+`)
+	cfg := config.Default()
+	cfg.Cache = false
+	cfg.Operators = []string{"boundary"}
+	b := &countingBackend{t: t, maxCalls: 2, baseline: runner.Result{Verdict: model.VerdictSurvived}, afterwards: runner.Result{Verdict: model.VerdictKilled, Tests: []string{"TestLess"}}}
+	r, err := (Engine{Version: "test", Backend: b}).Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Summary.Generated != 2 || r.Summary.Equivalent != 1 || r.Summary.Killed != 1 {
+		t.Fatalf("unexpected summary: %#v", r.Summary)
+	}
+	// baseline (1 call) + the one real mutant (1 call) = 2; the
+	// equivalent mutant contributing a 3rd call would have already
+	// failed the test inside countingBackend.Run above.
+	if b.calls != 2 {
+		t.Fatalf("expected exactly 2 backend calls (baseline + the one real mutant), got %d", b.calls)
+	}
+
+	var equiv, real *model.Result
+	for i := range r.Results {
+		switch r.Results[i].Verdict {
+		case model.VerdictEquivalent:
+			equiv = &r.Results[i]
+		case model.VerdictKilled:
+			real = &r.Results[i]
+		}
+	}
+	if equiv == nil || real == nil {
+		t.Fatalf("expected one EQUIVALENT and one KILLED result: %#v", r.Results)
+	}
+	if equiv.Mutation.EquivalentReason == "" {
+		t.Fatal("EQUIVALENT result must carry a non-empty EquivalentReason")
+	}
+	if !strings.Contains(equiv.Diagnostic.Statement, "equivalent:") {
+		t.Fatalf("diagnostic statement should surface the proof, got: %q", equiv.Diagnostic.Statement)
+	}
+	if equiv.DurationMS != 0 || equiv.Cached {
+		t.Fatalf("an EQUIVALENT result must show it never ran (zero duration, not cached): %#v", equiv)
+	}
+	if !strings.Contains(r.Summary.ScoreText, "equivalent") {
+		t.Fatalf("score text should name equivalent as an excluded category: %q", r.Summary.ScoreText)
+	}
+	// Score excludes EQUIVALENT from the denominator exactly like
+	// INVALID/TIMEOUT/UNKNOWN/UNSUPPORTED: 1 killed, 0 survived -> 100%.
+	if r.Summary.Score != 100 {
+		t.Fatalf("expected a 100%% score (1 killed / (1 killed + 0 survived), equivalent excluded), got %v", r.Summary.Score)
+	}
+}

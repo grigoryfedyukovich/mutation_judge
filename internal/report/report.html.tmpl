@@ -13,6 +13,7 @@
     .KILLED { border-left: 6px solid #188038; }
     .SURVIVED { border-left: 6px solid #d93025; }
     .INVALID, .TIMEOUT, .UNKNOWN, .UNSUPPORTED { border-left: 6px solid #f9ab00; }
+    .EQUIVALENT { border-left: 6px solid #1a73e8; }
     pre { background: #f6f8fa; padding: 1rem; overflow: auto; }
     .muted { color: #5f6368; }
   </style>
@@ -39,6 +40,7 @@
   <span>{{.Summary.Timeout}} timeout</span>
   <span>{{.Summary.Unknown}} unknown</span>
   <span>{{.Summary.Unsupported}} unsupported</span>
+  <span>{{.Summary.Equivalent}} equivalent</span>
   <span>score {{.Summary.ScoreText}}</span>
 </section>
 {{range .Results}}
@@ -49,6 +51,9 @@
   {{if eq .Verdict "SURVIVED"}}
   <p><strong>Suggested test:</strong> {{.Mutation.Suggestion}}</p>
   <pre>{{.Mutation.Diff}}</pre>
+  {{end}}
+  {{if eq .Verdict "EQUIVALENT"}}
+  <p><strong>Proof:</strong> {{.Mutation.EquivalentReason}}</p>
   {{end}}
   <p class="muted">{{if .CoverageKnown}}Baseline covered: {{.Covered}}{{else}}Coverage unknown{{end}} · {{.DurationMS}} ms{{if .Cached}} · cached{{end}}</p>
 </article>

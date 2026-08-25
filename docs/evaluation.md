@@ -49,7 +49,7 @@ The generated-file regression now verifies both default exclusion and `IncludeGe
 score: 50.0% excluding invalid/timeout/unknown/unsupported
 ```
 
-All three generated-option mutants in this slice are now killed. The guarded comparator and malformed-span cases remain documented work rather than being hidden or counted as proven defects. A future equivalent-mutant suppression pass may recognize simple dominating inequality guards, but v0.1 intentionally does not claim equivalence reasoning.
+All three generated-option mutants in this slice are now killed. The guarded comparator and malformed-span cases remain documented work rather than being hidden or counted as proven defects. A future equivalent-mutant suppression pass may recognize simple dominating inequality guards, but v0.1 intentionally does not claim equivalence reasoning. (That pass now exists -- see "Conservative equivalent-mutant suppression" below.)
 
 This evaluation is self-hosting rather than a broad external corpus study. The next corpus milestone is to run a fixed operator/bound set on three small Go repositories and record runtime, invalid rate, survivor review, and manually confirmed equivalent mutants.
 
@@ -72,7 +72,7 @@ score: 62.5% excluding invalid/timeout/unknown/unsupported
 
 The report also records `62` candidates discovered before the deterministic bound, `8` retained after it, backend `go-test` with its Go version, and operator semantics `mutation-judge-operators/v1`.
 
-The remaining three survivors are the guarded lexicographic comparator boundary mutations described above. The formerly surviving malformed-span branch is now killed by explicit reversed, zero-length, past-end, and path-escape regressions. This improves the bounded slice without suppressing likely equivalent comparator mutants or changing the score definition.
+The remaining three survivors are the guarded lexicographic comparator boundary mutations described above. The formerly surviving malformed-span branch is now killed by explicit reversed, zero-length, past-end, and path-escape regressions. This improves the bounded slice without suppressing likely equivalent comparator mutants or changing the score definition. (As above: suppression for exactly this guarded-comparator shape now exists -- see "Conservative equivalent-mutant suppression" below.)
 
 ## External corpus evaluation
 
@@ -225,4 +225,60 @@ operator/bound set was run on three small external Go repositories, with
 runtime, invalid rate, and a full manual survivor review recorded above,
 including concretely justified equivalent-mutant findings rather than
 assumed ones.
+
+## Conservative equivalent-mutant suppression
+
+**Date:** 2026-08-24
+**Tool:** Mutation Judge 0.1.3
+**Command:**
+
+```bash
+mutation-judge --no-cache --operators boundary --progress=false ./internal/frontend
+```
+
+The "Guarded sort comparisons" finding from the very first evaluation in
+this document, above, was documented by hand and left as a known,
+unaddressed source of score depression -- see that section, and
+`ISSUES.md`'s "Conservative equivalent-mutant suppression for locally
+provable guarded comparisons" item. `internal/frontend.detectGuardedComparison`
+now recognizes that exact shape (a comparison dominated by an
+`if X != Y { return X < Y }`-shaped guard on the same two operands; see
+`docs/semantics.md` for precisely which further conditions must all hold)
+and classifies it `EQUIVALENT` instead of generating an ordinary mutant,
+skipping execution entirely.
+
+Re-running the same self-hosting target confirms this against the identical
+real code the original finding described, not a synthetic restatement of
+it:
+
+```text
+EQUIVALENT M-de7bcf87a167 internal/frontend/frontend.go:46:28 replace comparison < with <=
+  coverage: not covered
+  proof: dominated by the enclosing guard "all[i].Span.File != all[j].Span.File" (line 45): that check already establishes the two operands are unequal, so this comparison's strict/non-strict boundary can never be observed
+EQUIVALENT M-508a02fe82d6 internal/frontend/frontend.go:49:33 replace comparison < with <=
+  coverage: covered
+  proof: dominated by the enclosing guard "all[i].Span.StartByte != all[j].Span.StartByte" (line 48): that check already establishes the two operands are unequal, so this comparison's strict/non-strict boundary can never be observed
+
+summary
+  20 mutants generated
+  2 killed, 16 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported, 2 equivalent
+  score: 11.1% excluding invalid/timeout/unknown/unsupported/equivalent
+```
+
+Both comparisons in `Discover`'s own `sort.Slice` comparator -- the exact
+lines the first evaluation traced by hand -- are now suppressed
+automatically, with the actual dominating guard cited as the proof rather
+than a bare `EQUIVALENT` label. The package's remaining sixteen survivors
+are untouched: this pass only ever removes a mutant from the survivor
+count when it can cite the specific guard that makes it unobservable, not
+because it looks like defensive code.
+
+This is deliberately the narrowest slice of "equivalent-mutant
+suppression" that's still real: one exact pattern, checked structurally,
+with execution skipped only where the proof holds. It does not generalize
+to `go-humanize`'s `oom()`/`hasComma` findings from the external corpus
+evaluation above (data-flow reasoning about a discarded return value and
+an idempotent string replacement respectively) or to any equivalence
+argument that isn't this one guarded-comparison shape -- see
+`docs/limitations.md` limitation 7.
 

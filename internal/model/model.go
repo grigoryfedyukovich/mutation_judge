@@ -24,6 +24,13 @@ type Mutation struct {
 	Description string `json:"description"`
 	Suggestion  string `json:"suggestion"`
 	Diff        string `json:"diff"`
+	// EquivalentReason is non-empty only when discovery itself proved
+	// this specific mutant is behaviorally equivalent to the original
+	// program in every reachable state -- currently just the boundary
+	// operator's guarded-comparison case (see
+	// internal/frontend.detectGuardedComparison). When set, the mutant
+	// is never executed at all: see model.VerdictEquivalent.
+	EquivalentReason string `json:"equivalent_reason,omitempty"`
 }
 
 type Verdict string
@@ -35,6 +42,14 @@ const (
 	VerdictTimeout     Verdict = "TIMEOUT"
 	VerdictUnknown     Verdict = "UNKNOWN"
 	VerdictUnsupported Verdict = "UNSUPPORTED"
+	// VerdictEquivalent means discovery itself proved this mutant
+	// behaviorally equivalent to the original before any test ever
+	// ran -- see Mutation.EquivalentReason. Like INVALID, TIMEOUT,
+	// UNKNOWN, and UNSUPPORTED, it is excluded from the score
+	// denominator: it is neither a demonstrated test gap (SURVIVED)
+	// nor demonstrated test strength (KILLED), and asserting it as
+	// either would be a claim discovery has no basis for.
+	VerdictEquivalent Verdict = "EQUIVALENT"
 )
 
 type Timing struct {
@@ -74,6 +89,7 @@ type Summary struct {
 	Timeout     int     `json:"timeout"`
 	Unknown     int     `json:"unknown"`
 	Unsupported int     `json:"unsupported"`
+	Equivalent  int     `json:"equivalent"`
 	Score       float64 `json:"score"`
 	ScoreText   string  `json:"score_text"`
 }

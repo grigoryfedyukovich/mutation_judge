@@ -258,6 +258,16 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 	if coverageKnown {
 		covered, known = coverage.Covered(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine)
 	}
+	// A mutant discovery itself already proved equivalent (see
+	// Mutation.EquivalentReason and frontend.detectGuardedComparison)
+	// never runs at all: there is no test outcome to observe that
+	// could change the answer, and running it anyway would just spend
+	// a `go test` invocation to relearn something already proven. This
+	// intentionally bypasses the cache too -- there is nothing to
+	// cache a lookup key for, since no backend ever ran.
+	if mut.EquivalentReason != "" {
+		return makeEquivalentResult(mut, covered, known), false, nil, nil
+	}
 	scope := mutantTestScope(req, p, mut)
 	key := cache.Key(
 		e.Version,
@@ -533,7 +543,8 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 		Semantics: []string{
 			"Each mutant is a single source-span replacement applied atomically to a temporary copy of the Go module.",
 			"A passing selected go test command means SURVIVED; a failing test, including a runtime panic, means KILLED; compilation/type errors mean INVALID; deadline expiry means TIMEOUT.",
-			"INVALID, TIMEOUT, UNKNOWN, and UNSUPPORTED mutants are excluded from the mutation-score denominator.",
+			"EQUIVALENT means discovery proved the mutant behaviorally identical to the original before any test ran (see each such result's diagnostic for the specific proof); it is never executed.",
+			"INVALID, TIMEOUT, UNKNOWN, UNSUPPORTED, and EQUIVALENT mutants are excluded from the mutation-score denominator.",
 			"Coverage is baseline statement coverage from the selected tests and is explanatory, not a substitute for executing a mutant.",
 		},
 		Warnings: warnings,
@@ -573,6 +584,25 @@ func makeResult(mut model.Mutation, rr runner.Result, cached, covered, coverageK
 	}
 }
 
+// makeEquivalentResult builds the Result for a mutant discovery
+// already proved equivalent, without ever invoking the backend. Its
+// Diagnostic carries the actual proof (mut.EquivalentReason) as the
+// statement, not a generic "equivalent" label, so a report reader (or
+// --format sarif/github, which excludes this verdict from findings
+// entirely -- see report.sarifIncluded/githubLevel) can see exactly
+// why without re-deriving it.
+func makeEquivalentResult(mut model.Mutation, covered, coverageKnown bool) model.Result {
+	return model.Result{
+		Mutation: mut, Verdict: model.VerdictEquivalent, Covered: covered, CoverageKnown: coverageKnown,
+		Diagnostic: model.Diagnostic{
+			ID: verdictRule(model.VerdictEquivalent), Location: mut.Span,
+			Statement:   "equivalent: " + mut.EquivalentReason,
+			Evidence:    map[string]any{"source_diff": mut.Diff},
+			Assumptions: []string{"the equivalence proof is purely syntactic and local to the guard shown; see docs/semantics.md"},
+		},
+	}
+}
+
 func verdictRule(v model.Verdict) string {
 	switch v {
 	case model.VerdictKilled:
@@ -585,6 +615,8 @@ func verdictRule(v model.Verdict) string {
 		return "MJ-VERDICT-TIMEOUT"
 	case model.VerdictUnsupported:
 		return "MJ-VERDICT-UNSUPPORTED"
+	case model.VerdictEquivalent:
+		return "MJ-VERDICT-EQUIVALENT"
 	default:
 		return "MJ-VERDICT-UNKNOWN"
 	}
@@ -604,6 +636,8 @@ func summarize(results []model.Result) model.Summary {
 			s.Timeout++
 		case model.VerdictUnsupported:
 			s.Unsupported++
+		case model.VerdictEquivalent:
+			s.Equivalent++
 		default:
 			s.Unknown++
 		}
@@ -614,7 +648,7 @@ func summarize(results []model.Result) model.Summary {
 		s.ScoreText = "n/a (no scoreable mutants)"
 	} else {
 		s.Score = 100 * float64(s.Killed) / float64(den)
-		s.ScoreText = fmt.Sprintf("%.1f%% excluding invalid/timeout/unknown/unsupported", s.Score)
+		s.ScoreText = fmt.Sprintf("%.1f%% excluding invalid/timeout/unknown/unsupported/equivalent", s.Score)
 	}
 	return s
 }

@@ -13,6 +13,6 @@ SURVIVED M-demo pkg/demo.go:3:5 replace comparison > with >=
 
 summary
   1 mutants generated
-  0 killed, 1 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported
+  0 killed, 1 survived, 0 invalid, 0 timeout, 0 unknown, 0 unsupported, 0 equivalent
   score: 0.0% excluding invalid/timeout
 timing: parse=1ms baseline=2ms mutants=3ms render=0ms total=7ms

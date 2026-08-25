@@ -16,7 +16,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v2"
+const SemanticsVersion = "mutation-judge-operators/v3"
 
 type Options struct {
 	Operators        map[string]bool
@@ -68,7 +68,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	}
 	lineIndex := newLineIndex(src)
 	var out []model.Mutation
-	add := func(op, rule string, start, end token.Pos, replacement, description, suggestion string) {
+	add := func(op, rule string, start, end token.Pos, replacement, description, suggestion, equivalentReason string) {
 		sp := span(fset, rel, start, end)
 		if !overlapsChanged(sp, opts.ChangedLines) {
 			return
@@ -82,16 +82,25 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			ID: id, Operator: op, RuleID: rule, Span: sp,
 			Original: original, Replacement: replacement,
 			Description: description, Suggestion: suggestion,
-			Diff: unifiedDiff(rel, src, lineIndex, sp.StartByte, sp.EndByte, replacement),
+			Diff:             unifiedDiff(rel, src, lineIndex, sp.StartByte, sp.EndByte, replacement),
+			EquivalentReason: equivalentReason,
 		})
 	}
+	// equivalentGuard maps a comparison's *ast.BinaryExpr node to the
+	// human-readable reason it's provably equivalent under boundary
+	// mutation, populated by the *ast.IfStmt case below before
+	// ast.Inspect's pre-order walk reaches that same nested node --
+	// see detectGuardedComparison's doc comment for exactly what
+	// pattern this requires.
+	equivalentGuard := map[*ast.BinaryExpr]string{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.BinaryExpr:
 			if opts.Operators["boundary"] {
 				if repl, ok := boundaryReplacement(x.Op); ok {
 					add("boundary", "MJ-BOUNDARY", x.OpPos, x.OpPos+token.Pos(len(x.Op.String())), repl,
-						fmt.Sprintf("replace comparison %s with %s", x.Op, repl), boundarySuggestion(x, src, fset))
+						fmt.Sprintf("replace comparison %s with %s", x.Op, repl), boundarySuggestion(x, src, fset),
+						equivalentGuard[x])
 				}
 			}
 			if opts.Operators["boolean"] && (x.Op == token.LAND || x.Op == token.LOR) {
@@ -100,23 +109,23 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				connector := x.Op.String()
 				add("boolean", "MJ-BOOL-DROP-RIGHT", x.Pos(), x.End(), "("+left+")",
 					fmt.Sprintf("delete the right operand of %s", connector),
-					booleanDeletionSuggestion(x.Op, compact(left), compact(right)))
+					booleanDeletionSuggestion(x.Op, compact(left), compact(right)), "")
 				add("boolean", "MJ-BOOL-DROP-LEFT", x.Pos(), x.End(), "("+right+")",
 					fmt.Sprintf("delete the left operand of %s", connector),
-					booleanDeletionSuggestion(x.Op, compact(right), compact(left)))
+					booleanDeletionSuggestion(x.Op, compact(right), compact(left)), "")
 			}
 			if opts.Operators["arithmetic"] {
 				if repl, ok := arithmeticReplacement(x.Op); ok {
 					add("arithmetic", "MJ-ARITHMETIC", x.OpPos, x.OpPos+token.Pos(len(x.Op.String())), repl,
 						fmt.Sprintf("replace arithmetic operator %s with %s", x.Op, repl),
-						"add a small table-driven case that distinguishes the original arithmetic result from the mutant")
+						"add a small table-driven case that distinguishes the original arithmetic result from the mutant", "")
 				}
 			}
 		case *ast.UnaryExpr:
 			if opts.Operators["boolean"] && x.Op == token.NOT {
 				repl := "(" + source(src, fset, x.X.Pos(), x.X.End()) + ")"
 				add("boolean", "MJ-BOOL-DROP-NOT", x.Pos(), x.End(), repl,
-					"delete boolean negation", "add paired true/false cases that make the negation observable")
+					"delete boolean negation", "add paired true/false cases that make the negation observable", "")
 			}
 		case *ast.Ident:
 			if opts.Operators["boolean"] && (x.Name == "true" || x.Name == "false") {
@@ -125,7 +134,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					repl = "false"
 				}
 				add("boolean", "MJ-BOOL-LITERAL", x.Pos(), x.End(), repl,
-					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant")
+					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant", "")
 			}
 		case *ast.IfStmt:
 			if opts.Operators["errorreturn"] {
@@ -144,11 +153,17 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 							}
 							add("errorreturn", "MJ-ERR-SWALLOW", last.Pos(), last.End(), "nil",
 								fmt.Sprintf("swallow the checked value: replace returned %s with nil", checkedIdent.Name),
-								fmt.Sprintf("add a test that triggers this branch and asserts the propagated %s is actually non-nil, not just that the call fails", checkedIdent.Name))
+								fmt.Sprintf("add a test that triggers this branch and asserts the propagated %s is actually non-nil, not just that the call fails", checkedIdent.Name), "")
 						}
 					}
 				}
 			}
+			// Boundary equivalent-mutant suppression: this only ever
+			// populates equivalentGuard, never calls add() directly --
+			// the *ast.BinaryExpr case above is what actually emits the
+			// (possibly-marked) boundary mutant once ast.Inspect's
+			// pre-order walk reaches the nested comparison node.
+			detectGuardedComparison(x, src, fset, equivalentGuard)
 		case *ast.CaseClause:
 			if opts.Operators["switch"] && len(x.Body) > 0 {
 				label := "default"
@@ -157,19 +172,19 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				}
 				add("switch", "MJ-SWITCH-DROP-CASE", x.Pos(), x.End(), "",
 					fmt.Sprintf("delete case %s", label),
-					fmt.Sprintf("add a test that exercises case %s and would fail if that case were missing", label))
+					fmt.Sprintf("add a test that exercises case %s and would fail if that case were missing", label), "")
 			}
 		case *ast.ForStmt:
 			if opts.Operators["loop"] {
 				if x.Cond != nil {
 					add("loop", "MJ-LOOP-COND-FALSE", x.Cond.Pos(), x.Cond.End(), "false",
 						"force the loop condition false (loop body never executes)",
-						"add a test that depends on the loop body actually running at least once")
+						"add a test that depends on the loop body actually running at least once", "")
 				} else if len(x.Body.List) > 0 {
 					first := x.Body.List[0]
 					add("loop", "MJ-LOOP-BREAK-FIRST", first.Pos(), first.End(), "break",
 						"insert an immediate break (loop body never executes)",
-						"add a test that depends on the loop body actually running")
+						"add a test that depends on the loop body actually running", "")
 				}
 			}
 		case *ast.RangeStmt:
@@ -177,7 +192,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				first := x.Body.List[0]
 				add("loop", "MJ-LOOP-BREAK-FIRST", first.Pos(), first.End(), "break",
 					"insert an immediate break (loop body never executes)",
-					"add a test that depends on the loop body actually running")
+					"add a test that depends on the loop body actually running", "")
 			}
 		case *ast.CallExpr:
 			if opts.Operators["channel"] {
@@ -188,7 +203,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 						if capSrc != "0" {
 							add("channel", "MJ-CHAN-UNBUFFER", capArg.Pos(), capArg.End(), "0",
 								fmt.Sprintf("replace channel capacity %s with 0 (make it unbuffered)", capSrc),
-								"add a test that depends on the channel being buffered, e.g. a non-blocking send before any receiver is ready")
+								"add a test that depends on the channel being buffered, e.g. a non-blocking send before any receiver is ready", "")
 						}
 					}
 				}
@@ -201,7 +216,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				}
 				add("channel", "MJ-CHAN-SELECT-DROP-CASE", x.Pos(), x.End(), "",
 					fmt.Sprintf("delete select case %s", label),
-					fmt.Sprintf("add a test that exercises the %s communication and would fail if that case were missing", label))
+					fmt.Sprintf("add a test that exercises the %s communication and would fail if that case were missing", label), "")
 			}
 		}
 		return true
@@ -232,6 +247,156 @@ func boundaryReplacement(op token.Token) (string, bool) {
 		return ">", true
 	default:
 		return "", false
+	}
+}
+
+// detectGuardedComparison implements the boundary operator's
+// conservative equivalent-mutant suppression: the "guarded sort
+// comparisons" pattern documented in docs/evaluation.md, e.g.
+//
+//	if a.Field != b.Field {
+//		return a.Field < b.Field
+//	}
+//
+// Inside that if-body, a.Field != b.Field is already known true, so
+// a.Field < b.Field and a.Field <= b.Field (or > / >=) are the exact
+// same relation there -- equality, the one case strict and
+// non-strict comparison disagree on, is unreachable. Mutating the
+// comparison's operator between strict and non-strict is therefore
+// unobservable by any test, in any state, not just untested by the
+// current suite: this is a real proof, not a heuristic guess.
+//
+// This match is deliberately narrow -- every restriction below exists
+// specifically to rule out a way the "proof" could be wrong, not for
+// simplicity:
+//
+//   - x.Init must be nil: an init statement can introduce or shadow a
+//     variable the comparison relies on, which the guard's guarantee
+//     would then not actually be about.
+//   - The if-body must be exactly one statement, a bare return of the
+//     comparison: this rules out any intervening statement that could
+//     reassign an operand between the guard and the comparison. There
+//     is deliberately no attempt to look further into a multi-statement
+//     body for "the" dominated comparison.
+//   - The guard must be a literal X != Y (token.NEQ) directly as the
+//     if's condition (parens unwrapped): no &&/||, no !(X == Y), no
+//     other logically-equivalent-but-differently-shaped form. Matching
+//     more shapes here would mean trusting a wider surface of pattern
+//     recognition instead of one exact, checked case.
+//   - Both operands must be side-effect-free (see
+//     isSideEffectFreeOperand) -- no function/method calls, no channel
+//     receives -- and the comparison's two operands must be exactly the
+//     guard's two operands (see sameOperand), in either order. Without
+//     this, "the same expression" could silently mean "two calls that
+//     happen to look identical but can return different values".
+//
+// Any case this doesn't recognize is left as an ordinary mutant --
+// generated and executed exactly as before. A missed equivalent mutant
+// is a survivor a human can review; a wrongly suppressed one is a
+// false claim of certainty printed in a report, which is the failure
+// mode this function exists to avoid, not just to reduce.
+func detectGuardedComparison(x *ast.IfStmt, src []byte, fset *token.FileSet, out map[*ast.BinaryExpr]string) {
+	if x.Init != nil {
+		return
+	}
+	guard, ok := unwrapParen(x.Cond).(*ast.BinaryExpr)
+	if !ok || guard.Op != token.NEQ {
+		return
+	}
+	if len(x.Body.List) != 1 {
+		return
+	}
+	ret, ok := x.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return
+	}
+	cmp, ok := ret.Results[0].(*ast.BinaryExpr)
+	if !ok {
+		return
+	}
+	switch cmp.Op {
+	case token.LSS, token.LEQ, token.GTR, token.GEQ:
+	default:
+		return
+	}
+	if !isSideEffectFreeOperand(guard.X) || !isSideEffectFreeOperand(guard.Y) {
+		return
+	}
+	matches := (sameOperand(guard.X, cmp.X) && sameOperand(guard.Y, cmp.Y)) ||
+		(sameOperand(guard.X, cmp.Y) && sameOperand(guard.Y, cmp.X))
+	if !matches {
+		return
+	}
+	out[cmp] = fmt.Sprintf(
+		"dominated by the enclosing guard %q (line %d): that check already establishes the two operands are unequal, so this comparison's strict/non-strict boundary can never be observed",
+		compact(source(src, fset, guard.Pos(), guard.End())), fset.Position(x.Pos()).Line,
+	)
+}
+
+// isSideEffectFreeOperand reports whether e is built purely from
+// identifiers, field selectors, index expressions, pointer
+// dereferences, parenthesization, and basic literals -- nothing that
+// could have a side effect or read a different value on a second,
+// textually adjacent evaluation (no function/method calls, no channel
+// receives). This is what makes reasoning about "the same expression,
+// evaluated twice, reads the same value" safe without any actual
+// data-flow analysis: given detectGuardedComparison's single-statement
+// body requirement, nothing can execute between the guard's evaluation
+// and the comparison's, so a side-effect-free, textually identical
+// expression is guaranteed to still read the same underlying storage.
+func isSideEffectFreeOperand(e ast.Expr) bool {
+	switch x := unwrapParen(e).(type) {
+	case *ast.Ident, *ast.BasicLit:
+		return true
+	case *ast.SelectorExpr:
+		return isSideEffectFreeOperand(x.X)
+	case *ast.IndexExpr:
+		return isSideEffectFreeOperand(x.X) && isSideEffectFreeOperand(x.Index)
+	case *ast.StarExpr:
+		return isSideEffectFreeOperand(x.X)
+	default:
+		return false
+	}
+}
+
+// sameOperand reports whether a and b are the exact same expression,
+// textually: same identifier names, same selector/index/star
+// structure all the way down. It is purely syntactic -- it has no
+// type information and does not need any, because it only needs to
+// answer "is this literally the same read, written the same way": if
+// it isn't textually identical, the two expressions might read
+// different storage (a different field, a different index), so this
+// conservatively answers no rather than guessing.
+func sameOperand(a, b ast.Expr) bool {
+	a, b = unwrapParen(a), unwrapParen(b)
+	switch x := a.(type) {
+	case *ast.Ident:
+		y, ok := b.(*ast.Ident)
+		return ok && x.Name == y.Name
+	case *ast.SelectorExpr:
+		y, ok := b.(*ast.SelectorExpr)
+		return ok && x.Sel.Name == y.Sel.Name && sameOperand(x.X, y.X)
+	case *ast.IndexExpr:
+		y, ok := b.(*ast.IndexExpr)
+		return ok && sameOperand(x.X, y.X) && sameOperand(x.Index, y.Index)
+	case *ast.StarExpr:
+		y, ok := b.(*ast.StarExpr)
+		return ok && sameOperand(x.X, y.X)
+	case *ast.BasicLit:
+		y, ok := b.(*ast.BasicLit)
+		return ok && x.Kind == y.Kind && x.Value == y.Value
+	default:
+		return false
+	}
+}
+
+func unwrapParen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
 	}
 }
 
