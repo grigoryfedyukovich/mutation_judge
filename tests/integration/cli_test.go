@@ -614,6 +614,125 @@ func AlwaysTrue() bool { return true }
 	}
 }
 
+// TestCompareLikelyShiftedEndToEnd reproduces, with the real binary,
+// the exact scenario internal/compare's package doc warns about: an
+// edit earlier in a file (here, inserting an unrelated function above
+// CountPositive) shifts every later mutant's byte offset and so its
+// ID, even though the mutation site itself never changed. Without
+// findLikelyShifts, this would show up as a REMOVED entry plus an
+// unrelated-looking NEW entry for what is, to a human, obviously the
+// same survivor. This confirms the correlation actually fires against
+// a real go/ast-shifted ID, not just hand-constructed model.Result
+// data.
+func TestCompareLikelyShiftedEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	moduleDir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module shiftfixture\n\ngo 1.22\n",
+		"counter.go": `package shiftfixture
+
+func CountPositive(n int, f func(int)) {
+	if n > 0 {
+		f(n)
+	}
+}
+`,
+		"counter_test.go": `package shiftfixture
+
+import "testing"
+
+// Deliberately omits n == 0 so the > to >= mutant survives.
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(moduleDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("baseline run failed: %v\n%s", err, out)
+	}
+
+	// Insert an unrelated function ABOVE CountPositive. The
+	// comparison itself (line, column, operator, replacement) is
+	// otherwise untouched -- only its byte offset in the file, and so
+	// its ID, changes.
+	shifted := `package shiftfixture
+
+// Unrelated returns true, unconditionally. Its only purpose here is
+// to occupy lines above CountPositive so that function's own boundary
+// mutant gets a new byte offset -- and so a new ID -- without the
+// comparison itself changing at all.
+func Unrelated() bool {
+	return true
+}
+
+func CountPositive(n int, f func(int)) {
+	if n > 0 {
+		f(n)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(moduleDir, "counter.go"), []byte(shifted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	currentPath := filepath.Join(t.TempDir(), "current.json")
+	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("current run failed: %v\n%s", err, out)
+	}
+
+	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compare failed: %v\n%s", err, out)
+	}
+	var d struct {
+		NewSurvivors   []json.RawMessage `json:"new_survivors"`
+		RemovedMutants []json.RawMessage `json:"removed_mutants"`
+		LikelyShifted  []struct {
+			OldLine        int  `json:"old_line"`
+			NewLine        int  `json:"new_line"`
+			VerdictChanged bool `json:"verdict_changed"`
+		} `json:"likely_shifted"`
+	}
+	if err := json.Unmarshal(out, &d); err != nil {
+		t.Fatalf("compare --format json produced invalid JSON: %v\n%s", err, out)
+	}
+	// The strict, ID-exact classification still shows this as a
+	// removed+new pair -- that part of the contract is unchanged.
+	if len(d.RemovedMutants) != 1 || len(d.NewSurvivors) != 1 {
+		t.Fatalf("expected the strict classification to show 1 removed and 1 new (ID churn from the shift), got removed=%d new=%d:\n%s", len(d.RemovedMutants), len(d.NewSurvivors), out)
+	}
+	// But the correlation layer must recognize it as the same mutation.
+	if len(d.LikelyShifted) != 1 {
+		t.Fatalf("expected exactly 1 likely-shifted correlation, got %d:\n%s", len(d.LikelyShifted), out)
+	}
+	sc := d.LikelyShifted[0]
+	if sc.VerdictChanged {
+		t.Fatalf("the mutant's actionable-status didn't actually change, only its ID did -- verdict_changed must be false:\n%s", out)
+	}
+	if sc.OldLine == sc.NewLine {
+		t.Fatalf("expected the line number to have actually moved (that's the whole point of this scenario): old=%d new=%d", sc.OldLine, sc.NewLine)
+	}
+}
+
 func TestRecordAndTrendEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)

@@ -694,6 +694,46 @@ For scripting, `--format json` gives the same four buckets as clean fields -- `n
 
 **Matching is by mutant ID, and that has a real limitation worth understanding before relying on it.** A mutant's ID hashes its file path and its raw byte offset in that file -- not an AST-stable identity (see `internal/frontend.mutationID`). Editing anything earlier in the same file shifts the byte offset, and so the ID, of every mutant after that point, even ones whose actual code never changed. A file the change never touches at all compares perfectly; a file the change edits will show some ID churn below the edit point that isn't a real gap, fix, or removal, just noise from the shift. This is why the example above patches `counter_test.go`, not `counter.go` -- keeping the production file untouched is what keeps the mutant's ID, and so its identity across the two reports, stable.
 
+`compare` narrows that specific noise with a conservative correlation pass. Reusing the fixture above, insert an unrelated function *above* `CountPositive` -- the comparison itself never changes, only its position in the file:
+
+```go
+package boundary
+
+// Unrelated occupies space above CountPositive.
+func Unrelated() bool {
+	return true
+}
+
+func CountPositive(n int, f func(int)) {
+	if n > 0 {
+		f(n)
+	}
+}
+```
+
+```text
+compare: baseline vs current
+  baseline score: 0.0% excluding invalid/timeout/unknown/unsupported/equivalent
+  current score:  0.0% excluding invalid/timeout/unknown/unsupported/equivalent
+
+new survivors: 1
+  SURVIVED counter.go:9:7 replace comparison > with >=
+    suggested test: add a boundary case where n equals 0 and assert the original branch behavior
+    (new mutant: not present in the baseline report)
+    likely shifted from the removed entry at counter.go:4 (likely the same mutation, relocated by an earlier unrelated edit in this file -- not a real change)
+
+fixed survivors: 0
+
+removed mutants: 1
+  was SURVIVED counter.go:4:7 replace comparison > with >=
+    (no longer present in the current report)
+    likely shifted to the new entry at counter.go:9 (likely the same mutation, relocated by an earlier unrelated edit in this file -- not a real change)
+
+unchanged: 0
+```
+
+The strict, ID-exact counts still show this as one removed entry and one new entry -- that part of the contract never changes, and `--format json`'s `new_survivors`/`removed_mutants` still list both. What's new is `likely_shifted`, a separate, purely additive field: an unambiguous match between a removed entry and a brand-new-ID entry on file, operator, rule, original/replacement text, column, and the actual pre-mutation source line (not just position -- two different comparisons that happen to sit at the same column are not enough to match). When exactly one candidate exists on each side, it's reported with `verdict_changed: false` here, since nothing about the mutant's actionable-status actually changed, only its ID. A genuine regression that happens to coincide with a shift -- say, a mutant that really was killed before the edit and really does survive after -- still gets `verdict_changed: true` and is never discounted as noise; the correlation adds context, it never overrides the exact computation. An ambiguous fingerprint (matching zero, or more than one, candidate on either side) is correctly left uncorrelated rather than guessed -- see `internal/compare.findLikelyShifts`'s doc comment for exactly what has to match and why.
+
 For a running score history:
 
 ```bash

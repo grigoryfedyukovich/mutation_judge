@@ -12,7 +12,18 @@
 // is untouched. A file the change never touches at all compares
 // reliably; a file the change edits will show ID churn below the edit
 // point regardless of whether those lower mutation sites actually
-// changed. See docs/limitations.md.
+// changed -- concretely, the same survivor can disappear from
+// RemovedMutants and reappear in NewSurvivors under a new ID, even
+// though nothing about that comparison itself changed. See
+// docs/limitations.md.
+//
+// findLikelyShifts (shift.go) narrows that specific failure mode: it
+// looks for an unambiguous structural fingerprint match between a
+// removed entry and a brand-new-ID entry in the same file and, when it
+// finds exactly one, records the correlation in Diff.LikelyShifted.
+// This is additive and heuristic, not a correction -- NewSurvivors,
+// FixedSurvivors, RemovedMutants, and UnchangedCount are always the
+// exact, ID-based truth, unchanged by whatever LikelyShifted finds.
 package compare
 
 import (
@@ -92,6 +103,17 @@ type Diff struct {
 	CurrentScore   float64 `json:"current_score"`
 	BaselineText   string  `json:"baseline_score_text"`
 	CurrentText    string  `json:"current_score_text"`
+	// LikelyShifted is an additional, purely informational
+	// correlation layer over NewSurvivors and RemovedMutants: pairs
+	// this package's fingerprint believes are the same logical
+	// mutation, just relocated by an unrelated earlier edit shifting
+	// its byte-offset-based ID (see docs/limitations.md limitation
+	// 12). Nothing is removed from NewSurvivors, RemovedMutants, or
+	// UnchangedCount on the strength of this -- see
+	// findLikelyShifts's doc comment for why matching is
+	// heuristic, not exact, and what specifically has to line up
+	// before two entries are even considered.
+	LikelyShifted []ShiftCandidate `json:"likely_shifted"`
 }
 
 // Compare builds a Diff between a baseline report (e.g. the base
@@ -164,6 +186,7 @@ func Compare(baseline, current model.Report) Diff {
 	sortByLocation(d.NewSurvivors)
 	sortByLocation(d.FixedSurvivors)
 	sortByLocation(d.RemovedMutants)
+	d.findLikelyShifts()
 	return d
 }
 

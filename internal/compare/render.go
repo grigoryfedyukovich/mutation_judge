@@ -11,8 +11,17 @@ import (
 // RenderText writes a human-readable diff summary, with per-mutant
 // detail for new survivors, fixed survivors, and removed mutants (the
 // three buckets with something to say) and a bare count for the
-// unchanged majority.
+// unchanged majority. Any entry findLikelyShifts correlated with one
+// on the other side gets an inline note pointing at its counterpart,
+// so a reader can immediately tell "probably just moved" from "a real
+// change" without cross-referencing IDs by hand.
 func RenderText(w io.Writer, d Diff) error {
+	byRemovedID, byNewID := map[string]ShiftCandidate{}, map[string]ShiftCandidate{}
+	for _, sc := range d.LikelyShifted {
+		byRemovedID[sc.RemovedID] = sc
+		byNewID[sc.NewID] = sc
+	}
+
 	ew := &errWriter{w: w}
 	ew.printf("compare: baseline vs current\n  baseline score: %s\n  current score:  %s\n\n", d.BaselineText, d.CurrentText)
 
@@ -25,6 +34,9 @@ func RenderText(w io.Writer, d Diff) error {
 		}
 		if md.Baseline == nil {
 			ew.printf("    (new mutant: not present in the baseline report)\n")
+		}
+		if sc, ok := byNewID[md.ID]; ok {
+			ew.printf("    likely shifted from the removed entry at %s:%d (%s)\n", sc.File, sc.OldLine, sc.Note)
 		}
 	}
 
@@ -39,6 +51,9 @@ func RenderText(w io.Writer, d Diff) error {
 		m := md.Mutation()
 		ew.printf("  was %s %s:%d:%d %s\n", string(md.Baseline.Verdict), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
 		ew.printf("    (no longer present in the current report)\n")
+		if sc, ok := byRemovedID[md.ID]; ok {
+			ew.printf("    likely shifted to the new entry at %s:%d (%s)\n", sc.File, sc.NewLine, sc.Note)
+		}
 	}
 
 	ew.printf("\nunchanged: %d\n", d.UnchangedCount)
@@ -68,6 +83,9 @@ func RenderJSON(w io.Writer, d Diff) error {
 	}
 	if d.RemovedMutants == nil {
 		d.RemovedMutants = []MutantDiff{}
+	}
+	if d.LikelyShifted == nil {
+		d.LikelyShifted = []ShiftCandidate{}
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
