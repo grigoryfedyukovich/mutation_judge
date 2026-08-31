@@ -3,7 +3,9 @@ package analysis
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -257,7 +259,7 @@ func TestParallelExecutionHardErrorStopsAllWorkers(t *testing.T) {
 
 	backend := &neverCalledBackend{t: t}
 	engine := Engine{Version: "test", Backend: backend}
-	prepared, err := engine.prepare(Request{CWD: dir, Patterns: []string{"."}, Config: cfg})
+	prepared, err := engine.prepare(Request{CWD: dir, Patterns: []string{"."}, Config: cfg}, runner.ToolchainInfo{GoVersion: "go1.99"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +408,99 @@ func TestCacheKeyIsInsensitiveToWorkerCount(t *testing.T) {
 	for _, r := range second.Results {
 		if !r.Cached {
 			t.Fatalf("expected %s to be a cache hit after only changing --workers, got a fresh execution", r.Mutation.ID)
+		}
+	}
+}
+
+// fakeGoWrapper builds a `go` shell-script wrapper for TestCacheKeySensitiveToGoToolchainChange:
+// it intercepts only the exact `go env GOVERSION GOOS GOARCH CGO_ENABLED
+// GOFLAGS` invocation DetectToolchain makes (matching all six arguments,
+// in order) and answers it with goversion plus fixed placeholder values
+// for the rest; every other invocation -- `go env GOMOD`, `go list
+// ...`, and so on, all of which prepare() genuinely needs a real
+// toolchain for -- is forwarded to the real go binary on the caller's
+// PATH, found via exec.LookPath before PATH is overridden. Returns the
+// directory to prepend to PATH; skips the test outright if there is no
+// real go to wrap or the platform has no /bin/sh (this fixture is
+// intentionally POSIX-shell-only, matching this file's other
+// filesystem-fixture helpers).
+func fakeGoWrapper(t *testing.T, goversion string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake go wrapper fixture is POSIX-shell-only")
+	}
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go on PATH to wrap")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		`if [ "$1" = "env" ] && [ "$2" = "GOVERSION" ] && [ "$3" = "GOOS" ] && [ "$4" = "GOARCH" ] && [ "$5" = "CGO_ENABLED" ] && [ "$6" = "GOFLAGS" ]; then` + "\n" +
+		`  echo "` + goversion + `"` + "\n" +
+		`  echo fakeos` + "\n" +
+		`  echo fakearch` + "\n" +
+		`  echo 0` + "\n" +
+		`  echo ""` + "\n" +
+		`  exit 0` + "\n" +
+		"fi\n" +
+		`exec "` + realGo + `" "$@"` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestCacheKeySensitiveToGoToolchainChange is the permanent regression
+// test for the real P0 bug: the cache key used to be keyed off
+// runtime.Version() -- the toolchain that happened to compile the
+// mutation-judge binary itself -- rather than runner.DetectToolchain's
+// `go env GOVERSION`, the toolchain that actually builds and runs a
+// mutant's tests. The two can silently disagree (a cross-compiled CLI,
+// or simply the `go` on PATH being upgraded or downgraded after the
+// binary was built), and when they do, the old key stayed identical
+// across a real toolchain change, so a cached verdict from before the
+// change got reused after it -- a stale, silently wrong verdict, since
+// vet/language/runtime behavior can differ across toolchain versions.
+// Confirmed via the same shape as TestCacheKeyIsInsensitiveToWorkerCount
+// (identical source, mutant set, and config across both runs) but with
+// the opposite expectation: unlike --workers, a toolchain difference
+// must never be reused. The backend itself is faked, exactly as in that
+// sibling test, so no real `go test` execution is needed to observe the
+// cache behavior; only DetectToolchain's own `go env` call is faked.
+func TestCacheKeySensitiveToGoToolchainChange(t *testing.T) {
+	dir, verdicts := fourMutantFixture(t)
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	cfg.CacheDir = filepath.Join(dir, ".mutation-judge", "cache")
+	origPath := os.Getenv("PATH")
+
+	t.Setenv("PATH", fakeGoWrapper(t, "go1.111.1fake")+string(os.PathListSeparator)+origPath)
+	first, err := (Engine{Version: "test", Backend: &contentAwareFakeBackend{relPath: "p.go", verdicts: verdicts}}).
+		Analyze(context.Background(), Request{CWD: dir, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GoVersion != "go1.111.1fake" {
+		t.Fatalf("report GoVersion = %q, want the invoked toolchain's own go env GOVERSION, not runtime.Version()", first.GoVersion)
+	}
+	for _, r := range first.Results {
+		if r.Cached {
+			t.Fatalf("expected a cold cache on the first run, but %s was already reported cached", r.Mutation.ID)
+		}
+	}
+
+	t.Setenv("PATH", fakeGoWrapper(t, "go1.222.2fake")+string(os.PathListSeparator)+origPath)
+	second, err := (Engine{Version: "test", Backend: &contentAwareFakeBackend{relPath: "p.go", verdicts: verdicts}}).
+		Analyze(context.Background(), Request{CWD: dir, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.GoVersion != "go1.222.2fake" {
+		t.Fatalf("report GoVersion = %q, want the invoked toolchain's own go env GOVERSION, not runtime.Version()", second.GoVersion)
+	}
+	for _, r := range second.Results {
+		if r.Cached {
+			t.Fatalf("expected %s to be freshly executed after the go toolchain changed, but it was reused from the cache", r.Mutation.ID)
 		}
 	}
 }

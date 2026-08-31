@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +50,7 @@ type preparedAnalysis struct {
 	coveragePath   string
 	backendName    string
 	backendVersion string
+	toolchain      runner.ToolchainInfo
 	filePackage    map[string]string   // relative file path -> owning package import path
 	testScopes     map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
 }
@@ -61,7 +61,20 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 		e.Backend = runner.GoTest{}
 	}
 
-	prepared, err := e.prepare(req)
+	// Detected once, up front: every mutant execution needs a working
+	// `go` on PATH regardless of backend, and the invoked toolchain
+	// (not runtime.Version(), the toolchain that happened to compile
+	// this mutation-judge binary) is what actually determines a
+	// mutant's compiled/runtime behavior -- so it belongs in the cache
+	// key and the report, and failing fast here beats discovering a
+	// missing/broken `go` only after paying for sandbox setup and
+	// discovery first.
+	toolchain, err := runner.DetectToolchain(ctx)
+	if err != nil {
+		return model.Report{}, err
+	}
+
+	prepared, err := e.prepare(req, toolchain)
 	if err != nil {
 		return model.Report{}, err
 	}
@@ -103,7 +116,7 @@ func mutantTestScope(req Request, p preparedAnalysis, mut model.Mutation) []stri
 	return scope
 }
 
-func (e Engine) prepare(req Request) (preparedAnalysis, error) {
+func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAnalysis, error) {
 	root, err := workspace.ModuleRoot(req.CWD)
 	if err != nil {
 		return preparedAnalysis{}, err
@@ -175,7 +188,7 @@ func (e Engine) prepare(req Request) (preparedAnalysis, error) {
 	return preparedAnalysis{
 		root: root, workRel: filepath.ToSlash(workRel), sandbox: sandbox, cleanup: cleanup,
 		mutants: mutants, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
-		coveragePath: coveragePath, backendName: backendName, backendVersion: backendVersion,
+		coveragePath: coveragePath, backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
 		filePackage: filePackage, testScopes: testScopes,
 	}, nil
 }
@@ -209,6 +222,7 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	baseline := e.Backend.Run(ctx, runner.Request{
 		Root: p.sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
 		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, CoverageOut: p.coveragePath,
+		GoVersion: p.toolchain.GoVersion,
 	})
 	elapsed := time.Since(started).Milliseconds()
 	if baseline.Verdict != model.VerdictSurvived {
@@ -272,7 +286,7 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 	key := cache.Key(
 		e.Version,
 		frontend.SemanticsVersion,
-		runtime.Version(),
+		p.toolchain.Key(),
 		p.sourceDigest,
 		string(cfgJSON),
 		p.backendName,
@@ -290,6 +304,7 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 		backendResult = e.Backend.Run(ctx, runner.Request{
 			Root: sandbox, WorkRel: p.workRel, Patterns: scope,
 			TestRun: req.Config.TestRun, Timeout: req.Config.Timeout,
+			GoVersion: p.toolchain.GoVersion,
 		})
 		if restoreErr := restore(); restoreErr != nil {
 			return model.Result{}, false, nil, fmt.Errorf("restore %s after %s: %w", mut.Span.File, mut.ID, restoreErr)
@@ -524,7 +539,7 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 	return model.Report{
 		SchemaVersion:   model.SchemaVersion,
 		ToolVersion:     toolVersion,
-		GoVersion:       runtime.Version(),
+		GoVersion:       p.toolchain.GoVersion,
 		GeneratedAt:     time.Now().UTC(),
 		Complete:        complete,
 		Patterns:        append([]string(nil), req.Patterns...),
@@ -539,6 +554,10 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 			"backend_version":         p.backendVersion,
 			"operator_semantics":      frontend.SemanticsVersion,
 			"test_command":            testCommand(req.Config, req.Patterns),
+			"goos":                    p.toolchain.GOOS,
+			"goarch":                  p.toolchain.GOARCH,
+			"cgo_enabled":             p.toolchain.CgoEnabled,
+			"goflags":                 p.toolchain.GoFlags,
 		},
 		Semantics: []string{
 			"Each mutant is a single source-span replacement applied atomically to a temporary copy of the Go module.",

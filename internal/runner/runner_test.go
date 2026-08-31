@@ -289,6 +289,65 @@ func TestGoTestStartFailureIsUnknown(t *testing.T) {
 	}
 }
 
+// DetectToolchain and GoTest.Version must read the invoked go
+// toolchain itself (`go env GOVERSION`, matching what `go test` will
+// actually build and run), never runtime.Version() -- the toolchain
+// that happened to compile this mutation-judge binary, which can
+// silently disagree with it (a cross-compiled CLI, or an
+// upgraded/downgraded `go` on PATH since the binary was built). This
+// is the direct fix for the P0 cache-key bug (see
+// TestCacheKeySensitiveToGoToolchainChange in internal/analysis for the
+// end-to-end regression); these two tests pin the primitive itself.
+func TestDetectToolchainReadsInvokedGoNotRuntimeVersion(t *testing.T) {
+	tc, err := DetectToolchain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(tc.GoVersion, "go") {
+		t.Fatalf("GoVersion = %q, want a `go env GOVERSION`-shaped value (e.g. go1.23.4)", tc.GoVersion)
+	}
+	if tc.GOOS == "" || tc.GOARCH == "" {
+		t.Fatalf("GOOS/GOARCH must not be empty: %+v", tc)
+	}
+	if tc.CgoEnabled != "0" && tc.CgoEnabled != "1" {
+		t.Fatalf("CgoEnabled = %q, want \"0\" or \"1\"", tc.CgoEnabled)
+	}
+}
+
+func TestDetectToolchainMissingGoIsAnError(t *testing.T) {
+	t.Setenv("PATH", "")
+	if _, err := DetectToolchain(context.Background()); err == nil {
+		t.Fatal("expected an error with no go on PATH, got nil")
+	}
+}
+
+func TestGoTestVersionMissingGoIsUnknownNotRuntimeVersion(t *testing.T) {
+	t.Setenv("PATH", "")
+	if got := (GoTest{}).Version(); got != "unknown" {
+		t.Fatalf("Version() = %q, want the distinct sentinel %q (never a silent fallback to runtime.Version())", got, "unknown")
+	}
+}
+
+func TestToolchainInfoKeyDistinguishesEveryField(t *testing.T) {
+	base := ToolchainInfo{GoVersion: "go1.23.4", GOOS: "linux", GOARCH: "amd64", CgoEnabled: "0", GoFlags: ""}
+	variants := []ToolchainInfo{
+		{GoVersion: "go1.24.0", GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: base.CgoEnabled, GoFlags: base.GoFlags},
+		{GoVersion: base.GoVersion, GOOS: "darwin", GOARCH: base.GOARCH, CgoEnabled: base.CgoEnabled, GoFlags: base.GoFlags},
+		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: "arm64", CgoEnabled: base.CgoEnabled, GoFlags: base.GoFlags},
+		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: "1", GoFlags: base.GoFlags},
+		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: base.CgoEnabled, GoFlags: "-race"},
+	}
+	baseKey := base.Key()
+	for i, v := range variants {
+		if v.Key() == baseKey {
+			t.Fatalf("variant %d (%+v) produced the same key as base %+v: %s", i, v, base, baseKey)
+		}
+	}
+	if base.Key() != (ToolchainInfo{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: base.CgoEnabled, GoFlags: base.GoFlags}).Key() {
+		t.Fatal("identical ToolchainInfo values produced different keys")
+	}
+}
+
 func testModule(t *testing.T, source, testSource string) string {
 	t.Helper()
 	root := t.TempDir()

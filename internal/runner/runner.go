@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +24,11 @@ type Request struct {
 	TestRun     string
 	Timeout     time.Duration
 	CoverageOut string
+	// GoVersion is the invoked go toolchain's version (ToolchainInfo.GoVersion),
+	// supplied by the caller once per analysis run and recorded verbatim
+	// on the Result -- never re-derived here from runtime.Version(),
+	// which answers a different question (see GoTest.Version).
+	GoVersion string
 }
 
 type Result struct {
@@ -48,8 +52,78 @@ type DescribedBackend interface {
 
 type GoTest struct{}
 
-func (GoTest) Name() string    { return "go-test" }
-func (GoTest) Version() string { return runtime.Version() }
+func (GoTest) Name() string { return "go-test" }
+
+// Version reports the invoked go toolchain's own version (`go env
+// GOVERSION`) -- the toolchain that will actually build and run a
+// mutant's tests -- never runtime.Version(), which answers a different
+// question (what toolchain happened to compile this mutation-judge
+// binary) that can silently disagree with it: a cross-compiled CLI, or
+// simply an upgraded/downgraded `go` on PATH since the binary was
+// built, are both ordinary and both must be reflected here. "unknown"
+// on failure is a distinct, non-version-shaped sentinel rather than a
+// fallback to runtime.Version(), so a real difference still busts a
+// cache entry keyed off this instead of being silently masked by a
+// plausible-looking but wrong value.
+func (GoTest) Version() string {
+	out, err := exec.Command("go", "env", "GOVERSION").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// goEnvVars is the exact `go env` argument list DetectToolchain reads,
+// kept as one slice so the output-line-count check below has a single
+// source of truth for how many lines to expect back.
+var goEnvVars = []string{"GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS"}
+
+// ToolchainInfo is the invoked `go` toolchain's own report of itself,
+// read once per analysis run via `go env` -- the same source of truth
+// `go build`/`go test` themselves consult -- rather than re-derived
+// from environment variables that could disagree with what the
+// toolchain actually resolved (an invalid GOOS left set, for instance).
+// Every field here can change what a mutant's test run compiles to or
+// how it behaves, so all of them belong in a cache key, not just
+// GoVersion.
+type ToolchainInfo struct {
+	GoVersion  string // `go env GOVERSION`, e.g. "go1.23.4"
+	GOOS       string
+	GOARCH     string
+	CgoEnabled string // `go env CGO_ENABLED`: "0" or "1"
+	GoFlags    string // `go env GOFLAGS`, e.g. "-race"
+}
+
+// Key returns a stable, delimiter-safe encoding of every field above,
+// suitable as one component of a larger cache key.
+func (t ToolchainInfo) Key() string {
+	return strings.Join([]string{t.GoVersion, t.GOOS, t.GOARCH, t.CgoEnabled, t.GoFlags}, "|")
+}
+
+// DetectToolchain execs `go env` for exactly the variables that can
+// change what a test run compiles or how it behaves, once per analysis
+// run rather than once per mutant -- none of these can change mid-run.
+// A failure here (most commonly: no `go` on PATH) is returned to the
+// caller rather than silently substituting some other value, since
+// every mutant execution needs a working `go` anyway.
+func DetectToolchain(ctx context.Context) (ToolchainInfo, error) {
+	cmd := exec.CommandContext(ctx, "go", append([]string{"env"}, goEnvVars...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		return ToolchainInfo{}, fmt.Errorf("detect go toolchain (go env %s): %w", strings.Join(goEnvVars, " "), err)
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != len(goEnvVars) {
+		return ToolchainInfo{}, fmt.Errorf("unexpected `go env` output: got %d line(s), want %d", len(lines), len(goEnvVars))
+	}
+	return ToolchainInfo{
+		GoVersion:  lines[0],
+		GOOS:       lines[1],
+		GOARCH:     lines[2],
+		CgoEnabled: lines[3],
+		GoFlags:    lines[4],
+	}, nil
+}
 
 var failRE = regexp.MustCompile(`(?m)^--- FAIL: ([^ (]+)`)
 
@@ -111,7 +185,7 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 
 	events, decodeErr := decodeTestEvents(jsonOut.Bytes())
 	text := trimOutput(reconstructOutput(errOut.String(), events), 64*1024)
-	res := Result{DurationMS: dur, Output: text, GoVersion: runtime.Version()}
+	res := Result{DurationMS: dur, Output: text, GoVersion: req.GoVersion}
 
 	if ctx.Err() == context.DeadlineExceeded || strings.Contains(text, "test timed out after") {
 		res.Verdict = model.VerdictTimeout
