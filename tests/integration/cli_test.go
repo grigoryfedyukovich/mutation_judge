@@ -120,6 +120,37 @@ func TestPackageInitPanicEndToEnd(t *testing.T) {
 	}
 }
 
+// TestMultiPackageCompileFailureIsInvalidNotKilledEndToEnd is the P0
+// regression: tests/integration/testdata/multipkg/broken has exactly
+// one arithmetic mutant, and it is compile-invalid (string
+// concatenation rewritten to subtraction), the same documented case as
+// examples/arithmetic. The unrelated sibling package's own test still
+// runs to completion under the shared `./...` pattern set. Before the
+// fix, that was enough to misclassify the mutant KILLED instead of
+// INVALID -- inflating the score on exactly the default multi-package
+// invocation shape (`mutation-judge ./...`).
+func TestMultiPackageCompileFailureIsInvalidNotKilledEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "arithmetic",
+		"./tests/integration/testdata/multipkg/...")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, text)
+	}
+	if !strings.Contains(text, "INVALID") {
+		t.Fatalf("expected the compile-invalid mutant in broken/ to be INVALID:\n%s", text)
+	}
+	if strings.Contains(text, "KILLED") {
+		t.Fatalf("sibling/'s own test running to completion must not turn broken/'s build failure into a KILLED verdict:\n%s", text)
+	}
+	if !strings.Contains(text, "0 killed, 0 survived, 1 invalid") {
+		t.Fatalf("unexpected summary:\n%s", text)
+	}
+}
+
 // TestCustomTestMainEndToEnd proves a package whose TestMain calls
 // os.Exit with a nonzero status (bypassing the normal per-test reporting
 // entirely) is still classified KILLED, with no test incorrectly

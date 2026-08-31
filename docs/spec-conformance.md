@@ -42,7 +42,6 @@ The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, 
 ## Not yet implemented
 
 - Distributed CI execution (M4).
-- Structured `go test -json` classification for all build/test failure modes.
 - Assertion or contract attribution beyond named failing tests.
 - General equivalent-mutant proofs (only the one narrow boundary-operator case above is implemented; most equivalence remains undecided by design -- see `docs/limitations.md` limitation 7).
 - Full TOML and YAML language support.

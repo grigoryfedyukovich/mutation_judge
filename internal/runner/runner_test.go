@@ -108,6 +108,60 @@ func TestClassifyEventsIgnoresFailBracketScopedToATest(t *testing.T) {
 	}
 }
 
+// Reproduces the P0 multi-package bug directly at the classifyEvents
+// level: patterns like `./...` merge every package's events into one
+// stream. Before the fix, a sibling package's tests starting at all
+// (Action "run" with Test != "", regardless of which package) set a
+// single global sawRun flag that unconditionally suppressed the INVALID
+// verdict for a completely unrelated package that failed to build in
+// the same run -- inflating the mutation score by counting an
+// uncompilable mutant as a kill. The two packages here are deliberately
+// unrelated, matching the real reproduction (mutate examples/arithmetic
+// under patterns `./...`; examples/boolean's own tests still run).
+func TestClassifyEventsPackageBuildFailureIsInvalidEvenWhenSiblingPackageRuns(t *testing.T) {
+	events := []testEvent{
+		// The mutated package fails to build before any test in it runs.
+		{Action: "output", Package: "example.test/broken", Output: "# example.test/broken\n"},
+		{Action: "output", Package: "example.test/broken", Output: "./broken.go:3:9: invalid operation\n"},
+		{Action: "output", Package: "example.test/broken", Output: "FAIL\texample.test/broken [build failed]\n"},
+		{Action: "fail", Package: "example.test/broken"},
+		// An unrelated sibling package in the same `./...` pattern set
+		// compiles fine and its own test passes.
+		{Action: "run", Package: "example.test/sibling", Test: "TestSibling"},
+		{Action: "output", Package: "example.test/sibling", Test: "TestSibling", Output: "=== RUN   TestSibling\n"},
+		{Action: "pass", Package: "example.test/sibling", Test: "TestSibling"},
+		{Action: "pass", Package: "example.test/sibling"},
+	}
+	verdict, tests := classifyEvents(events)
+	if verdict != model.VerdictInvalid {
+		t.Fatalf("verdict = %s, want %s (a sibling package's tests running must not mask the mutated package's build failure)", verdict, model.VerdictInvalid)
+	}
+	if len(tests) != 0 {
+		t.Fatalf("tests = %v, want none", tests)
+	}
+}
+
+// The counterpart to the test above: when the sibling package's test
+// actually fails too (not just runs and passes), that is a genuine
+// observed failure and must still win as KILLED -- the fix must not
+// overcorrect into hiding a real kill behind an unrelated build failure
+// elsewhere in the same pattern set.
+func TestClassifyEventsRealFailureElsewhereStillWinsOverBuildFailure(t *testing.T) {
+	events := []testEvent{
+		{Action: "output", Package: "example.test/broken", Output: "FAIL\texample.test/broken [build failed]\n"},
+		{Action: "fail", Package: "example.test/broken"},
+		{Action: "run", Package: "example.test/sibling", Test: "TestSibling"},
+		{Action: "fail", Package: "example.test/sibling", Test: "TestSibling"},
+	}
+	verdict, tests := classifyEvents(events)
+	if verdict != model.VerdictKilled {
+		t.Fatalf("verdict = %s, want %s", verdict, model.VerdictKilled)
+	}
+	if len(tests) != 1 || tests[0] != "TestSibling" {
+		t.Fatalf("tests = %v, want [TestSibling]", tests)
+	}
+}
+
 func TestTrimOutputPreservesUTF8(t *testing.T) {
 	const max = 8
 	input := strings.Repeat("a", max-1) + "é" + "tail"
@@ -125,6 +179,38 @@ func TestGoTestClassifiesCompileFailureAsInvalid(t *testing.T) {
 	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 2 * time.Second})
 	if got.Verdict != model.VerdictInvalid {
 		t.Fatalf("verdict=%s output=%s", got.Verdict, got.Output)
+	}
+}
+
+// The real end-to-end reproduction of the P0 multi-package bug: two
+// independent packages under one module, patterns `./...`. The mutated
+// package fails to compile; the unrelated sibling package's own test
+// runs and passes regardless. Before the fix this was misclassified
+// KILLED because *a* test started somewhere in the merged `go test
+// -json` stream, even though it was never the mutated package's own
+// test. TestGoTestClassifiesCompileFailureAsInvalid above cannot catch
+// this: it uses a single-package module, where there is no sibling
+// package whose tests could start and mask the bug.
+func TestGoTestClassifiesCompileFailureAsInvalidAcrossPackages(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":                  "module example.test/multipkg\n\ngo 1.22\n",
+		"broken/broken.go":        "package broken\nfunc F() int { return missing }\n",
+		"sibling/sibling.go":      "package sibling\nfunc F() int { return 1 }\n",
+		"sibling/sibling_test.go": "package sibling\nimport \"testing\"\nfunc TestF(t *testing.T) { if F() != 1 { t.Fatal(\"bad\") } }\n",
+	}
+	for name, data := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"./..."}, Timeout: 5 * time.Second})
+	if got.Verdict != model.VerdictInvalid {
+		t.Fatalf("verdict=%s (want %s) output=%s", got.Verdict, model.VerdictInvalid, got.Output)
 	}
 }
 
