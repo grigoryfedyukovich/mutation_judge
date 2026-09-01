@@ -171,7 +171,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	}
 	parsingMS := time.Since(parseStart).Milliseconds()
 
-	sourceDigest, err := workspace.Digest(root)
+	sourceDigest, err := workspace.Digest(root, req.Config.CacheDir)
 	if err != nil {
 		return preparedAnalysis{}, err
 	}

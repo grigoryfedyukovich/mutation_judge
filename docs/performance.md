@@ -12,10 +12,16 @@ important caveat about measurement noise, summarized below.
 `workspace.Digest` and `workspace.CopyModule` are the two costs
 `analysis.Engine.Analyze` pays exactly once per run, before baseline
 execution and before any mutant runs — they do not scale with mutant
-count. `Digest` walks the module tree and SHA-256-hashes every `.go` /
-`go.mod` / `go.sum` / `go.work` file's content (used for the cache key).
-`CopyModule` walks the whole module tree (everything except `.git`,
-`.mutation-judge`, and the configured cache path) and copies it
+count. `Digest` and `CopyModule` now walk the module tree via the same
+shared selection logic (`workspace.sandboxEntries`) and skip exactly
+the same paths (`.git`, `.mutation-judge`, and the configured cache
+path): `Digest` SHA-256-hashes every file that walk visits — not just
+`.go` / `go.mod` / `go.sum` / `go.work` files, but `//go:embed`
+payloads, cgo sources, `testdata/` fixtures, `go.env`, and anything
+else a test can read by path (previously it hashed only the narrower
+Go-specific list, which was a real correctness bug — changing one of
+those other inputs produced a cache hit with stale results; see
+`ISSUES.md`) — while `CopyModule` copies the same file set
 byte-for-byte into a fresh temporary sandbox, preserving file modes and
 symlinks. If either of these turned out to dominate a real run's wall
 time on a large module, that would be the case for narrowing what gets
@@ -44,6 +50,17 @@ repeated invocations and scaled cleanly with size:
 | 500 | 1.5MB | ~5–7ms |
 | 2000 | 6MB | ~21–23ms |
 | 8000 | 24MB | ~93–100ms |
+
+These numbers were measured with `Digest`'s file selection unchanged
+from when this benchmark was written; `generateModule`'s synthetic
+fixture contains only `.go` files and `go.mod`, so widening `Digest` to
+match `CopyModule`'s full file set (see above) does not change these
+particular measurements — there is nothing else in this fixture for the
+wider selection to pick up. A module with substantial non-Go content
+under test (large `testdata/` fixtures, embedded assets) would see
+`Digest`'s cost move closer to `CopyModule`'s than this table shows;
+rerun the benchmark against a representative real module before relying
+on these numbers for one.
 
 `CopyModule` (write-heavy: stat, create, read+write loop, chmod per
 file, plus `MkdirAll` per new package directory) did **not** reproduce

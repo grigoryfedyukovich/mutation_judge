@@ -61,7 +61,7 @@ SHA-256(
   CLI version,
   operator semantic version,
   invoked go toolchain (go env GOVERSION, GOOS, GOARCH, CGO_ENABLED, GOFLAGS),
-  source/module/test digest,
+  sandbox digest (workspace.Digest),
   cache-relevant configuration JSON (timeout, test_run only — see below),
   backend name and version,
   mutant stable ID,
@@ -72,9 +72,11 @@ SHA-256(
 
 The invoked toolchain component (`runner.DetectToolchain`, `internal/runner/runner.go`) is read once per analysis run via `go env`, never from `runtime.Version()` — the toolchain that happened to compile the mutation-judge binary itself, which is a different and sometimes different-versioned question (a cross-compiled CLI, or simply an upgraded/downgraded `go` on PATH since the binary was built, are both ordinary). Compiling with Go 1.22 and later running the same binary against a Go 1.25 `go` on PATH must not read back a Go-1.22-era cache entry: vet/language/runtime behavior can differ across toolchain versions, and GOOS/GOARCH/CGO_ENABLED/GOFLAGS are included alongside GOVERSION for the same reason — every one of them can change what a mutant's test run compiles to or how it behaves. This was a real, found bug (not a hypothetical): the key used to carry `runtime.Version()` twice over — once as a bare component, once again via `GoTest.Version()` feeding the backend-version component below — while the actual invoked toolchain was absent from the key entirely; see `ISSUES.md`.
 
+`workspace.Digest` fingerprints every file `workspace.CopyModule` places into the sandbox — not just `*.go` / `go.mod` / `go.sum` / `go.work` / `go.work.sum`, but `//go:embed` payloads, cgo `.c`/`.h`/`.s` sources, `testdata/` fixtures, `go.env`, and anything else a test can read by path — via one shared file-selection walk (`workspace.sandboxEntries`) both functions use, rather than two independently maintained lists. This too was a real, found bug: `Digest` used to hash only the narrower Go-specific list, so changing a non-Go input a test could still observe (an embedded asset, a cgo source, a testdata fixture) produced a cache hit with stale results; see `ISSUES.md`.
+
 Only `Timeout` and `TestRun` from the full configuration are in the key, not the whole `Config.AsMap()` — those are the only two fields that actually reach a mutant's `go test` invocation (`analysis.cacheRelevantConfig`). This is narrower than it looks by accident: a `"workers"` key was added to `Config.AsMap()` purely so `--print-config` could show it, and initially the cache key used that same full map, so it silently became sensitive to worker count too — running the identical analysis with a different `--workers` value produced zero cache hits despite no mutant's actual outcome being affected by how many others ran alongside it. Found by testing the finished feature, not while building it; fixed by introducing this explicit minimal subset, with a permanent regression test confirmed to fail against the reverted code.
 
-The last component matters even though it's also a function of other inputs (effective configuration, which includes `--narrow-test-scope`, and the source digest, which captures the dependency graph shape): before it was added explicitly, two runs against the same unchanged source tree but different top-level pattern arguments could produce the same key despite the real `go test` command differing — a genuine, if narrow, pre-existing gap found while adding dependency-graph-guided scoping (see `docs/performance.md`), fixed independently of whether that feature is enabled.
+The last component matters even though it's also a function of other inputs (effective configuration, which includes `--narrow-test-scope`, and the sandbox digest, which captures the dependency graph shape): before it was added explicitly, two runs against the same unchanged source tree but different top-level pattern arguments could produce the same key despite the real `go test` command differing — a genuine, if narrow, pre-existing gap found while adding dependency-graph-guided scoping (see `docs/performance.md`), fixed independently of whether that feature is enabled.
 
 The stored JSON also has an independent schema marker. This prevents old result layouts from being silently accepted.
 

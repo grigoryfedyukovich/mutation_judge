@@ -155,39 +155,60 @@ func SourceFiles(root string, pkgs []Package) ([]string, error) {
 	return out, nil
 }
 
-func CopyModule(root, cacheDir string) (string, func(), error) {
-	tmp, err := os.MkdirTemp("", "mutation-judge-*")
-	if err != nil {
-		return "", nil, err
-	}
-	cleanup := func() { _ = os.RemoveAll(tmp) }
+// sandboxEntries walks root exactly as CopyModule copies it -- the same
+// order, and skipping exactly the same directories (.git,
+// .mutation-judge, and the resolved cache directory) -- invoking fn
+// once for every directory and non-directory entry CopyModule would
+// otherwise place into the sandbox. This is the single shared source
+// of truth for "what will a test run inside the sandbox actually see":
+// Digest and CopyModule independently walking the tree with their own,
+// separately maintained skip/include rules is exactly how they drifted
+// apart before (see ISSUES.md, "Digest does not hash what tests can
+// observe") -- Digest hashed only *.go/go.mod/go.sum/go.work/go.work.sum
+// while CopyModule copied everything else alongside it too (//go:embed
+// payloads, cgo .c/.h/.s, testdata/, go.env, and any other file a test
+// can read by path), so changing any of those produced a cache hit with
+// stale results. Sharing this walk instead of two separately maintained
+// file-selection functions makes that class of drift structurally
+// impossible to reintroduce, not just fixed once.
+func sandboxEntries(root, cacheDir string, fn func(path, rel string, d fs.DirEntry) error) error {
 	cacheAbs := cacheDir
 	if !filepath.IsAbs(cacheAbs) {
 		cacheAbs = filepath.Join(root, cacheDir)
 	}
-	cacheAbs, err = filepath.Abs(cacheAbs)
+	cacheAbs, err := filepath.Abs(cacheAbs)
 	if err != nil {
-		cleanup()
-		return "", nil, err
+		return err
 	}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if path == root {
 			return nil
 		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".mutation-judge" || filepath.Clean(path) == cacheAbs) {
+			return filepath.SkipDir
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
+		return fn(path, filepath.ToSlash(rel), d)
+	})
+}
+
+func CopyModule(root, cacheDir string) (string, func(), error) {
+	tmp, err := os.MkdirTemp("", "mutation-judge-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	err = sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
+		dst := filepath.Join(tmp, filepath.FromSlash(rel))
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == ".mutation-judge" || filepath.Clean(path) == cacheAbs {
-				return filepath.SkipDir
-			}
-			return os.MkdirAll(filepath.Join(tmp, rel), 0o755)
+			return os.MkdirAll(dst, 0o755)
 		}
-		dst := filepath.Join(tmp, rel)
 		if d.Type()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(path)
 			if err != nil {
@@ -292,34 +313,63 @@ func writeFileAtomicWithRename(path string, data []byte, mode os.FileMode, renam
 	return rename(tmpName, path)
 }
 
-func Digest(root string) (string, error) {
-	var files []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+// Digest fingerprints every input that CopyModule places into the
+// sandbox and a test run can therefore observe -- not just *.go files,
+// but //go:embed payloads, cgo .c/.h/.s sources, testdata/ fixtures,
+// go.env, and anything else a test reads by path -- via sandboxEntries,
+// the exact same walk CopyModule itself uses (see its doc comment).
+// Changing any such input and getting a cache hit with stale results
+// was a real, found bug; the fix is structural (one shared file
+// selection, not two independently maintained lists) so it can't
+// silently reappear by CopyModule and Digest drifting apart again.
+//
+// A symlink is fingerprinted by its own link target string (via
+// os.Readlink), never by dereferencing to the target's content:
+// CopyModule recreates it as a symlink object pointing at that exact
+// target, not a copy of whatever the target currently contains, so
+// that target string is what actually changes the sandbox. If the
+// target itself is a regular file inside root, it is walked and
+// fingerprinted separately in its own right; this also means Digest
+// never has to open a symlink's target at all, so a dangling or
+// directory-target symlink elsewhere in the tree -- both of which
+// CopyModule already tolerates, since recreating a symlink never
+// touches what it points to -- can't turn into a hard Digest error.
+func Digest(root, cacheDir string) (string, error) {
+	type file struct {
+		rel     string
+		symlink bool
+		target  string // set only when symlink is true
+	}
+	var files []file
+	err := sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == ".mutation-judge" {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		name := d.Name()
-		if strings.HasSuffix(name, ".go") || name == "go.mod" || name == "go.sum" || name == "go.work" || name == "go.work.sum" {
-			files = append(files, path)
+		if d.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			files = append(files, file{rel: rel, symlink: true, target: target})
+			return nil
 		}
+		files = append(files, file{rel: rel})
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	sort.Strings(files)
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 	h := sha256.New()
-	for _, p := range files {
-		rel, _ := filepath.Rel(root, p)
-		_, _ = io.WriteString(h, filepath.ToSlash(rel))
+	for _, f := range files {
+		_, _ = io.WriteString(h, f.rel)
 		_, _ = h.Write([]byte{0})
-		b, err := os.ReadFile(p)
+		if f.symlink {
+			_, _ = io.WriteString(h, "symlink:"+f.target)
+			_, _ = h.Write([]byte{0})
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.rel)))
 		if err != nil {
 			return "", err
 		}

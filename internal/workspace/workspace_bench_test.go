@@ -83,7 +83,7 @@ func BenchmarkDigest(b *testing.B) {
 			root := generateModule(b, n, 20)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := Digest(root); err != nil {
+				if _, err := Digest(root, ".mutation-judge/cache"); err != nil {
 					b.Fatal(err)
 				}
 			}

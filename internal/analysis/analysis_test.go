@@ -505,6 +505,52 @@ func TestCacheKeySensitiveToGoToolchainChange(t *testing.T) {
 	}
 }
 
+// TestCacheKeySensitiveToNonGoSandboxFiles is the permanent regression
+// test for the real P0 bug: workspace.Digest used to hash only
+// *.go / go.mod / go.sum / go.work / go.work.sum, while
+// workspace.CopyModule copied everything else in the module tree into
+// the sandbox right alongside them -- //go:embed payloads, cgo
+// .c/.h/.s sources, testdata/ fixtures, go.env, and any other file a
+// test can read by path. A mutant's test run can observe all of that,
+// but changing one of those files left the digest -- and so the cache
+// key -- completely unchanged: a stale, silently wrong cache hit. This
+// uses the doc's own suggested regression shape (change a testdata
+// file, assert miss): p.go and the mutant itself are never touched
+// between the two runs, only testdata/fixture.txt.
+func TestCacheKeySensitiveToNonGoSandboxFiles(t *testing.T) {
+	d := testProject(t, "package p\nfunc Positive(n int) bool { return n > 0 }\n")
+	if err := os.MkdirAll(filepath.Join(d, "testdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(d, "testdata", "fixture.txt")
+	if err := os.WriteFile(fixture, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CacheDir = filepath.Join(d, ".mutation-judge", "cache")
+
+	first, err := (Engine{Version: "test", Backend: &sequenceBackend{}}).
+		Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Results) != 1 || first.Results[0].Cached {
+		t.Fatalf("expected a cold cache on the first run: %#v", first.Results)
+	}
+
+	if err := os.WriteFile(fixture, []byte("v2 -- testdata changed, p.go itself untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := (Engine{Version: "test", Backend: &sequenceBackend{}}).
+		Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Results) != 1 || second.Results[0].Cached {
+		t.Fatalf("expected a fresh execution after testdata/fixture.txt changed (p.go itself never touched), got a cache hit: %#v", second.Results)
+	}
+}
+
 func TestCacheWriteFailureIsReportedAsWarningNotFatal(t *testing.T) {
 	d := testProject(t, "package p\nfunc Positive(n int) bool { return n > 0 }\n")
 	blocker := filepath.Join(d, "cache-blocked-by-a-file")
