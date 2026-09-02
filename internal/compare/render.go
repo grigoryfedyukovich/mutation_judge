@@ -9,12 +9,13 @@ import (
 )
 
 // RenderText writes a human-readable diff summary, with per-mutant
-// detail for new survivors, fixed survivors, and removed mutants (the
-// three buckets with something to say) and a bare count for the
-// unchanged majority. Any entry findLikelyShifts correlated with one
-// on the other side gets an inline note pointing at its counterpart,
-// so a reader can immediately tell "probably just moved" from "a real
-// change" without cross-referencing IDs by hand.
+// detail for new survivors, fixed survivors, still-open mutants,
+// reclassified mutants, and removed mutants (the five buckets with
+// something to say) and a bare count for the unchanged majority. Any
+// entry findLikelyShifts correlated with one on the other side gets an
+// inline note pointing at its counterpart, so a reader can immediately
+// tell "probably just moved" from "a real change" without
+// cross-referencing IDs by hand.
 func RenderText(w io.Writer, d Diff) error {
 	byRemovedID, byNewID := map[string]ShiftCandidate{}, map[string]ShiftCandidate{}
 	for _, sc := range d.LikelyShifted {
@@ -29,6 +30,9 @@ func RenderText(w io.Writer, d Diff) error {
 	for _, md := range d.NewSurvivors {
 		m := md.Mutation()
 		ew.printf("  %s %s:%d:%d %s\n", string(currentVerdict(md, "SURVIVED")), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
+		if md.Baseline != nil {
+			ew.printf("    (was %s in the baseline report)\n", md.Baseline.Verdict)
+		}
 		if md.Current != nil && md.Current.Mutation.Suggestion != "" {
 			ew.printf("    suggested test: %s\n", md.Current.Mutation.Suggestion)
 		}
@@ -44,6 +48,21 @@ func RenderText(w io.Writer, d Diff) error {
 	for _, md := range d.FixedSurvivors {
 		m := md.Mutation()
 		ew.printf("  %s %s:%d:%d %s\n", string(md.Current.Verdict), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
+		ew.printf("    (was %s in the baseline report)\n", md.Baseline.Verdict)
+	}
+
+	ew.printf("\nstill open: %d\n", len(d.StillOpen))
+	for _, md := range d.StillOpen {
+		m := md.Mutation()
+		ew.printf("  %s %s:%d:%d %s\n", string(md.Current.Verdict), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
+		ew.printf("    (was %s in the baseline report -- not fixed, still actionable)\n", md.Baseline.Verdict)
+	}
+
+	ew.printf("\nreclassified: %d\n", len(d.Reclassified))
+	for _, md := range d.Reclassified {
+		m := md.Mutation()
+		ew.printf("  %s %s:%d:%d %s\n", string(md.Current.Verdict), m.Span.File, m.Span.StartLine, m.Span.StartCol, m.Description)
+		ew.printf("    (was %s in the baseline report -- not a test fix)\n", md.Baseline.Verdict)
 	}
 
 	ew.printf("\nremoved mutants: %d\n", len(d.RemovedMutants))
@@ -80,6 +99,12 @@ func RenderJSON(w io.Writer, d Diff) error {
 	}
 	if d.FixedSurvivors == nil {
 		d.FixedSurvivors = []MutantDiff{}
+	}
+	if d.StillOpen == nil {
+		d.StillOpen = []MutantDiff{}
+	}
+	if d.Reclassified == nil {
+		d.Reclassified = []MutantDiff{}
 	}
 	if d.RemovedMutants == nil {
 		d.RemovedMutants = []MutantDiff{}

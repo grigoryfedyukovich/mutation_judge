@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/example/mutation-judge/internal/compare"
+	"github.com/example/mutation-judge/internal/config"
 	"github.com/example/mutation-judge/internal/model"
 )
 
@@ -33,6 +34,10 @@ func runCompare(args []string) int {
 	}
 	if *baselinePath == "" || *currentPath == "" {
 		fmt.Fprintln(os.Stderr, "compare: both --baseline and --current are required")
+		return exitInput
+	}
+	if err := config.ValidExitCode(*failExitCode); err != nil {
+		fmt.Fprintln(os.Stderr, "compare: --fail-exit-code", err)
 		return exitInput
 	}
 	baseline, err := loadReport(*baselinePath)
@@ -86,9 +91,15 @@ func runCompare(args []string) int {
 }
 
 // loadReport reads a --format json report previously written by this
-// same tool. compare, record, and trend all read reports this way
-// rather than re-running analysis themselves -- they're pure
-// post-processing over whatever the caller already produced.
+// same tool. compare and record both read reports this way rather than
+// re-running analysis themselves -- they're pure post-processing over
+// whatever the caller already produced. The schema major is validated
+// here (model.ValidateSchemaVersion) rather than left to whatever
+// encoding/json happens to leave zero-valued on a mismatch, since this
+// project's own documented policy is that a consumer of this JSON --
+// which is exactly what compare and record are, of their own past
+// output -- should reject an unrecognized schema major rather than
+// silently assume current field semantics apply to it.
 func loadReport(path string) (model.Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -98,6 +109,9 @@ func loadReport(path string) (model.Report, error) {
 	var r model.Report
 	if err := json.NewDecoder(f).Decode(&r); err != nil {
 		return model.Report{}, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if err := model.ValidateSchemaVersion(r.SchemaVersion); err != nil {
+		return model.Report{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return r, nil
 }

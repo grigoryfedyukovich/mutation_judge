@@ -504,6 +504,24 @@ func setList(c *Config, key string, items []string) error {
 	}
 }
 
+// ValidExitCode reports whether code is usable as a process exit code:
+// POSIX exit statuses are one byte, and 126/127/128+n are reserved by
+// the shell for "found but not executable", "command not found", and
+// "killed by signal n" respectively, so 1-125 is the actually portable
+// range. This is shared by Validate (for ci_exit_code) and by
+// `mutation-judge compare`'s own --fail-exit-code flag: the two are the
+// same kind of value -- an exit code a CI policy branches on -- and
+// compare validating its own version of this independently, or not at
+// all, would let `--fail-exit-code 0` silently turn
+// --fail-on-new-survivors into a no-op success regardless of what it
+// found. See ISSUES.md.
+func ValidExitCode(code int) error {
+	if code <= 0 || code > 125 {
+		return errors.New("must be between 1 and 125")
+	}
+	return nil
+}
+
 func Validate(c Config) error {
 	known := map[string]bool{"boundary": true, "boolean": true, "arithmetic": true, "errorreturn": true, "switch": true, "loop": true, "channel": true}
 	if len(c.Operators) == 0 {
@@ -528,8 +546,8 @@ func Validate(c Config) error {
 	if c.CIMinScore < 0 || c.CIMinScore > 100 {
 		return errors.New("ci_min_score must be between 0 and 100")
 	}
-	if c.CIExitCode <= 0 || c.CIExitCode > 125 {
-		return errors.New("ci_exit_code must be between 1 and 125")
+	if err := ValidExitCode(c.CIExitCode); err != nil {
+		return fmt.Errorf("ci_exit_code: %w", err)
 	}
 	if c.Workers < 0 {
 		return errors.New("workers cannot be negative")

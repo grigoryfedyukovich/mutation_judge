@@ -22,8 +22,9 @@
 // removed entry and a brand-new-ID entry in the same file and, when it
 // finds exactly one, records the correlation in Diff.LikelyShifted.
 // This is additive and heuristic, not a correction -- NewSurvivors,
-// FixedSurvivors, RemovedMutants, and UnchangedCount are always the
-// exact, ID-based truth, unchanged by whatever LikelyShifted finds.
+// FixedSurvivors, StillOpen, Reclassified, RemovedMutants, and
+// UnchangedCount are always the exact, ID-based truth, unchanged by
+// whatever LikelyShifted finds.
 package compare
 
 import (
@@ -36,6 +37,12 @@ import (
 // verdict set the sarif and github report formats use: SURVIVED,
 // TIMEOUT, and UNKNOWN are actionable; KILLED, INVALID, and
 // UNSUPPORTED are not. See docs/semantics.md.
+//
+// This alone is too coarse to classify a transition between two
+// actionable verdicts, or between two non-actionable ones -- see
+// Compare's own doc comment for the finer distinctions
+// (isConfirmedSurvivor, and current == KILLED specifically) it applies
+// on top of this.
 func Actionable(v model.Verdict) bool {
 	switch v {
 	case model.VerdictSurvived, model.VerdictTimeout, model.VerdictUnknown:
@@ -43,6 +50,17 @@ func Actionable(v model.Verdict) bool {
 	default:
 		return false
 	}
+}
+
+// isConfirmedSurvivor reports whether v is the one verdict that
+// represents a demonstrated, concrete test gap: SURVIVED. TIMEOUT and
+// UNKNOWN are also Actionable -- the run didn't positively confirm the
+// mutant was caught -- but neither is a confirmed gap the way SURVIVED
+// is: both mean the run was inconclusive (a deadline expired, or the
+// backend couldn't classify what happened), not that the test suite
+// was shown not to catch the mutant.
+func isConfirmedSurvivor(v model.Verdict) bool {
+	return v == model.VerdictSurvived
 }
 
 // MutantDiff describes one mutant ID's actionable-status change.
@@ -69,17 +87,45 @@ func (d MutantDiff) Mutation() model.Mutation {
 // Diff is the result of comparing two reports.
 type Diff struct {
 	// NewSurvivors are mutant IDs actionable in Current but not in
-	// Baseline: either a previously-killed mutant regressed, or a
-	// brand-new mutant (from new code) was actionable from the start.
-	// These are the entries worth a reviewer's attention.
+	// Baseline: either a previously-killed (or otherwise unactionable)
+	// mutant regressed, a brand-new mutant (from new code) was
+	// actionable from the start, or a mutant went from an inconclusive
+	// actionable verdict (TIMEOUT, UNKNOWN) to a confirmed one
+	// (SURVIVED) -- see isConfirmedSurvivor. That last case is not a
+	// "newly actionable" transition under Actionable alone (both sides
+	// are actionable), but it is genuinely new information: what was
+	// previously an inconclusive run is now a demonstrated gap. These
+	// are the entries worth a reviewer's attention.
 	NewSurvivors []MutantDiff `json:"new_survivors"`
 	// FixedSurvivors are mutant IDs actionable in Baseline that are
-	// still present in Current but no longer actionable there --
-	// killed (or otherwise reclassified) by an improved test, not
-	// merely removed. This is a genuine test-quality signal; a
-	// removed mutant is not, which is why it's a separate bucket
-	// below rather than folded in here.
+	// still present in Current with a Current verdict of exactly
+	// KILLED -- killed by an improved test, not merely removed and not
+	// merely reclassified. This is a genuine test-quality signal; a
+	// removed mutant is not (see RemovedMutants below), and neither is
+	// a mutant that became unactionable for a reason other than a real
+	// kill (see Reclassified below) -- both used to be folded in here,
+	// which overstated what actually happened.
 	FixedSurvivors []MutantDiff `json:"fixed_survivors"`
+	// StillOpen are mutant IDs actionable on both sides with a
+	// different verdict, where neither side is the confirmed-gap case
+	// that promotes an entry to NewSurvivors above: SURVIVED regressing
+	// to an inconclusive TIMEOUT or UNKNOWN, or a swap between the two
+	// inconclusive verdicts themselves. None of these are a fix --
+	// nothing demonstrated the mutant is now caught -- but folding them
+	// silently into UnchangedCount would hide that the verdict did
+	// change; a reviewer relying on an unchanged count staying flat
+	// should still see this.
+	StillOpen []MutantDiff `json:"still_open"`
+	// Reclassified are mutant IDs actionable in Baseline that became
+	// unactionable in Current for a reason other than a real kill --
+	// Current's verdict is INVALID, EQUIVALENT, or UNSUPPORTED, not
+	// KILLED. None of those mean a test now catches this mutant: INVALID
+	// means it no longer even compiles in this configuration, EQUIVALENT
+	// means discovery proved it behaviorally identical to the original
+	// (a proof, not a kill), and UNSUPPORTED means the backend declined
+	// it outright. Counting any of these as "fixed" credits a test
+	// improvement that never happened.
+	Reclassified []MutantDiff `json:"reclassified"`
 	// RemovedMutants are mutant IDs present in Baseline that are
 	// absent from Current entirely -- that mutation site no longer
 	// exists, usually because the code there was deleted, rewritten,
@@ -92,12 +138,15 @@ type Diff struct {
 	// test -- the code just isn't there to test anymore.
 	RemovedMutants []MutantDiff `json:"removed_mutants"`
 	// UnchangedCount is every other mutant ID appearing in either
-	// report: present in both sides with the same actionable-status,
-	// or present only in Current and not actionable (new code with
+	// report: present in both sides with the exact same verdict,
+	// present in both sides as non-actionable on both sides with no
+	// promotion to Reclassified applying (Current's verdict wasn't a
+	// real kill, so there was nothing to reclassify away from), or
+	// present only in Current and not actionable (new code with
 	// nothing to flag) -- so there's nothing to report about it.
-	// NewSurvivors, FixedSurvivors, RemovedMutants, and
-	// UnchangedCount always sum to the total number of distinct
-	// mutant IDs across both reports.
+	// NewSurvivors, FixedSurvivors, StillOpen, Reclassified,
+	// RemovedMutants, and UnchangedCount always sum to the total
+	// number of distinct mutant IDs across both reports.
 	UnchangedCount int     `json:"unchanged_count"`
 	BaselineScore  float64 `json:"baseline_score"`
 	CurrentScore   float64 `json:"current_score"`
@@ -119,15 +168,25 @@ type Diff struct {
 // Compare builds a Diff between a baseline report (e.g. the base
 // branch) and a current report (e.g. a pull request), matched by
 // mutant ID. Every distinct mutant ID across both reports lands in
-// exactly one of Diff's four buckets, classified in this order:
+// exactly one of Diff's six buckets, classified in this order:
 //
 //  1. Absent from Current entirely -> RemovedMutants, regardless of
 //     its Baseline verdict.
-//  2. Actionable in Current, and not (or not present) in Baseline ->
-//     NewSurvivors.
-//  3. Actionable in Baseline, present but not actionable in Current
-//     -> FixedSurvivors.
-//  4. Everything else -> UnchangedCount.
+//  2. Not actionable in Baseline (or absent from it), actionable in
+//     Current -> NewSurvivors.
+//  3. Actionable in both, verdict differs, and Current is the
+//     confirmed-gap verdict (SURVIVED) while Baseline was not ->
+//     NewSurvivors: genuinely new information even though Actionable
+//     alone says nothing changed.
+//  4. Actionable in both, verdict differs, and case 3 doesn't apply
+//     (SURVIVED regressing to an inconclusive verdict, or a swap
+//     between the two inconclusive verdicts) -> StillOpen.
+//  5. Actionable in Baseline, not actionable in Current, and Current
+//     is exactly KILLED -> FixedSurvivors.
+//  6. Actionable in Baseline, not actionable in Current, and Current
+//     is not KILLED (INVALID, EQUIVALENT, or UNSUPPORTED) ->
+//     Reclassified: not a fix, since nothing killed it.
+//  7. Everything else -> UnchangedCount.
 func Compare(baseline, current model.Report) Diff {
 	baseByID := map[string]model.Result{}
 	for _, r := range baseline.Results {
@@ -163,15 +222,26 @@ func Compare(baseline, current model.Report) Diff {
 
 		bActionable := hasB && Actionable(b.Verdict)
 		cActionable := Actionable(c.Verdict)
+		md := MutantDiff{ID: id, Current: resultPtr(c, hasC)}
+		if hasB {
+			md.Baseline = resultPtr(b, hasB)
+		}
+
 		switch {
-		case cActionable && !bActionable:
-			md := MutantDiff{ID: id, Current: resultPtr(c, hasC)}
-			if hasB {
-				md.Baseline = resultPtr(b, hasB)
-			}
+		case !bActionable && cActionable:
 			d.NewSurvivors = append(d.NewSurvivors, md)
+		case bActionable && cActionable && b.Verdict != c.Verdict:
+			if isConfirmedSurvivor(c.Verdict) && !isConfirmedSurvivor(b.Verdict) {
+				d.NewSurvivors = append(d.NewSurvivors, md)
+			} else {
+				d.StillOpen = append(d.StillOpen, md)
+			}
 		case bActionable && !cActionable:
-			d.FixedSurvivors = append(d.FixedSurvivors, MutantDiff{ID: id, Baseline: resultPtr(b, hasB), Current: resultPtr(c, hasC)})
+			if c.Verdict == model.VerdictKilled {
+				d.FixedSurvivors = append(d.FixedSurvivors, md)
+			} else {
+				d.Reclassified = append(d.Reclassified, md)
+			}
 		default:
 			d.UnchangedCount++
 		}
@@ -185,6 +255,8 @@ func Compare(baseline, current model.Report) Diff {
 
 	sortByLocation(d.NewSurvivors)
 	sortByLocation(d.FixedSurvivors)
+	sortByLocation(d.StillOpen)
+	sortByLocation(d.Reclassified)
 	sortByLocation(d.RemovedMutants)
 	d.findLikelyShifts()
 	return d
