@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -227,6 +228,103 @@ func TestGoTestClassifiesDeadlineAsTimeout(t *testing.T) {
 	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 50 * time.Millisecond})
 	if got.Verdict != model.VerdictTimeout {
 		t.Fatalf("verdict=%s output=%s", got.Verdict, got.Output)
+	}
+}
+
+// isTimeout is the pure decision function behind TIMEOUT classification
+// (see its own doc comment for the two real, found bugs this fixes),
+// tested directly with synthetic inputs since reliably forcing the real
+// race it's meant to catch -- go test's own internal -timeout firing
+// and self-terminating the process before the outer context's identical
+// deadline does -- is inherently timing-dependent and not something a
+// fast, deterministic unit test should depend on. The genuine panic
+// text below is copied verbatim from real `go test -timeout` output
+// shape, and the two "must not match" cases are drawn directly from the
+// bug reports: a passing suite and a genuinely failing, unrelated test
+// that each merely contain similar-looking phrasing in their own
+// output.
+func TestIsTimeout(t *testing.T) {
+	failed := errors.New("exit status 1")
+	cases := []struct {
+		name        string
+		ctxErr, err error
+		text        string
+		want        bool
+	}{
+		{
+			name:   "outer context deadline is definitive regardless of output",
+			ctxErr: context.DeadlineExceeded,
+			want:   true,
+		},
+		{
+			name: "go test's own timeout panic header on a failed process is a timeout",
+			err:  failed,
+			text: "panic: test timed out after 30s\nrunning tests:\n\tTestSlow (30s)\n\ngoroutine 1 [running]:\ntesting.(*M).startAlarm.func1()\nFAIL\texample.com/pkg\t30.006s\n",
+			want: true,
+		},
+		{
+			name:   "outer context deadline still wins even alongside a nil err",
+			ctxErr: context.DeadlineExceeded,
+			err:    nil,
+			want:   true,
+		},
+		{
+			name: "a passing suite (err == nil) whose own output merely contains similar phrasing must not be a timeout",
+			err:  nil,
+			text: "=== RUN   TestReportsTimeoutCorrectly\nthis suite verifies the message: test timed out after 30s\n--- PASS: TestReportsTimeoutCorrectly (0.00s)\nPASS\n",
+			want: false,
+		},
+		{
+			name: "a real failure whose own message merely contains similar phrasing, not go test's own panic header, must still be a real kill",
+			err:  failed,
+			text: "--- FAIL: TestRetry (0.00s)\n    retry_test.go:12: expected retry to succeed, got: test timed out after 3 attempts\nFAIL\n",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTimeout(tc.ctxErr, tc.err, tc.text); got != tc.want {
+				t.Fatalf("isTimeout() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGoTestDoesNotClassifyPassingSuiteMentioningTimeoutPhraseAsTimeout
+// is the end-to-end reproduction of the first real bug (not just the
+// isTimeout unit test above): a genuinely passing test (err == nil, no
+// outer deadline) that prints -- via fmt.Println directly to the
+// process's own stdout, so it reaches the captured output regardless
+// of go test's per-test log buffering -- a message that happens to
+// contain "test timed out after", exactly the kind of thing a suite
+// that specifically exercises timeout-handling code would legitimately
+// do. If this were the baseline run, misclassifying it TIMEOUT would
+// abort the whole analysis outright.
+func TestGoTestDoesNotClassifyPassingSuiteMentioningTimeoutPhraseAsTimeout(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() string { return \"ok\" }\n",
+		"package p\nimport (\"fmt\"; \"testing\")\nfunc TestF(t *testing.T) {\n\tfmt.Println(\"this suite verifies the message: test timed out after 30s\")\n\tif F() != \"ok\" {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n")
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 5 * time.Second})
+	if got.Verdict != model.VerdictSurvived {
+		t.Fatalf("verdict=%s (want %s) output=%s", got.Verdict, model.VerdictSurvived, got.Output)
+	}
+}
+
+// TestGoTestDoesNotClassifyUnrelatedFailureMentioningTimeoutPhraseAsTimeout
+// is the end-to-end reproduction of the second real bug: a genuinely
+// failing test (a real kill: err != nil, a normal t.Fatalf, no outer
+// deadline, no actual go-test-internal timeout) whose own failure
+// message happens to contain "test timed out after" as an unrelated
+// substring. This must classify as a real kill with the failing test
+// named, not silently vanish from the score as a TIMEOUT.
+func TestGoTestDoesNotClassifyUnrelatedFailureMentioningTimeoutPhraseAsTimeout(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() bool { return false }\n",
+		"package p\nimport \"testing\"\nfunc TestF(t *testing.T) {\n\tif !F() {\n\t\tt.Fatalf(\"expected retry to succeed, got: test timed out after 3 attempts\")\n\t}\n}\n")
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 5 * time.Second})
+	if got.Verdict != model.VerdictKilled {
+		t.Fatalf("verdict=%s (want %s) output=%s", got.Verdict, model.VerdictKilled, got.Output)
+	}
+	if len(got.Tests) != 1 || got.Tests[0] != "TestF" {
+		t.Fatalf("Tests = %v, want [TestF]", got.Tests)
 	}
 }
 
