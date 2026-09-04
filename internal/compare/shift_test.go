@@ -51,6 +51,17 @@ func TestFindLikelyShiftsMatchesUnambiguousPair(t *testing.T) {
 	}
 }
 
+func TestFindLikelyShiftsFlagsTimeoutToSurvivedAsVerdictChange(t *testing.T) {
+	baseline := model.Report{Results: []model.Result{boundaryResult("M-old", model.VerdictTimeout, "a.go", 5, 7, "\tif n > 0 {")}}
+	current := model.Report{Results: []model.Result{boundaryResult("M-new", model.VerdictSurvived, "a.go", 12, 7, "\tif n > 0 {")}}
+
+	d := Compare(baseline, current)
+
+	if len(d.LikelyShifted) != 1 || !d.LikelyShifted[0].VerdictChanged {
+		t.Fatalf("TIMEOUT -> SURVIVED is a real verdict change, got: %+v", d.LikelyShifted)
+	}
+}
+
 func TestFindLikelyShiftsFlagsGenuineRegressionSeparately(t *testing.T) {
 	// Same fingerprint (file/operator/rule/original/replacement/col/
 	// line text), but the baseline side was KILLED, not SURVIVED --

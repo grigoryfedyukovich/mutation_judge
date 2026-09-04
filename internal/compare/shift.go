@@ -25,11 +25,11 @@ type ShiftCandidate struct {
 	File      string `json:"file"`
 	OldLine   int    `json:"old_line"`
 	NewLine   int    `json:"new_line"`
-	// VerdictChanged is true when the mutant's actionable-status
-	// genuinely differs between the two sides despite the apparent
-	// shift -- e.g. it was KILLED before the edit and is SURVIVED
-	// after. That's still a real, correctly-counted new survivor;
-	// the shift correlation is extra context; it is never grounds to
+	// VerdictChanged is true when the two sides' verdicts differ
+	// despite the apparent shift -- e.g. it was KILLED before the
+	// edit and is SURVIVED after, or TIMEOUT became SURVIVED.
+	// That's still a real, correctly-counted new survivor; the
+	// shift correlation is extra context; it is never grounds to
 	// discount a genuine regression as "just noise".
 	VerdictChanged bool   `json:"verdict_changed"`
 	Note           string `json:"note"`
@@ -82,8 +82,7 @@ func (d *Diff) findLikelyShifts() {
 		}
 		r := d.RemovedMutants[removedIdxs[0]]
 		n := d.NewSurvivors[newIdxs[0]]
-		wasActionable := Actionable(r.Baseline.Verdict)
-		verdictChanged := !wasActionable // n.Current is always actionable, by construction of NewSurvivors
+		verdictChanged := r.Baseline.Verdict != n.Current.Verdict
 		note := "likely the same mutation, relocated by an earlier unrelated edit in this file -- not a real change"
 		if verdictChanged {
 			note = "likely the same mutation, relocated by an earlier unrelated edit in this file, but its verdict also genuinely changed (was " + string(r.Baseline.Verdict) + ") -- a real regression, not just noise from the shift"
