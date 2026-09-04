@@ -112,7 +112,21 @@ func DetectToolchain(ctx context.Context) (ToolchainInfo, error) {
 	if err != nil {
 		return ToolchainInfo{}, fmt.Errorf("detect go toolchain (go env %s): %w", strings.Join(goEnvVars, " "), err)
 	}
-	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	return parseGoEnv(out)
+}
+
+// parseGoEnv splits `go env VAR VAR ...` output into ToolchainInfo.
+// Each variable is printed on its own line, including a blank line when
+// the value is empty (the common case: GOFLAGS unset). strings.TrimRight
+// on "\n" would swallow that trailing blank line and report the wrong
+// field count -- which is exactly how DetectToolchain previously failed
+// on a default toolchain. TrimSuffix removes one trailing newline only;
+// SplitN then keeps an empty last field. \r\n is normalized so a
+// Windows go env cannot leave a trailing CR on GOOS/GOARCH.
+func parseGoEnv(out []byte) (ToolchainInfo, error) {
+	text := strings.ReplaceAll(string(out), "\r\n", "\n")
+	text = strings.TrimSuffix(text, "\n")
+	lines := strings.SplitN(text, "\n", len(goEnvVars))
 	if len(lines) != len(goEnvVars) {
 		return ToolchainInfo{}, fmt.Errorf("unexpected `go env` output: got %d line(s), want %d", len(lines), len(goEnvVars))
 	}
@@ -125,7 +139,7 @@ func DetectToolchain(ctx context.Context) (ToolchainInfo, error) {
 	}, nil
 }
 
-var failRE = regexp.MustCompile(`(?m)^--- FAIL: ([^ (]+)`)
+var failRE = regexp.MustCompile(`(?m)^\s*--- FAIL: ([^ (]+)`)
 
 // fallbackBuildFailureRE is a last-resort heuristic used only when `go
 // test -json` produces no decodable event stream at all (for example,
@@ -345,22 +359,24 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 	var order []string
 	pkgRan := map[string]bool{}         // packages that started at least one test of their own
 	pkgBuildFailed := map[string]bool{} // packages whose own summary line reported a pre-test failure
+	testKey := func(pkg, test string) string { return pkg + "\x00" + test }
 	for _, e := range events {
 		switch e.Action {
 		case "run":
 			if e.Test != "" {
 				pkgRan[e.Package] = true
-				started[e.Test] = true
+				started[testKey(e.Package, e.Test)] = true
 			}
 		case "pass", "skip":
 			if e.Test != "" {
-				delete(started, e.Test)
+				delete(started, testKey(e.Package, e.Test))
 			}
 		case "fail":
 			if e.Test != "" {
-				delete(started, e.Test)
-				if !failed[e.Test] {
-					failed[e.Test] = true
+				k := testKey(e.Package, e.Test)
+				delete(started, k)
+				if !failed[k] {
+					failed[k] = true
 					order = append(order, e.Test)
 				}
 			}
@@ -370,10 +386,14 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 			}
 		}
 	}
-	for test := range started {
-		if !failed[test] {
-			failed[test] = true
-			order = append(order, test)
+	for k := range started {
+		if !failed[k] {
+			failed[k] = true
+			if i := strings.IndexByte(k, 0); i >= 0 {
+				order = append(order, k[i+1:])
+			} else {
+				order = append(order, k)
+			}
 		}
 	}
 	sort.Strings(order)

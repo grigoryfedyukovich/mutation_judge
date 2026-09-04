@@ -20,6 +20,13 @@ func TestFailingTests(t *testing.T) {
 	}
 }
 
+func TestFailingTestsIncludesIndentedSubtests(t *testing.T) {
+	got := failingTests("    --- FAIL: TestX/sub (0.00s)\n--- FAIL: TestX (0.00s)\n")
+	if len(got) != 2 || got[0] != "TestX" || got[1] != "TestX/sub" {
+		t.Fatalf("%v", got)
+	}
+}
+
 // classifyEvents is exercised directly (not only through GoTest.Run
 // against a real go binary) specifically because a real-world go
 // toolchain's exact -json output for a given failure kind can differ
@@ -396,6 +403,50 @@ func TestGoTestStartFailureIsUnknown(t *testing.T) {
 // is the direct fix for the P0 cache-key bug (see
 // TestCacheKeySensitiveToGoToolchainChange in internal/analysis for the
 // end-to-end regression); these two tests pin the primitive itself.
+func TestClassifyEventsSameTestNameInTwoPackagesDoesNotCancelInFlight(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "example.test/a", Test: "TestFoo"},
+		{Action: "run", Package: "example.test/b", Test: "TestFoo"},
+		{Action: "pass", Package: "example.test/a", Test: "TestFoo"},
+		// b's TestFoo started and never resolved: in-flight crash.
+	}
+	verdict, tests := classifyEvents(events)
+	if verdict != model.VerdictKilled {
+		t.Fatalf("verdict = %s, want %s", verdict, model.VerdictKilled)
+	}
+	if len(tests) != 1 || tests[0] != "TestFoo" {
+		t.Fatalf("tests = %v, want [TestFoo] attributed from package b", tests)
+	}
+}
+
+func TestParseGoEnvKeepsEmptyGoflags(t *testing.T) {
+	got, err := parseGoEnv([]byte("go1.22.10\nlinux\namd64\n1\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ToolchainInfo{GoVersion: "go1.22.10", GOOS: "linux", GOARCH: "amd64", CgoEnabled: "1", GoFlags: ""}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestParseGoEnvAcceptsCRLFAndNonEmptyGoflags(t *testing.T) {
+	got, err := parseGoEnv([]byte("go1.23.4\r\nwindows\r\namd64\r\n0\r\n-race\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ToolchainInfo{GoVersion: "go1.23.4", GOOS: "windows", GOARCH: "amd64", CgoEnabled: "0", GoFlags: "-race"}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestParseGoEnvRejectsTruncatedOutput(t *testing.T) {
+	if _, err := parseGoEnv([]byte("go1.22.10\nlinux\namd64\n1")); err == nil {
+		t.Fatal("expected error for 4 lines without a trailing GOFLAGS field")
+	}
+}
+
 func TestDetectToolchainReadsInvokedGoNotRuntimeVersion(t *testing.T) {
 	tc, err := DetectToolchain(context.Background())
 	if err != nil {
