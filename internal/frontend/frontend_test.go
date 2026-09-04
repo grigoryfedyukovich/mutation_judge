@@ -141,6 +141,82 @@ func step() error { return nil }
 	}
 }
 
+func TestDiscoverErrorReturnUnwrapsParens(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func f() error {
+	err := step()
+	if (err != nil) {
+		return err
+	}
+	return nil
+}
+
+func step() error { return nil }
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"errorreturn": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].RuleID != "MJ-ERR-SWALLOW" {
+		t.Fatalf("parenthesized if (err != nil) must still match, got %#v", ms)
+	}
+}
+
+func TestDiscoverSkipsNoopReplacements(t *testing.T) {
+	d := t.TempDir()
+	src := []byte("package p\nfunc f() {\n\tfor false {\n\t\treturn\n\t}\n\tfor {\n\t\tbreak\n\t}\n}\n")
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"loop": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 0 {
+		t.Fatalf("original==replacement mutants must not be emitted, got %#v", ms)
+	}
+}
+
+func TestDiscoverSkipsLastSelectCase(t *testing.T) {
+	d := t.TempDir()
+	one := []byte("package p\nfunc f(a chan int) {\n\tselect {\n\tcase <-a:\n\t\treturn\n\t}\n}\n")
+	if err := os.WriteFile(filepath.Join(d, "one.go"), one, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"one.go"}, Options{Operators: map[string]bool{"channel": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.RuleID == "MJ-CHAN-SELECT-DROP-CASE" {
+			t.Fatalf("single-case select must not be mutated to select {}: %#v", m)
+		}
+	}
+
+	two := []byte("package p\nfunc f(a, b chan int) {\n\tselect {\n\tcase <-a:\n\t\treturn\n\tcase <-b:\n\t\treturn\n\t}\n}\n")
+	if err := os.WriteFile(filepath.Join(d, "two.go"), two, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err = Discover(d, []string{"two.go"}, Options{Operators: map[string]bool{"channel": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, m := range ms {
+		if m.RuleID == "MJ-CHAN-SELECT-DROP-CASE" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("two-case select should yield 2 drop-case mutants, got %d from %#v", n, ms)
+	}
+}
+
 func TestDiscoverErrorReturnIgnoresUnrelatedReturn(t *testing.T) {
 	d := t.TempDir()
 	// The if-body's return does not return the checked identifier, so no

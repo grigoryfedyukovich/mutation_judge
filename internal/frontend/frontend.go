@@ -77,6 +77,9 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			return
 		}
 		original := string(src[sp.StartByte:sp.EndByte])
+		if original == replacement {
+			return
+		}
 		id := mutationID(rel, sp.StartByte, op, rule, original, replacement)
 		out = append(out, model.Mutation{
 			ID: id, Operator: op, RuleID: rule, Span: sp,
@@ -194,6 +197,28 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					"insert an immediate break (loop body never executes)",
 					"add a test that depends on the loop body actually running", "")
 			}
+		case *ast.SelectStmt:
+			if opts.Operators["channel"] && len(x.Body.List) > 1 {
+				// Deleting the last remaining comm clause leaves
+				// `select {}`, which blocks forever -- a guaranteed
+				// TIMEOUT rather than a useful KILLED/SURVIVED. The
+				// loop operator already refuses mutations that would
+				// run forever; skip the same way when there is only
+				// one case (handled by the len > 1 guard).
+				for _, stmt := range x.Body.List {
+					c, ok := stmt.(*ast.CommClause)
+					if !ok || len(c.Body) == 0 {
+						continue
+					}
+					label := "default"
+					if c.Comm != nil {
+						label = compact(source(src, fset, c.Comm.Pos(), c.Comm.End()))
+					}
+					add("channel", "MJ-CHAN-SELECT-DROP-CASE", c.Pos(), c.End(), "",
+						fmt.Sprintf("delete select case %s", label),
+						fmt.Sprintf("add a test that exercises the %s communication and would fail if that case were missing", label), "")
+				}
+			}
 		case *ast.CallExpr:
 			if opts.Operators["channel"] {
 				if fn, ok := x.Fun.(*ast.Ident); ok && fn.Name == "make" && len(x.Args) == 2 {
@@ -207,16 +232,6 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 						}
 					}
 				}
-			}
-		case *ast.CommClause:
-			if opts.Operators["channel"] && len(x.Body) > 0 {
-				label := "default"
-				if x.Comm != nil {
-					label = compact(source(src, fset, x.Comm.Pos(), x.Comm.End()))
-				}
-				add("channel", "MJ-CHAN-SELECT-DROP-CASE", x.Pos(), x.End(), "",
-					fmt.Sprintf("delete select case %s", label),
-					fmt.Sprintf("add a test that exercises the %s communication and would fail if that case were missing", label), "")
 			}
 		}
 		return true
@@ -425,7 +440,7 @@ func arithmeticReplacement(op token.Token) (string, bool) {
 // silently swallowed is a meaningful mutant regardless of the checked
 // value's exact type.
 func notNilOperand(cond ast.Expr) (ast.Expr, bool) {
-	be, ok := cond.(*ast.BinaryExpr)
+	be, ok := unwrapParen(cond).(*ast.BinaryExpr)
 	if !ok || be.Op != token.NEQ {
 		return nil, false
 	}
