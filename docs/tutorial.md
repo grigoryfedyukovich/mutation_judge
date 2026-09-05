@@ -660,16 +660,18 @@ removed mutants: 0
 unchanged: 0
 ```
 
-`compare` distinguishes four cases for every mutant ID appearing in either report:
+`compare` distinguishes six cases for every mutant ID appearing in either report:
 
-- **new survivors** -- actionable (`SURVIVED`, `TIMEOUT`, or `UNKNOWN`) in `current` but not in `baseline`: either a previously-killed mutant regressed, or a brand-new mutant from new code was actionable from the start. These are what a reviewer needs to see.
-- **fixed survivors** -- actionable in `baseline`, still present in `current`, but no longer actionable there: killed by an improved test. A genuine test-quality signal.
+- **new survivors** -- actionable in `current` but not in `baseline`, or a TIMEOUT/UNKNOWN that became a confirmed SURVIVED: either a previously-killed mutant regressed, a brand-new mutant from new code was actionable from the start, or an inconclusive run is now a demonstrated gap. These are what a reviewer needs to see.
+- **fixed survivors** -- actionable in `baseline`, still present in `current`, with Current verdict exactly KILLED: killed by an improved test. A genuine test-quality signal.
+- **still-open** -- actionable on both sides with a different inconclusive verdict (for example SURVIVED to TIMEOUT, or TIMEOUT to UNKNOWN). Not a fix; still needs attention.
+- **reclassified** -- actionable in `baseline`, still present, but Current is INVALID, EQUIVALENT, or UNSUPPORTED -- not a test fix.
 - **removed mutants** -- present in `baseline`, absent from `current` entirely: that mutation site doesn't exist anymore, usually because the code was deleted or rewritten. This holds regardless of the mutant's prior verdict -- a removed survivor and a removed kill are both here, since neither says anything about test quality, only that the code isn't there to test anymore. Folding this into "fixed" would overstate what actually happened; deleting code isn't the same accomplishment as killing a mutant with a real test.
-- **unchanged** -- everything else: same actionable-status in both reports, or new code with nothing to flag. Just a count, since that's normally the overwhelming majority.
+- **unchanged** -- everything else: same verdict on both sides, or new code with nothing to flag. Just a count, since that's normally the overwhelming majority.
 
-New, fixed, and removed each get per-mutant detail; add `--fail-on-new-survivors` (with `--fail-exit-code`, default 10) to fail a CI step specifically when a change introduces a new gap, distinct from the overall `--ci-min-score` threshold.
+New, fixed, still-open, reclassified, and removed each get per-mutant detail; add `--fail-on-new-survivors` (with `--fail-exit-code`, default 10) to fail a CI step specifically when a change introduces a new gap, distinct from the overall `--ci-min-score` threshold.
 
-For scripting, `--format json` gives the same four buckets as clean fields -- `new_survivors`, `fixed_survivors`, and `removed_mutants` always serialize as `[]`, never `null`, when empty:
+For scripting, `--format json` gives the same six buckets as clean fields -- list buckets always serialize as `[]`, never `null`, when empty:
 
 ```bash
 ./bin/mutation-judge compare --baseline baseline.json --current current.json --format json
@@ -681,6 +683,8 @@ For scripting, `--format json` gives the same four buckets as clean fields -- `n
   "fixed_survivors": [
     { "id": "M-...", "baseline": { "verdict": "SURVIVED", "..." : "..." }, "current": { "verdict": "KILLED", "...": "..." } }
   ],
+  "still_open": [],
+  "reclassified": [],
   "removed_mutants": [],
   "unchanged_count": 0,
   "baseline_score": 0,

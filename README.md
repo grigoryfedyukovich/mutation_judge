@@ -106,7 +106,7 @@ mutation-judge record --label "PR #104" report.json
 mutation-judge trend
 ```
 
-`compare` diffs two reports at the mutant level: `new survivors`, `fixed survivors`, `removed mutants`, and an `unchanged` count -- plus a conservative `likely_shifted` correlation that recognizes when a removed entry and a new entry are probably the same mutation, just relocated by an unrelated earlier edit (not a real gap or fix). `record`/`trend` keep a running score log at `.mutation-judge/history.ndjson`. See `docs/tutorial.md` section 16 -- in particular the mutant-ID matching caveat there before relying on `compare` across a heavily-edited file.
+`compare` diffs two reports at the mutant level into six buckets: `new survivors`, `fixed survivors`, `still-open`, `reclassified`, `removed mutants`, and an `unchanged` count -- plus a conservative `likely_shifted` correlation that recognizes when a removed entry and a new entry are probably the same mutation, just relocated by an unrelated earlier edit (not a real gap or fix). `record`/`trend` keep a running score log at `.mutation-judge/history.ndjson`. See `docs/tutorial.md` section 16 -- in particular the mutant-ID matching caveat there before relying on `compare` across a heavily-edited file.
 
 ## Supported mutations
 

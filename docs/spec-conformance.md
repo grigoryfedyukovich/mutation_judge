@@ -7,7 +7,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | Specification area | Status | Evidence |
 |---|---|---|
 | Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and four further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`) in `internal/frontend`. |
-| One mutant at a time | Implemented | Atomic apply/run/restore in one isolated temporary module copy. |
+| One mutant at a time | Implemented | Atomic apply/run/restore per sandbox; `--workers N` uses one independent sandbox per concurrent mutant. |
 | Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, `UNSUPPORTED`, and `EQUIVALENT` model values. |
 | Responsible tests | Implemented with documented limits | Standard `--- FAIL:` events are extracted and sorted. |
 | Exact survivor diff and suggestion | Implemented | Every surviving result carries a unified diff and operator-specific scenario. |
@@ -22,7 +22,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | CI policy exit | Implemented | Successful analysis returns zero unless an explicit score policy fails. |
 | Three running examples | Exceeded | Eleven examples plus `examples/run-all.sh`. |
 | Real-world evaluation | Implemented, bounded | Self-hosting slice in `docs/evaluation.md`. |
-| Cross-run comparison and score trend | Implemented | `compare` (`internal/compare`) diffs two reports by mutant ID into four buckets -- new survivors, fixed survivors (still present, no longer actionable), removed mutants (no longer present at all, any prior verdict), and an unchanged count -- with `--format json` giving all four as clean, always-present fields for CI, plus a conservative `likely_shifted` correlation (`internal/compare.findLikelyShifts`) for the specific case where an unrelated earlier edit shifts a mutant's byte-offset-based ID. `record`/`trend` (`internal/history`) keep an NDJSON score-history log. See `docs/limitations.md` limitation 12 for exactly what `likely_shifted` does and does not claim. |
+| Cross-run comparison and score trend | Implemented | `compare` (`internal/compare`) diffs two reports by mutant ID into six buckets -- new survivors, fixed survivors (present and now KILLED), still-open (still actionable, different inconclusive verdict), reclassified (actionable in baseline but now INVALID/EQUIVALENT/UNSUPPORTED), removed mutants (absent from current), and an unchanged count -- with `--format json` giving those fields as clean, always-present values for CI, plus a conservative `likely_shifted` correlation (`internal/compare.findLikelyShifts`) when an unrelated earlier edit shifts a mutant's byte-offset-based ID. `record`/`trend` (`internal/history`) keep an NDJSON score-history log. HTML visualization of two reports is not implemented. See `docs/limitations.md` limitation 12 for exactly what `likely_shifted` does and does not claim. |
 | Conservative equivalent-mutant suppression | Implemented, narrow by design | The boundary operator recognizes one exact, locally provable pattern -- a comparison dominated by an `if X != Y { return X < Y }`-shaped guard on the same two operands (`internal/frontend.detectGuardedComparison`) -- and marks it `EQUIVALENT`, skipping execution, rather than generating an ordinary mutant. Confirmed against this project's own previously-documented case (`docs/evaluation.md`, "Guarded sort comparisons"): the real `sort.Slice` comparator in `internal/frontend.Discover` is now correctly suppressed. See `docs/limitations.md` limitation 7 for exactly what this does and does not claim. |
 
 ## Clarifications
@@ -41,7 +41,9 @@ The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, 
 
 ## Not yet implemented
 
-- Distributed CI execution (M4).
+- Distributed CI execution (shard mutants across jobs and merge reports; distinct from in-process `--workers`).
 - Assertion or contract attribution beyond named failing tests.
 - General equivalent-mutant proofs (only the one narrow boundary-operator case above is implemented; most equivalence remains undecided by design -- see `docs/limitations.md` limitation 7).
-- Full TOML and YAML language support.
+- Full TOML and YAML language support (permanent non-goal for the flat subset parser).
+- Cross-run HTML comparison (text/JSON `compare` already ships).
+- Coverage-attributed per-test selection (distinct from `--narrow-test-scope`).
