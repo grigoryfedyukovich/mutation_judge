@@ -2,17 +2,93 @@ name: ci
 on:
   push:
   pull_request:
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt -l found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        go: ['1.22.x', '1.23.x']
+        go: ['1.22.x', '1.23.x', '1.24.x']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - run: go test ./...
       - run: go build ./cmd/mutation-judge
+      - run: go test ./... -race
+
+  # cmd/mutation-judge's SIGTERM tests start a real subprocess and poll a
+  # wall-clock deadline for it to reach a specific point before signaling
+  # it. Sharing a runner with every other package's tests (as in `test`
+  # above) is exactly the kind of CPU contention that can make a polling
+  # loop miss its window and flake, even though the behavior it's proving
+  # is correct. -p 1 in a dedicated job removes that noisy-neighbor source
+  # rather than papering over it with longer deadlines.
+  sigterm:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - run: go test ./cmd/mutation-judge/... -run TestSIGTERM -v -p 1
+
+  examples:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - run: ./examples/run-all.sh
+
+  # Optional: exercises --workers and --narrow-test-scope against every
+  # packaged example, not just the fake-backend unit tests in
+  # internal/analysis, so a regression in that interaction shows up
+  # against real fixtures on every push. Drop this job if the extra
+  # runtime isn't worth it -- it's not exercising anything the other
+  # jobs don't already build and run.
+  examples-workers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - run: go build -o /tmp/mutation-judge ./cmd/mutation-judge
+      - name: workers + narrow-test-scope against examples/
+        run: |
+          set -euo pipefail
+          for dir in examples/*/; do
+            name="$(basename "$dir")"
+            echo "=== $name ==="
+            /tmp/mutation-judge --no-cache --workers 2 --narrow-test-scope "./$dir"
+          done
