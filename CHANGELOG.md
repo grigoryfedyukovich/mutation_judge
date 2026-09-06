@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Sandbox correctness: omit outbound symlinks from `CopyModule`/`Digest` (no host-escape links, no cache-key influence); skip `node_modules/`, module-root `bin/` without `*.go` files, and `vendor/` without `modules.txt` while always keeping real Go vendor trees; reject multi-module `go.work` workspaces in `ModuleRoot` (single-module workspace or `GOWORK=off` still allowed). macOS `clonefile(2)` remains deferred.
+
 - Documentation hygiene: aligned `ISSUES.md`, `docs/limitations.md`, `docs/spec-conformance.md`, `README.md`, `docs/tutorial.md`, and `examples/README.md` with the shipped feature set. Marked SARIF/GitHub formats, opt-in operators, and text/JSON `compare`/`record`/`trend` as done; documented six-bucket `compare` (including `still_open` and `reclassified`); corrected limitations that still claimed serial-only execution and a single global test selection despite `--workers` and `--narrow-test-scope`; left distributed CI, HTML compare, coverage-guided selection, and sandbox copy-policy items as open.
 
 - Fixed test flakiness in `cmd/mutation-judge`'s SIGTERM tests: a real failure was reported from a full `go test ./...` run (a raw, unhandled-signal exit code, and a sandbox directory that never appeared in time) but did not reproduce across several repeated runs of just those tests in isolation, confirming resource contention from `go test`'s default cross-package parallelism as the cause, not a platform-specific signal-handling bug. Widened timing budgets (10-20s to 30-40s) to tolerate scheduling delay under load, and threaded captured stderr into `waitWithTimeout`'s failure messages so a future occurrence is self-diagnosing without a second run.

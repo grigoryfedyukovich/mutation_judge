@@ -2,7 +2,7 @@
 
 ## Current limitations
 
-1. **Single Go module.** Package patterns must resolve inside the current module. Multi-module workspaces (`go.work`) are not modeled as one mutation unit.
+1. **Single Go module.** Package patterns must resolve inside the current module. A multi-module `go.work` (more than one `use` path) is rejected at startup with an error asking for `GOWORK=off` or a single-module workspace; a one-module workspace is allowed.
 2. **Production Go files only.** `GoFiles` and `CgoFiles` returned by `go list` are candidates. Test files, generated files by default, assembly, templates, and generated-at-test-time code are excluded.
 3. **Narrow fallback for classification.** `go test -json` event classification (a package-level `FAIL <pkg> [<reason>]` marker, combined with whether any test of that package ever started) is authoritative for INVALID vs. KILLED. A regex-based fallback exists only for the rare case where `go test` rejects the invocation before writing any JSON at all (e.g. a build-constraint exclusion) — see `internal/runner.classifyEvents` and `ISSUES.md`.
 4. **Responsible tests depend on go test's own event stream.** Named tests are read from the `Test` field of `go test -json` events, including a test still "in flight" (started but never resolved) when the process crashed. A package-wide crash before any test starts (init() panic, `TestMain` exiting) still kills the mutant with no test name attributed, since none ran.
@@ -12,12 +12,12 @@
 8. **Git changed-line semantics.** Only added/modified lines in the current file version are selectable. Deleted-only lines have no current AST span.
 9. **In-process parallelism only.** `--workers N` (opt-in, default 1) runs N mutants concurrently, each in its own sandbox, with deterministic report ordering. Distributed CI -- splitting one run's mutants across separate jobs or machines, then merging reports -- is not implemented. See `docs/performance.md`.
 10. **Flat configuration subset.** The strict dependency-free parser supports the documented scalar/list keys, not the full TOML or YAML language; YAML's native block-list style is additionally accepted for list-valued keys. Other unsupported nested syntax is an error. This is a permanent design decision, not a placeholder — see `docs/decisions/0001-config-parser-scope.md`.
-11. **Conservative I/O.** Every run hashes the same file set `CopyModule` places in the sandbox and copies the module tree (Linux may reflink per file via `FICLONE`, then fall back to a full copy). This favors stale-cache prevention and sandbox fidelity over large-repository startup speed. Outbound-symlink policy and skipping `vendor/` / `bin/` / `node_modules/` when they cannot change a verdict are still open; see `ISSUES.md`.
+11. **Conservative I/O.** Every run hashes the same file set `CopyModule` places in the sandbox and copies the module tree (Linux may reflink per file via `FICLONE`, then fall back to a full copy). Outbound symlinks (targets outside the module root) are omitted; `node_modules/`, non-Go root `bin/`, and `vendor/` without `modules.txt` are skipped. Real Go vendor trees are always included.
 12. **Mutant IDs are byte-offset identity, not AST identity.** A mutant's ID hashes its file path and raw byte offset in that file (plus operator, rule, and replacement text) -- not a structural identity that survives unrelated edits. `compare` (see `docs/tutorial.md` section 16) relies on this ID to match mutants across two reports; an edit anywhere earlier in a file shifts the byte offset, and so the ID, of every later mutant in that file, even ones whose own code never changed. Comparisons across files a change never touches are unaffected. `compare` additionally runs a conservative, non-destructive correlation pass (`internal/compare.findLikelyShifts`) that recognizes an unambiguous fingerprint match (same file, operator, rule, original/replacement text, column span, and pre-mutation source line) between a removed entry and a brand-new-ID entry, and reports it in `likely_shifted` -- but this is a heuristic on top of the ID-exact truth, not a replacement for it: `new_survivors`, `fixed_survivors`, `still_open`, `reclassified`, and `removed_mutants` are always the exact computation regardless of what `likely_shifted` finds, and an ambiguous fingerprint (matching zero or several candidates) is correctly left unreconciled rather than guessed.
 
 ## Correctness priorities
 
-None outstanding from the original trust backlog. See `ISSUES.md`. Remaining sandbox-copy items (outbound symlinks, `vendor/`/`bin/`/`node_modules/` skip policy, macOS `clonefile`) are tracked there as optional expansion, not as open classifier bugs.
+None outstanding from the original trust backlog. See `ISSUES.md`. macOS `clonefile(2)` remains deferred (Linux `FICLONE` exists; clone success path is environment-dependent).
 
 The four operators formerly listed under "Optional expansion" as future work -- error-return, switch-case deletion, loop-bound changes, and channel/select behavior -- are implemented (`errorreturn`, `switch`, `loop`, `channel`; all opt-in, none in `Default()`). See `docs/semantics.md` for what each one matches and, for `loop` and `channel`, what each deliberately does *not* mutate to avoid producing slow, uninformative `TIMEOUT` verdicts.
 
@@ -32,5 +32,4 @@ The four operators formerly listed under "Optional expansion" as future work -- 
 - Assertion/contract attribution beyond failing test names.
 - Cross-run HTML comparison (text and JSON `compare` already ship).
 - Additional operators beyond the four opt-in families already implemented.
-- Outbound-symlink sandbox policy; skip `vendor/` / `bin/` / `node_modules/` when it cannot change a verdict.
 - macOS `clonefile(2)` sandbox clone (Linux `FICLONE` exists; the clone success path is untested in the project's Linux CI environment).

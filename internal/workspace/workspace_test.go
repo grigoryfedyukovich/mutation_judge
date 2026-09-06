@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -346,5 +347,147 @@ func TestDigestReflectsSymlinkRetargetingWithoutErroringOnDangling(t *testing.T)
 	}
 	if _, err := Digest(root, ".mutation-judge/cache"); err != nil {
 		t.Fatalf("a dangling symlink elsewhere in the tree must not fail Digest (CopyModule tolerates it too, since recreating a symlink never touches its target): %v", err)
+	}
+}
+
+func TestSandboxSkipsOutboundSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions vary on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.test/m\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(root, "inside.txt"), "in", 0o644)
+	mustWrite(t, filepath.Join(outside, "secret.txt"), "secret", 0o644)
+	if err := os.Symlink("inside.txt", filepath.Join(root, "ok.link")); err != nil {
+		t.Fatal(err)
+	}
+	// absolute outbound
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(root, "abs.out")); err != nil {
+		t.Fatal(err)
+	}
+	// relative outbound
+	if err := os.Symlink(filepath.Join("..", filepath.Base(outside), "secret.txt"), filepath.Join(root, "rel.out")); err != nil {
+		// use path that climbs out of root
+		if err := os.Symlink("../"+filepath.Base(outside)+"/secret.txt", filepath.Join(root, "rel.out")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tmp, cleanup, err := CopyModule(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := os.Lstat(filepath.Join(tmp, "ok.link")); err != nil {
+		t.Fatalf("internal symlink should be copied: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tmp, "abs.out")); !os.IsNotExist(err) {
+		t.Fatalf("absolute outbound symlink must be omitted, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tmp, "rel.out")); !os.IsNotExist(err) {
+		t.Fatalf("relative outbound symlink must be omitted, err=%v", err)
+	}
+
+	// Digest must also ignore outbound links so they cannot poison the cache key
+	base, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "abs.out")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != base {
+		t.Fatal("removing an outbound symlink changed the digest; outbound links must not be part of the fingerprint")
+	}
+}
+
+func TestSandboxSkipsNodeModulesJunkVendorAndRootBin(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.test/m\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(root, "p.go"), "package p\n", 0o644)
+	mustWrite(t, filepath.Join(root, "node_modules", "pkg", "index.js"), "js", 0o644)
+	mustWrite(t, filepath.Join(root, "bin", "tool"), "#!/bin/sh\n", 0o755)
+	mustWrite(t, filepath.Join(root, "vendor", "readme.txt"), "not a real vendor tree", 0o644)
+	// real vendor tree must be kept
+	mustWrite(t, filepath.Join(root, "vendor", "modules.txt"), "# example.com/x\n", 0o644)
+	mustWrite(t, filepath.Join(root, "vendor", "example.com", "x", "x.go"), "package x\n", 0o644)
+	// bin that is a Go package must be kept
+	mustWrite(t, filepath.Join(root, "cmdish", "bin", "main.go"), "package main\n", 0o644)
+
+	// Rebuild vendor-less junk path: use separate dir name for false vendor
+	// (we already have real vendor with modules.txt). Add fake at sub/vendor without modules.txt
+	mustWrite(t, filepath.Join(root, "third_party", "vendor", "orphan.txt"), "orphan", 0o644)
+
+	tmp, cleanup, err := CopyModule(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := os.Stat(filepath.Join(tmp, "node_modules")); !os.IsNotExist(err) {
+		t.Fatalf("node_modules should be skipped, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "bin")); !os.IsNotExist(err) {
+		t.Fatalf("root bin/ without .go files should be skipped, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "vendor", "modules.txt")); err != nil {
+		t.Fatalf("real vendor/ must be kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "third_party", "vendor")); !os.IsNotExist(err) {
+		t.Fatalf("vendor without modules.txt should be skipped, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "cmdish", "bin", "main.go")); err != nil {
+		t.Fatalf("non-root bin package must be kept: %v", err)
+	}
+}
+
+func TestParseGoWorkUsePaths(t *testing.T) {
+	dir := t.TempDir()
+	single := filepath.Join(dir, "single.work")
+	mustWrite(t, single, "go 1.22\n\nuse ./mod\n", 0o644)
+	got, err := parseGoWorkUsePaths(single)
+	if err != nil || len(got) != 1 || got[0] != "./mod" {
+		t.Fatalf("single: got %v err=%v", got, err)
+	}
+	multi := filepath.Join(dir, "multi.work")
+	mustWrite(t, multi, "go 1.22\n\nuse (\n\t./a\n\t./b // comment\n)\n", 0o644)
+	got, err = parseGoWorkUsePaths(multi)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("multi: got %v err=%v", got, err)
+	}
+}
+
+func TestRejectMultiModuleWorkspace(t *testing.T) {
+	// Build a synthetic multi-module workspace and ensure ModuleRoot refuses it.
+	base := t.TempDir()
+	modA := filepath.Join(base, "a")
+	modB := filepath.Join(base, "b")
+	mustWrite(t, filepath.Join(modA, "go.mod"), "module example.test/a\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(modA, "a.go"), "package a\n", 0o644)
+	mustWrite(t, filepath.Join(modB, "go.mod"), "module example.test/b\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(modB, "b.go"), "package b\n", 0o644)
+	work := filepath.Join(base, "go.work")
+	mustWrite(t, work, "go 1.22\n\nuse (\n\t./a\n\t./b\n)\n", 0o644)
+
+	t.Setenv("GOWORK", work)
+	_, err := ModuleRoot(modA)
+	if err == nil {
+		t.Fatal("expected multi-module workspace to be rejected")
+	}
+	if !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("error should mention workspace, got %v", err)
+	}
+
+	t.Setenv("GOWORK", "off")
+	root, err := ModuleRoot(modA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(root) != filepath.Clean(modA) {
+		t.Fatalf("root=%s want %s", root, modA)
 	}
 }

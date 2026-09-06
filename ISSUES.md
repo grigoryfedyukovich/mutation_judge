@@ -17,7 +17,8 @@ All items in this section are done. Summaries stay here as the audit trail; see 
 - [x] Platform `FAIL <pkg> [setup failed]` (and any other bracketed reason) classified INVALID, not KILLED.
 - [x] Multi-package `./...` compile failure classified INVALID even when a sibling package's tests run.
 - [x] Cache key and report toolchain fields come from `go env GOVERSION GOOS GOARCH CGO_ENABLED GOFLAGS` (`runner.DetectToolchain`), not `runtime.Version()`.
-- [x] `Digest` hashes exactly the file set `CopyModule` places in the sandbox (`sandboxEntries`). Outbound-symlink policy and `vendor/`/`bin/`/`node_modules/` skip remain open (optional expansion below).
+- [x] `Digest` hashes exactly the file set `CopyModule` places in the sandbox (`sandboxEntries`). Outbound-symlink policy and skip rules for `node_modules` / non-Go root `bin/` / non-modules.txt `vendor/` are implemented (optional expansion below updated).
+- [x] Reject multi-module `go.work` workspaces in `ModuleRoot` (single-module workspace or `GOWORK=off` still allowed). Prevents analyzing under workspace replace/selection that a single-module sandbox cannot represent.
 - [x] Timeout classification: outer `context.DeadlineExceeded` is definitive; the text fallback matches only `^panic: test timed out after ` on a failed process.
 
 ## Performance work
@@ -37,6 +38,6 @@ All items in this section are done. Summaries stay here as the audit trail; see 
 - [ ] Cross-run HTML comparison (text and JSON `compare` already ship).
 - [ ] Additional operators beyond the four opt-in families already implemented. Same timeout-safety rule: never generate a mutant whose expected verdict is an uninformative `TIMEOUT`.
 - [ ] Coverage-attributed per-test selection. Distinct from `--narrow-test-scope` (import graph, not `-coverprofile`).
-- [ ] Outbound-symlink sandbox policy. `CopyModule` recreates symlink objects by target string; a policy for links that escape the module root is not specified.
-- [ ] Skip `vendor/` / `bin/` / `node_modules/` in `CopyModule`/`Digest` when doing so cannot change a verdict (depends on `-mod` and what tests observe).
+- [x] Outbound-symlink sandbox policy. Symlinks whose target resolves outside the module root are omitted from both `CopyModule` and `Digest` (no host-escape links in the sandbox, no cache-key influence). Internal and in-tree dangling links are still recreated and fingerprinted by target string.
+- [x] Skip directories that cannot change a Go test verdict: any `node_modules/`; module-root `bin/` with no `*.go` files; `vendor/` without `modules.txt`. Real `vendor/` trees (`modules.txt` present) and non-root `bin` packages are always kept.
 - [ ] macOS `clonefile(2)` sandbox clone. Linux `FICLONE` exists; `TestTryReflinkClonesOrCleanlyDeclines` skips where the filesystem cannot clone.

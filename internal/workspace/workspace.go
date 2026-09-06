@@ -24,7 +24,87 @@ func ModuleRoot(cwd string) (string, error) {
 	if gomod == "" || gomod == os.DevNull || gomod == "/dev/null" {
 		return "", fmt.Errorf("no Go module found from %s", cwd)
 	}
-	return filepath.Dir(gomod), nil
+	root := filepath.Dir(gomod)
+	if err := rejectMultiModuleWorkspace(cwd, root); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+// rejectMultiModuleWorkspace fails when GOWORK is active and the work
+// file lists more than one module. Mutation-judge copies and digests a
+// single module root; a multi-module workspace can change dependency
+// resolution and package patterns in ways that one sandbox cannot
+// represent. A single-module workspace (or GOWORK=off) is allowed.
+func rejectMultiModuleWorkspace(cwd, moduleRoot string) error {
+	cmd := exec.Command("go", "env", "GOWORK")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("go env GOWORK failed: %w", err)
+	}
+	gowork := strings.TrimSpace(string(out))
+	if gowork == "" || gowork == "off" {
+		return nil
+	}
+	uses, err := parseGoWorkUsePaths(gowork)
+	if err != nil {
+		return fmt.Errorf("reading go.work %s: %w", gowork, err)
+	}
+	if len(uses) <= 1 {
+		return nil
+	}
+	return fmt.Errorf("go workspace %s lists %d modules; mutation-judge analyzes a single module root (%s). Re-run with GOWORK=off from that module, or reduce the workspace to one module", gowork, len(uses), moduleRoot)
+}
+
+// parseGoWorkUsePaths returns the path arguments of every use directive
+// in a go.work file. It handles both `use ./foo` and parenthesized
+// `use (\n\t./foo\n)` forms; replace/go lines are ignored.
+func parseGoWorkUsePaths(workFile string) ([]string, error) {
+	b, err := os.ReadFile(workFile)
+	if err != nil {
+		return nil, err
+	}
+	var uses []string
+	inUseBlock := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if inUseBlock {
+			if line == ")" {
+				inUseBlock = false
+				continue
+			}
+			// strip trailing comments
+			if i := strings.Index(line, " //"); i >= 0 {
+				line = strings.TrimSpace(line[:i])
+			}
+			if line != "" {
+				uses = append(uses, line)
+			}
+			continue
+		}
+		if line == "use (" {
+			inUseBlock = true
+			continue
+		}
+		if strings.HasPrefix(line, "use ") {
+			arg := strings.TrimSpace(strings.TrimPrefix(line, "use "))
+			if arg == "(" {
+				inUseBlock = true
+				continue
+			}
+			if i := strings.Index(arg, " //"); i >= 0 {
+				arg = strings.TrimSpace(arg[:i])
+			}
+			if arg != "" {
+				uses = append(uses, arg)
+			}
+		}
+	}
+	return uses, nil
 }
 
 type Package struct {
@@ -156,46 +236,127 @@ func SourceFiles(root string, pkgs []Package) ([]string, error) {
 }
 
 // sandboxEntries walks root exactly as CopyModule copies it -- the same
-// order, and skipping exactly the same directories (.git,
-// .mutation-judge, and the resolved cache directory) -- invoking fn
-// once for every directory and non-directory entry CopyModule would
-// otherwise place into the sandbox. This is the single shared source
-// of truth for "what will a test run inside the sandbox actually see":
-// Digest and CopyModule independently walking the tree with their own,
-// separately maintained skip/include rules is exactly how they drifted
-// apart before (see ISSUES.md, "Digest does not hash what tests can
-// observe") -- Digest hashed only *.go/go.mod/go.sum/go.work/go.work.sum
-// while CopyModule copied everything else alongside it too (//go:embed
-// payloads, cgo .c/.h/.s, testdata/, go.env, and any other file a test
-// can read by path), so changing any of those produced a cache hit with
-// stale results. Sharing this walk instead of two separately maintained
-// file-selection functions makes that class of drift structurally
-// impossible to reintroduce, not just fixed once.
+// order, and skipping exactly the same directories and outbound
+// symlinks -- invoking fn once for every directory and non-directory
+// entry CopyModule would otherwise place into the sandbox. This is the
+// single shared source of truth for "what will a test run inside the
+// sandbox actually see": Digest and CopyModule independently walking
+// the tree with their own skip/include rules is exactly how they
+// drifted apart before (see ISSUES.md). Sharing this walk makes that
+// class of drift structurally impossible to reintroduce.
+//
+// Always skipped directories:
+//   - .git, .mutation-judge, the configured cache directory
+//   - any directory named node_modules (not part of a Go build)
+//   - vendor/ when vendor/modules.txt is absent (not a real Go vendor tree)
+//   - module-root bin/ when it contains no *.go files (built binaries only)
+//
+// vendor/ with modules.txt is always included: -mod=vendor and tests that
+// read vendored sources by path would otherwise see a different tree.
+//
+// Symlinks whose resolved target path would leave the module root are
+// skipped (not recreated in the sandbox and not fingerprinted). Internal
+// and dangling-but-in-tree-target symlinks are still visited; see
+// symlinkTargetInsideRoot.
 func sandboxEntries(root, cacheDir string, fn func(path, rel string, d fs.DirEntry) error) error {
-	cacheAbs := cacheDir
-	if !filepath.IsAbs(cacheAbs) {
-		cacheAbs = filepath.Join(root, cacheDir)
-	}
-	cacheAbs, err := filepath.Abs(cacheAbs)
+	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return err
 	}
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+	cacheAbs := cacheDir
+	if !filepath.IsAbs(cacheAbs) {
+		cacheAbs = filepath.Join(rootAbs, cacheDir)
+	}
+	cacheAbs, err = filepath.Abs(cacheAbs)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(rootAbs, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if path == root {
+		if path == rootAbs {
 			return nil
 		}
-		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".mutation-judge" || filepath.Clean(path) == cacheAbs) {
-			return filepath.SkipDir
+		if d.IsDir() {
+			if skipSandboxDir(rootAbs, cacheAbs, path, d.Name()) {
+				return filepath.SkipDir
+			}
+		} else if d.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if !symlinkTargetInsideRoot(rootAbs, path, target) {
+				return nil // outbound: omit from sandbox and digest
+			}
 		}
-		rel, err := filepath.Rel(root, path)
+		rel, err := filepath.Rel(rootAbs, path)
 		if err != nil {
 			return err
 		}
 		return fn(path, filepath.ToSlash(rel), d)
 	})
+}
+
+// skipSandboxDir reports whether path should be excluded from the
+// sandbox entirely. rootAbs and cacheAbs must be absolute.
+func skipSandboxDir(rootAbs, cacheAbs, path, name string) bool {
+	if name == ".git" || name == ".mutation-judge" || filepath.Clean(path) == cacheAbs {
+		return true
+	}
+	if name == "node_modules" {
+		return true
+	}
+	if name == "vendor" {
+		if _, err := os.Stat(filepath.Join(path, "modules.txt")); err != nil {
+			return true // not a real Go vendor tree
+		}
+		return false
+	}
+	if name == "bin" {
+		rel, err := filepath.Rel(rootAbs, path)
+		if err == nil && filepath.ToSlash(rel) == "bin" && !dirContainsGoFiles(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// dirContainsGoFiles reports whether any direct child of dir is a *.go
+// file (non-recursive). Used only to decide whether root-level bin/ is
+// a Go package vs a directory of built binaries.
+func dirContainsGoFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
+			return true
+		}
+	}
+	return false
+}
+
+// symlinkTargetInsideRoot reports whether a symlink at linkPath with
+// the given target string would resolve under rootAbs. The target need
+// not exist (dangling links whose path would still lie inside the
+// module are kept). Absolute targets and relative targets that climb
+// out of the module are rejected so the sandbox never re-creates a
+// host-escape link.
+func symlinkTargetInsideRoot(rootAbs, linkPath, target string) bool {
+	var abs string
+	if filepath.IsAbs(target) {
+		abs = filepath.Clean(target)
+	} else {
+		abs = filepath.Clean(filepath.Join(filepath.Dir(linkPath), target))
+	}
+	rel, err := filepath.Rel(rootAbs, abs)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func CopyModule(root, cacheDir string) (string, func(), error) {
@@ -327,13 +488,12 @@ func writeFileAtomicWithRename(path string, data []byte, mode os.FileMode, renam
 // os.Readlink), never by dereferencing to the target's content:
 // CopyModule recreates it as a symlink object pointing at that exact
 // target, not a copy of whatever the target currently contains, so
-// that target string is what actually changes the sandbox. If the
-// target itself is a regular file inside root, it is walked and
-// fingerprinted separately in its own right; this also means Digest
-// never has to open a symlink's target at all, so a dangling or
-// directory-target symlink elsewhere in the tree -- both of which
-// CopyModule already tolerates, since recreating a symlink never
-// touches what it points to -- can't turn into a hard Digest error.
+// that target string is what actually changes the sandbox. Outbound
+// symlinks (targets that resolve outside the module root) are omitted
+// by sandboxEntries on both the Digest and CopyModule paths, so they
+// neither affect the cache key nor reappear as host-escape links in
+// the sandbox. Internal dangling links are still fingerprinted and
+// recreated.
 func Digest(root, cacheDir string) (string, error) {
 	type file struct {
 		rel     string
