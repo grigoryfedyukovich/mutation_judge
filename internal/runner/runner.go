@@ -139,7 +139,7 @@ func parseGoEnv(out []byte) (ToolchainInfo, error) {
 	}, nil
 }
 
-var failRE = regexp.MustCompile(`(?m)^--- FAIL: ([^ (]+)`)
+var failRE = regexp.MustCompile(`(?m)^\s*--- FAIL: ([^ (]+)`)
 
 // fallbackBuildFailureRE is a last-resort heuristic used only when `go
 // test -json` produces no decodable event stream at all (for example,
@@ -354,27 +354,31 @@ var packageFailSummaryRE = regexp.MustCompile(`(?m)^FAIL\s+\S+\s+\[.+\]\s*$`)
 //     a real failure, so this is KILLED with no specific test
 //     attributed.
 func classifyEvents(events []testEvent) (model.Verdict, []string) {
+	// Keys are package\x00test so the same test name in two packages
+	// (common on ./...) cannot cancel each other's in-flight/fail state.
 	started := map[string]bool{}
 	failed := map[string]bool{}
 	var order []string
 	pkgRan := map[string]bool{}         // packages that started at least one test of their own
 	pkgBuildFailed := map[string]bool{} // packages whose own summary line reported a pre-test failure
+	key := func(pkg, test string) string { return pkg + "\x00" + test }
 	for _, e := range events {
 		switch e.Action {
 		case "run":
 			if e.Test != "" {
 				pkgRan[e.Package] = true
-				started[e.Test] = true
+				started[key(e.Package, e.Test)] = true
 			}
 		case "pass", "skip":
 			if e.Test != "" {
-				delete(started, e.Test)
+				delete(started, key(e.Package, e.Test))
 			}
 		case "fail":
 			if e.Test != "" {
-				delete(started, e.Test)
-				if !failed[e.Test] {
-					failed[e.Test] = true
+				k := key(e.Package, e.Test)
+				delete(started, k)
+				if !failed[k] {
+					failed[k] = true
 					order = append(order, e.Test)
 				}
 			}
@@ -384,9 +388,13 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 			}
 		}
 	}
-	for test := range started {
-		if !failed[test] {
-			failed[test] = true
+	for k := range started {
+		if !failed[k] {
+			failed[k] = true
+			_, test, ok := strings.Cut(k, "\x00")
+			if !ok {
+				test = k
+			}
 			order = append(order, test)
 		}
 	}
