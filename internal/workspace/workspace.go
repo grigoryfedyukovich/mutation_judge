@@ -25,18 +25,47 @@ func ModuleRoot(cwd string) (string, error) {
 		return "", fmt.Errorf("no Go module found from %s", cwd)
 	}
 	root := filepath.Dir(gomod)
-	if err := rejectMultiModuleWorkspace(cwd, root); err != nil {
+	if err := rejectUnsafeWorkspace(cwd, root); err != nil {
 		return "", err
 	}
 	return root, nil
 }
 
-// rejectMultiModuleWorkspace fails when GOWORK is active and the work
-// file lists more than one module. Mutation-judge copies and digests a
-// single module root; a multi-module workspace can change dependency
-// resolution and package patterns in ways that one sandbox cannot
-// represent. A single-module workspace (or GOWORK=off) is allowed.
-func rejectMultiModuleWorkspace(cwd, moduleRoot string) error {
+// rejectUnsafeWorkspace fails when an active go.work (GOWORK not empty
+// and not "off") does anything a single-module sandbox copy cannot
+// faithfully represent:
+//
+//   - lists more than one module in `use`: dependency resolution and
+//     package patterns can differ from analyzing the one module root
+//     mutation-judge copies and digests.
+//   - contains any `replace` directive: a workspace-level replace can
+//     silently rewrite which source a dependency resolves to, exactly
+//     as a module-level replace would, but it lives in a file outside
+//     the module root entirely. workspace.Digest hashes only the
+//     module root's own files (see CopyModule/Digest's doc comments),
+//     so two otherwise-identical checkouts with different active
+//     go.work replace directives digest identically and share a cache
+//     entry despite testing different resolved dependencies -- same
+//     module bytes, different GOWORK, cache hit, different tests.
+//     Rather than fingerprinting an arbitrary, possibly-relative,
+//     possibly-out-of-module replace target (and risk that
+//     fingerprint drifting out of sync with what Digest/CopyModule
+//     actually do to the sandbox, which is exactly how they drifted
+//     apart from each other before -- see ISSUES.md), a
+//     replace-bearing workspace is refused outright with the same
+//     remediation as the multi-module case: re-run with GOWORK=off.
+//
+// A go.work with neither problem (a single `use` entry and no
+// replace) is allowed and is not itself further special-cased:
+// runner.GoTest.Run always forces GOWORK=off for the sandboxed test
+// process, since that process's cmd.Dir is a temporary copy of the
+// module root alone (see CopyModule) and never one of go.work's
+// use-listed directories -- leaving a workspace active there would
+// either resolve dependencies from outside the sandbox entirely or
+// make `go test` refuse to run as "not in any workspace module". So a
+// go.work that survives this check is, for every purpose this tool
+// cares about, already indistinguishable from no go.work at all.
+func rejectUnsafeWorkspace(cwd, moduleRoot string) error {
 	cmd := exec.Command("go", "env", "GOWORK")
 	cmd.Dir = cwd
 	out, err := cmd.Output()
@@ -51,10 +80,58 @@ func rejectMultiModuleWorkspace(cwd, moduleRoot string) error {
 	if err != nil {
 		return fmt.Errorf("reading go.work %s: %w", gowork, err)
 	}
-	if len(uses) <= 1 {
-		return nil
+	if len(uses) > 1 {
+		return fmt.Errorf("go workspace %s lists %d modules; mutation-judge analyzes a single module root (%s). Re-run with GOWORK=off from that module, or reduce the workspace to one module", gowork, len(uses), moduleRoot)
 	}
-	return fmt.Errorf("go workspace %s lists %d modules; mutation-judge analyzes a single module root (%s). Re-run with GOWORK=off from that module, or reduce the workspace to one module", gowork, len(uses), moduleRoot)
+	nreplace, err := goWorkReplaceCount(gowork)
+	if err != nil {
+		return fmt.Errorf("reading go.work %s: %w", gowork, err)
+	}
+	if nreplace > 0 {
+		word := "directive"
+		if nreplace != 1 {
+			word = "directives"
+		}
+		return fmt.Errorf("go workspace %s has %d replace %s; mutation-judge analyzes a single module root (%s) and cannot reflect a workspace-level replace in its cache key or sandbox copy. Re-run with GOWORK=off from that module", gowork, nreplace, word, moduleRoot)
+	}
+	return nil
+}
+
+// goWorkReplaceCount returns the number of replace directives in a
+// go.work file, in both the single-line `replace old => new` and
+// parenthesized `replace (\n\t...\n)` forms. It only needs a count (to
+// report and to gate on >0), never the replaced paths themselves --
+// see rejectUnsafeWorkspace for why those paths are deliberately never
+// parsed, resolved, or fingerprinted here.
+func goWorkReplaceCount(workFile string) (int, error) {
+	b, err := os.ReadFile(workFile)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	inReplaceBlock := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if inReplaceBlock {
+			if line == ")" {
+				inReplaceBlock = false
+				continue
+			}
+			n++
+			continue
+		}
+		if line == "replace (" {
+			inReplaceBlock = true
+			continue
+		}
+		if strings.HasPrefix(line, "replace ") {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // parseGoWorkUsePaths returns the path arguments of every use directive

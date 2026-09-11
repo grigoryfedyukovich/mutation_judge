@@ -491,3 +491,75 @@ func TestRejectMultiModuleWorkspace(t *testing.T) {
 		t.Fatalf("root=%s want %s", root, modA)
 	}
 }
+
+func TestGoWorkReplaceCount(t *testing.T) {
+	dir := t.TempDir()
+	none := filepath.Join(dir, "none.work")
+	mustWrite(t, none, "go 1.22\n\nuse ./mod\n", 0o644)
+	if n, err := goWorkReplaceCount(none); err != nil || n != 0 {
+		t.Fatalf("none: got %d err=%v", n, err)
+	}
+
+	single := filepath.Join(dir, "single.work")
+	mustWrite(t, single, "go 1.22\n\nuse ./mod\n\nreplace example.com/foo => ../foo-fork\n", 0o644)
+	if n, err := goWorkReplaceCount(single); err != nil || n != 1 {
+		t.Fatalf("single: got %d err=%v", n, err)
+	}
+
+	block := filepath.Join(dir, "block.work")
+	mustWrite(t, block, "go 1.22\n\nuse ./mod\n\nreplace (\n\texample.com/foo => ../foo-fork\n\texample.com/bar => ../bar-fork // comment\n)\n", 0o644)
+	if n, err := goWorkReplaceCount(block); err != nil || n != 2 {
+		t.Fatalf("block: got %d err=%v", n, err)
+	}
+}
+
+// TestRejectWorkspaceWithReplace pins down the gap TestRejectMultiModuleWorkspace
+// cannot: a go.work that lists exactly one module (so the multi-module
+// check alone would let it through) but also carries a replace
+// directive, which can rewrite dependency resolution the same way a
+// module-level replace would -- invisibly to workspace.Digest, since
+// Digest only ever hashes files under the module root itself, never
+// the go.work file that lives beside/above it. Same module bytes,
+// different active go.work replace, would otherwise digest identically
+// and share a cache entry despite testing different resolved
+// dependencies.
+func TestRejectWorkspaceWithReplace(t *testing.T) {
+	base := t.TempDir()
+	mod := filepath.Join(base, "a")
+	mustWrite(t, filepath.Join(mod, "go.mod"), "module example.test/a\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(mod, "a.go"), "package a\n", 0o644)
+	work := filepath.Join(base, "go.work")
+	mustWrite(t, work, "go 1.22\n\nuse ./a\n\nreplace example.com/foo => ../foo-fork\n", 0o644)
+
+	t.Setenv("GOWORK", work)
+	_, err := ModuleRoot(mod)
+	if err == nil {
+		t.Fatal("expected replace-bearing single-module workspace to be rejected")
+	}
+	if !strings.Contains(err.Error(), "replace") {
+		t.Fatalf("error should mention replace, got %v", err)
+	}
+}
+
+// TestSingleModuleWorkspaceWithoutReplaceIsAllowed exercises an actually
+// active single-module go.work (unlike TestRejectMultiModuleWorkspace's
+// second case, which only checks GOWORK=off) to confirm
+// rejectUnsafeWorkspace's stated safe case is genuinely accepted, not
+// just untested.
+func TestSingleModuleWorkspaceWithoutReplaceIsAllowed(t *testing.T) {
+	base := t.TempDir()
+	mod := filepath.Join(base, "a")
+	mustWrite(t, filepath.Join(mod, "go.mod"), "module example.test/a\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(mod, "a.go"), "package a\n", 0o644)
+	work := filepath.Join(base, "go.work")
+	mustWrite(t, work, "go 1.22\n\nuse ./a\n", 0o644)
+
+	t.Setenv("GOWORK", work)
+	root, err := ModuleRoot(mod)
+	if err != nil {
+		t.Fatalf("expected single-module, replace-free workspace to be allowed: %v", err)
+	}
+	if filepath.Clean(root) != filepath.Clean(mod) {
+		t.Fatalf("root=%s want %s", root, mod)
+	}
+}

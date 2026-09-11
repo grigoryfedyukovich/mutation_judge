@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -229,6 +230,22 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	args = append(args, req.Patterns...)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = filepath.Join(req.Root, filepath.FromSlash(req.WorkRel))
+	// req.Root is a temporary copy of the module root alone (see
+	// workspace.CopyModule) -- never one of a go.work's use-listed
+	// directories -- so an inherited host GOWORK would either resolve
+	// this run's dependencies from outside the sandbox entirely or make
+	// `go test` refuse to run here as "not in any workspace module".
+	// workspace.ModuleRoot already refused any go.work this tool can't
+	// safely stand in for (multi-module, or carrying any replace
+	// directive -- see workspace.rejectUnsafeWorkspace), so whatever
+	// go.work is still active on the host at this point is already
+	// equivalent to none; forcing GOWORK=off here makes that hold for
+	// this exec.Cmd specifically, rather than depending on whatever
+	// happened to be exported in the environment mutation-judge itself
+	// was invoked from. (A later duplicate key in Env always wins --
+	// see the os/exec Cmd.Env doc -- so appending is enough to override
+	// any GOWORK already present in os.Environ().)
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	// Captured separately: jsonOut is decoded as structured events; errOut
 	// is kept only to surface human-readable diagnostics (e.g. the actual
 	// compiler error line) in the report and as fallback evidence.

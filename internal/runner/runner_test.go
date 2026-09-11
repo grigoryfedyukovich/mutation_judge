@@ -222,6 +222,41 @@ func TestGoTestClassifiesCompileFailureAsInvalidAcrossPackages(t *testing.T) {
 	}
 }
 
+// TestGoTestRunIgnoresHostGOWORK reproduces the reported bug directly:
+// GoTest.Run used exec.CommandContext with no explicit Env, so it
+// inherited whatever GOWORK the mutation-judge process itself happened
+// to be started under. req.Root here (the module under test) is never
+// listed in the workspace's own `use` directive, so if that inherited
+// GOWORK leaked into this exec.Cmd, `go test` would refuse to run at
+// all -- it doesn't matter that workspace.ModuleRoot would already
+// have rejected this exact go.work upstream in a real analysis run
+// (it lists one module, no replace, so it's "safe" by
+// rejectUnsafeWorkspace's rules); GoTest.Run must not depend on that
+// having happened, since req.Root is always a temporary sandbox copy
+// that was never one of go.work's use-listed directories regardless.
+func TestGoTestRunIgnoresHostGOWORK(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() {}\n", "package p\nimport \"testing\"\nfunc TestF(t *testing.T) {}\n")
+
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "go.mod"), []byte("module example.test/other\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "o.go"), []byte("package other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "go.work")
+	workContent := "go 1.22\n\nuse " + filepath.ToSlash(other) + "\n"
+	if err := os.WriteFile(work, []byte(workContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOWORK", work)
+
+	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 5 * time.Second})
+	if got.Verdict != model.VerdictSurvived {
+		t.Fatalf("verdict=%s output=%s (host GOWORK leaked into the sandboxed go test run)", got.Verdict, got.Output)
+	}
+}
+
 func TestGoTestClassifiesRuntimePanicAsKilled(t *testing.T) {
 	root := testModule(t, "package p\nfunc F() {}\n", "package p\nimport \"testing\"\nfunc TestPanic(t *testing.T) { panic(\"boom\") }\n")
 	got := (GoTest{}).Run(context.Background(), Request{Root: root, WorkRel: ".", Patterns: []string{"."}, Timeout: 2 * time.Second})
