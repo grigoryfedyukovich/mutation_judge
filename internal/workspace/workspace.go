@@ -98,90 +98,112 @@ func rejectUnsafeWorkspace(cwd, moduleRoot string) error {
 }
 
 // goWorkReplaceCount returns the number of replace directives in a
-// go.work file, in both the single-line `replace old => new` and
-// parenthesized `replace (\n\t...\n)` forms. It only needs a count (to
-// report and to gate on >0), never the replaced paths themselves --
-// see rejectUnsafeWorkspace for why those paths are deliberately never
-// parsed, resolved, or fingerprinted here.
+// go.work file, via goWorkDirectiveArgs.
 func goWorkReplaceCount(workFile string) (int, error) {
-	b, err := os.ReadFile(workFile)
+	args, err := goWorkDirectiveArgs(workFile, "replace")
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	inReplaceBlock := false
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "//") {
-			continue
-		}
-		if inReplaceBlock {
-			if line == ")" {
-				inReplaceBlock = false
-				continue
-			}
-			n++
-			continue
-		}
-		if line == "replace (" {
-			inReplaceBlock = true
-			continue
-		}
-		if strings.HasPrefix(line, "replace ") {
-			n++
-		}
-	}
-	return n, nil
+	return len(args), nil
 }
 
-// parseGoWorkUsePaths returns the path arguments of every use directive
-// in a go.work file. It handles both `use ./foo` and parenthesized
-// `use (\n\t./foo\n)` forms; replace/go lines are ignored.
-func parseGoWorkUsePaths(workFile string) ([]string, error) {
+// goWorkDirectiveArgs returns, for a given directive verb ("use" or
+// "replace"), every argument line that verb applies to -- both the
+// single-line `verb arg` form and the parenthesized block form.
+//
+// This replaces an earlier version that matched fixed literal
+// substrings ("use (", " //") instead of tokenizing "(" as its own
+// token: that let two syntactically ordinary go.work files produce
+// zero recognized entries and slip straight past
+// rejectUnsafeWorkspace's len(uses)<=1 check as if they were
+// single-module, when they were not --
+//
+//   - `use(` with no space before the paren (cutVerb below now
+//     accepts "(" as a token boundary the same as whitespace, exactly
+//     as the real go.work grammar does)
+//   - `use ( // comment` -- a trailing line comment on the same
+//     physical line as the opening paren (comments are now stripped
+//     before the "did this line just open a block" check runs, not
+//     compared against literally instead of after stripping)
+//
+// It still does not implement the full modfile grammar: no quoted-string
+// escaping and no `/* */` block comments, since go.work paths are
+// essentially never quoted and block comments do not appear in any
+// fixture or real-world go.work this tool has been run against.
+// Deliberately narrow, but tokenized rather than string-matched for
+// the part that actually matters here: whether "(" opens a block,
+// regardless of the whitespace and comments incidentally sitting
+// next to it.
+func goWorkDirectiveArgs(workFile, verb string) ([]string, error) {
 	b, err := os.ReadFile(workFile)
 	if err != nil {
 		return nil, err
 	}
-	var uses []string
-	inUseBlock := false
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "//") {
+	var args []string
+	inBlock := false
+	for _, raw := range strings.Split(string(b), "\n") {
+		line := strings.TrimSpace(stripLineComment(raw))
+		if line == "" {
 			continue
 		}
-		if inUseBlock {
+		if inBlock {
 			if line == ")" {
-				inUseBlock = false
+				inBlock = false
 				continue
 			}
-			// strip trailing comments
-			if i := strings.Index(line, " //"); i >= 0 {
-				line = strings.TrimSpace(line[:i])
-			}
-			if line != "" {
-				uses = append(uses, line)
-			}
+			args = append(args, line)
 			continue
 		}
-		if line == "use (" {
-			inUseBlock = true
+		rest, ok := cutVerb(line, verb)
+		if !ok {
 			continue
 		}
-		if strings.HasPrefix(line, "use ") {
-			arg := strings.TrimSpace(strings.TrimPrefix(line, "use "))
-			if arg == "(" {
-				inUseBlock = true
-				continue
-			}
-			if i := strings.Index(arg, " //"); i >= 0 {
-				arg = strings.TrimSpace(arg[:i])
-			}
-			if arg != "" {
-				uses = append(uses, arg)
-			}
+		rest = strings.TrimSpace(rest)
+		if rest == "(" {
+			inBlock = true
+			continue
+		}
+		if rest != "" {
+			args = append(args, rest)
 		}
 	}
-	return uses, nil
+	return args, nil
+}
+
+// stripLineComment removes a trailing "//" line comment. It does not
+// need to understand quoted strings for this tool's purposes -- see
+// goWorkDirectiveArgs's doc comment.
+func stripLineComment(line string) string {
+	if i := strings.Index(line, "//"); i >= 0 {
+		return line[:i]
+	}
+	return line
+}
+
+// cutVerb reports whether line begins with verb as its own token --
+// followed by whitespace, "(", or end of line, never merely a
+// same-prefix identifier such as "usex" -- and returns what follows.
+func cutVerb(line, verb string) (rest string, ok bool) {
+	if !strings.HasPrefix(line, verb) {
+		return "", false
+	}
+	after := line[len(verb):]
+	if after == "" {
+		return "", true
+	}
+	switch after[0] {
+	case ' ', '\t', '(':
+		return after, true
+	default:
+		return "", false
+	}
+}
+
+// parseGoWorkUsePaths returns the path arguments of every use directive
+// in a go.work file, via goWorkDirectiveArgs (see its doc comment for
+// what it does and does not handle).
+func parseGoWorkUsePaths(workFile string) ([]string, error) {
+	return goWorkDirectiveArgs(workFile, "use")
 }
 
 type Package struct {

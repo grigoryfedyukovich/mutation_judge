@@ -461,6 +461,65 @@ func TestParseGoWorkUsePaths(t *testing.T) {
 	}
 }
 
+// TestParseGoWorkUsePathsHandlesParenWithoutSpace and
+// TestParseGoWorkUsePathsHandlesCommentOnOpenParenLine pin down two
+// real go.work layouts -- both accepted identically to the gofmt'd
+// spacing by the actual go toolchain -- that the previous
+// literal-string matcher ("use (", " //") silently failed to
+// recognize at all, returning zero use entries instead of an error.
+// That mattered well beyond a cosmetic parsing gap: a real
+// two-module workspace written either way passed
+// rejectUnsafeWorkspace's `len(uses) <= 1` check as if it were
+// single-module, defeating the rejection entirely.
+func TestParseGoWorkUsePathsHandlesParenWithoutSpace(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "go.work")
+	mustWrite(t, f, "go 1.22\n\nuse(\n\t./a\n\t./b\n)\n", 0o644)
+	got, err := parseGoWorkUsePaths(f)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v err=%v, want 2 use paths", got, err)
+	}
+}
+
+func TestParseGoWorkUsePathsHandlesCommentOnOpenParenLine(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "go.work")
+	mustWrite(t, f, "go 1.22\n\nuse ( // modules in this workspace\n\t./a\n\t./b\n)\n", 0o644)
+	got, err := parseGoWorkUsePaths(f)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v err=%v, want 2 use paths", got, err)
+	}
+}
+
+// TestRejectMultiModuleWorkspaceSurvivesParenLayoutVariants is the
+// end-to-end version of the two parser tests above: a real
+// multi-module ModuleRoot call, not just the parser in isolation, for
+// each layout that previously bypassed the rejection.
+func TestRejectMultiModuleWorkspaceSurvivesParenLayoutVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		work string
+	}{
+		{"no_space_before_paren", "go 1.22\n\nuse(\n\t./a\n\t./b\n)\n"},
+		{"comment_on_open_paren_line", "go 1.22\n\nuse ( // modules\n\t./a\n\t./b\n)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			modA := filepath.Join(base, "a")
+			modB := filepath.Join(base, "b")
+			mustWrite(t, filepath.Join(modA, "go.mod"), "module example.test/a\n\ngo 1.22\n", 0o644)
+			mustWrite(t, filepath.Join(modA, "a.go"), "package a\n", 0o644)
+			mustWrite(t, filepath.Join(modB, "go.mod"), "module example.test/b\n\ngo 1.22\n", 0o644)
+			mustWrite(t, filepath.Join(modB, "b.go"), "package b\n", 0o644)
+			work := filepath.Join(base, "go.work")
+			mustWrite(t, work, tc.work, 0o644)
+
+			t.Setenv("GOWORK", work)
+			if _, err := ModuleRoot(modA); err == nil {
+				t.Fatal("expected multi-module workspace to be rejected regardless of paren layout")
+			}
+		})
+	}
+}
+
 func TestRejectMultiModuleWorkspace(t *testing.T) {
 	// Build a synthetic multi-module workspace and ensure ModuleRoot refuses it.
 	base := t.TempDir()
