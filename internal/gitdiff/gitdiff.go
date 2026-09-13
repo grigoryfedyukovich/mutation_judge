@@ -16,7 +16,19 @@ var hunkRE = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))
 func ChangedLines(root, base string) (map[string]map[int]bool, error) {
 	// Git pathspecs are recursive, but use explicit glob magic so this cannot be
 	// mistaken for a shell glob by future maintainers.
-	cmd := exec.Command("git", "diff", "--unified=0", "--no-ext-diff", base, "--", ":(glob)**/*.go")
+	//
+	// -c core.quotepath=false is load-bearing, not cosmetic: git's default
+	// (core.quotepath=true) C-quotes any path byte outside printable ASCII
+	// in the --- /+++ header lines -- so a genuinely modified file named
+	// with, say, a non-ASCII character comes back as `+++ "b/caf\303\251.go"`
+	// instead of `+++ b/café.go`. Parse's `+++ ` / `b/` prefix matching
+	// then fails on the leading `"`, treats the file as unset, and the
+	// hunks for that file are silently skipped -- so under --changed, a
+	// real edit to any non-ASCII-named (or quote/backslash-containing)
+	// Go file is treated as if it had no changed lines at all, rather
+	// than erroring or including it. Forcing this off makes the header
+	// always raw UTF-8, which Parse already handles correctly.
+	cmd := exec.Command("git", "-c", "core.quotepath=false", "diff", "--unified=0", "--no-ext-diff", base, "--", ":(glob)**/*.go")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
