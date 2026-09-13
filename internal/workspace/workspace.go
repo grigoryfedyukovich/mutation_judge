@@ -347,7 +347,10 @@ func SourceFiles(root string, pkgs []Package) ([]string, error) {
 // Always skipped directories:
 //   - .git, .mutation-judge, the configured cache directory
 //   - any directory named node_modules (not part of a Go build)
-//   - vendor/ when vendor/modules.txt is absent (not a real Go vendor tree)
+//   - the module root's own vendor/ when vendor/modules.txt is absent
+//     (not a real Go vendor tree); vendor/ directories anywhere else in
+//     the tree are ordinary directories -- see skipSandboxDir -- and are
+//     never skipped by name alone
 //   - module-root bin/ when it contains no *.go files (built binaries only)
 //
 // vendor/ with modules.txt is always included: -mod=vendor and tests that
@@ -408,6 +411,25 @@ func skipSandboxDir(rootAbs, cacheAbs, path, name string) bool {
 		return true
 	}
 	if name == "vendor" {
+		rel, err := filepath.Rel(rootAbs, path)
+		if err != nil || filepath.ToSlash(rel) != "vendor" {
+			// Not the module root's own vendor/. Go's vendor
+			// consistency mechanism (-mod=vendor, vendor/modules.txt)
+			// applies only to the main module's top-level vendor/; a
+			// directory that merely happens to be named "vendor"
+			// deeper in the tree (cmd/vendor, pkg/vendor,
+			// third_party/vendor, ...) is, as far as go build/go test
+			// are concerned, an entirely ordinary directory -- it can
+			// be a real Go package, imported by name from elsewhere in
+			// the module, with no modules.txt of its own. Skipping it
+			// on name alone dropped that package from both the sandbox
+			// copy and the digest, so anything importing it built fine
+			// on the host but failed (INVALID, missing package) in the
+			// sandbox. Only the module root's own vendor/ gets the
+			// modules.txt check below; everywhere else, "vendor" is
+			// just a directory name.
+			return false
+		}
 		if _, err := os.Stat(filepath.Join(path, "modules.txt")); err != nil {
 			return true // not a real Go vendor tree
 		}

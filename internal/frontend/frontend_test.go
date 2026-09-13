@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,50 @@ func step() error { return nil }
 	}
 	if len(ms) != 1 || ms[0].RuleID != "MJ-ERR-SWALLOW" {
 		t.Fatalf("parenthesized if (err != nil) must still match, got %#v", ms)
+	}
+}
+
+// TestDiscoverErrorReturnUnwrapsParensOnEitherOperand covers the two
+// shapes TestDiscoverErrorReturnUnwrapsParens does not: a paren around
+// just the checked operand (`if (err) != nil`) or just the nil literal
+// (`if err != (nil)`), rather than around the whole condition. Neither
+// is unusual or something gofmt would rewrite away, and both were
+// previously missed entirely: notNilOperand only unwrapped cond as a
+// whole, so isNilIdent saw a *ast.ParenExpr instead of *ast.Ident on
+// whichever side was itself parenthesized and never matched.
+func TestDiscoverErrorReturnUnwrapsParensOnEitherOperand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cond string
+	}{
+		{"paren_around_checked_operand", "(err) != nil"},
+		{"paren_around_nil_literal", "err != (nil)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := t.TempDir()
+			src := []byte(fmt.Sprintf(`package p
+
+func f() error {
+	err := step()
+	if %s {
+		return err
+	}
+	return nil
+}
+
+func step() error { return nil }
+`, tc.cond))
+			if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"errorreturn": true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ms) != 1 || ms[0].RuleID != "MJ-ERR-SWALLOW" {
+				t.Fatalf("if %s must match the errorreturn operator, got %#v", tc.cond, ms)
+			}
+		})
 	}
 }
 

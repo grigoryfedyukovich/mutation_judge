@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -419,8 +420,10 @@ func TestSandboxSkipsNodeModulesJunkVendorAndRootBin(t *testing.T) {
 	// bin that is a Go package must be kept
 	mustWrite(t, filepath.Join(root, "cmdish", "bin", "main.go"), "package main\n", 0o644)
 
-	// Rebuild vendor-less junk path: use separate dir name for false vendor
-	// (we already have real vendor with modules.txt). Add fake at sub/vendor without modules.txt
+	// A directory merely *named* vendor away from the module root is not
+	// the module's own vendor tree and must never be special-cased on
+	// name alone -- see TestSandboxKeepsNonRootVendorNamedPackage for
+	// the case that mattered in practice (a real importable package).
 	mustWrite(t, filepath.Join(root, "third_party", "vendor", "orphan.txt"), "orphan", 0o644)
 
 	tmp, cleanup, err := CopyModule(root, ".mutation-judge/cache")
@@ -437,11 +440,49 @@ func TestSandboxSkipsNodeModulesJunkVendorAndRootBin(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tmp, "vendor", "modules.txt")); err != nil {
 		t.Fatalf("real vendor/ must be kept: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, "third_party", "vendor")); !os.IsNotExist(err) {
-		t.Fatalf("vendor without modules.txt should be skipped, err=%v", err)
+	if _, err := os.Stat(filepath.Join(tmp, "third_party", "vendor", "orphan.txt")); err != nil {
+		t.Fatalf("non-root vendor/ is an ordinary directory and must be kept: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "cmdish", "bin", "main.go")); err != nil {
 		t.Fatalf("non-root bin package must be kept: %v", err)
+	}
+}
+
+// TestSandboxKeepsNonRootVendorNamedPackage reproduces the reported
+// failure mode directly, not just by checking a file's presence: a
+// real, importable Go package that merely happens to live in a
+// directory named vendor away from the module root (cmd/vendor,
+// pkg/vendor, ...) must survive into the sandbox copy, and the copied
+// tree must actually build -- Go's vendor consistency mechanism
+// (-mod=vendor, vendor/modules.txt) applies only to the main module's
+// own top-level vendor/, so this one is just an ordinary package.
+// Before the fix, dropping it from the copy made anything importing it
+// fail to build inside the sandbox (misclassified INVALID) while the
+// same source built fine on the host.
+func TestSandboxKeepsNonRootVendorNamedPackage(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.test/nonrootvendor\n\ngo 1.22\n", 0o644)
+	mustWrite(t, filepath.Join(root, "cmd", "vendor", "v.go"), "package vendor\n\nfunc V() int { return 1 }\n", 0o644)
+	mustWrite(t, filepath.Join(root, "main.go"), "package main\n\nimport \"example.test/nonrootvendor/cmd/vendor\"\n\nfunc main() { println(vendor.V()) }\n", 0o644)
+
+	tmp, cleanup, err := CopyModule(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if _, err := os.Stat(filepath.Join(tmp, "cmd", "vendor", "v.go")); err != nil {
+		t.Fatalf("cmd/vendor package must be kept in the sandbox copy: %v", err)
+	}
+
+	cmd := exec.Command("go", "build", "./...")
+	cmd.Dir = tmp
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build in the sandbox failed (a real host build of this tree would succeed): %v\n%s", err, out)
 	}
 }
 

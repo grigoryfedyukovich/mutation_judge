@@ -444,12 +444,21 @@ func notNilOperand(cond ast.Expr) (ast.Expr, bool) {
 	if !ok || be.Op != token.NEQ {
 		return nil, false
 	}
-	xNil, yNil := isNilIdent(be.X), isNilIdent(be.Y)
+	// Unwrap parens on each operand too, not just on cond itself: `if
+	// (err) != nil` and `if err != (nil)` are exactly as common in
+	// practice as `if (err != nil)` (gofmt does not touch either
+	// shape), and both the nil check below and the value returned to
+	// the caller need the bare identifier underneath, not a
+	// *ast.ParenExpr wrapping it -- the caller does its own
+	// checked.(*ast.Ident) type assertion and has no unwrapping of its
+	// own.
+	x, y := unwrapParen(be.X), unwrapParen(be.Y)
+	xNil, yNil := isNilIdent(x), isNilIdent(y)
 	switch {
 	case yNil && !xNil:
-		return be.X, true
+		return x, true
 	case xNil && !yNil:
-		return be.Y, true
+		return y, true
 	default:
 		return nil, false
 	}
