@@ -548,6 +548,113 @@ func TestCountPositive(t *testing.T) {
 	}
 }
 
+// TestCompareHTMLFormatEndToEnd confirms --format html is actually
+// wired through the real CLI (runCompare's format switch), not just
+// reachable by calling compare.RenderHTML directly in a unit test: a
+// genuine new survivor introduced between two real runs must show up
+// in the rendered page.
+func TestCompareHTMLFormatEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+
+	moduleDir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module comparehtmlfixture\n\ngo 1.22\n",
+		"counter.go": `package comparehtmlfixture
+
+func CountPositive(n int, f func(int)) {
+	if n > 0 {
+		f(n)
+	}
+}
+`,
+		"counter_test.go": `package comparehtmlfixture
+
+import "testing"
+
+// Deliberately omits n == 0 so the > to >= mutant survives.
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(moduleDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("baseline run failed: %v\n%s", err, out)
+	}
+
+	// baseline vs itself: no change, so this exercises the "none" /
+	// zero-count path in the template for every bucket except unchanged.
+	htmlPath := filepath.Join(t.TempDir(), "compare.html")
+	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", baselinePath, "--format", "html", "--output", htmlPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compare --format html failed: %v\n%s", err, out)
+	}
+	page, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+	if !strings.HasPrefix(text, "<!doctype html>") || !strings.Contains(text, "</html>") {
+		t.Fatalf("expected a complete HTML document at %s:\n%s", htmlPath, text)
+	}
+	if !strings.Contains(text, "New survivors (0)") {
+		t.Fatalf("baseline compared with itself should show zero new survivors:\n%s", text)
+	}
+
+	// Now fix the test in place and compare baseline (still survived)
+	// against a fresh current run (now killed) to get a genuine,
+	// non-empty fixed-survivor entry into the rendered page.
+	fixedTest := `package comparehtmlfixture
+
+import "testing"
+
+func TestCountPositive(t *testing.T) {
+	calls := 0
+	CountPositive(2, func(int) { calls++ })
+	CountPositive(-1, func(int) { calls++ })
+	CountPositive(0, func(int) { calls++ })
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(moduleDir, "counter_test.go"), []byte(fixedTest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(t.TempDir(), "current.json")
+	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd.Dir = moduleDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("current run failed: %v\n%s", err, out)
+	}
+	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "html", "--output", htmlPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compare --format html failed: %v\n%s", err, out)
+	}
+	page, err = os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(page)
+	if !strings.Contains(text, "Fixed survivors (1)") || !strings.Contains(text, "KILLED") {
+		t.Fatalf("expected exactly 1 rendered fixed survivor:\n%s", text)
+	}
+}
+
 // TestCompareDistinguishesRemovedFromFixedEndToEnd is
 // TestCompareEndToEnd's counterpart for the other half of the
 // distinction --format json needs to make cleanly: this time the

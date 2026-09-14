@@ -738,6 +738,12 @@ unchanged: 0
 
 The strict, ID-exact counts still show this as one removed entry and one new entry -- that part of the contract never changes, and `--format json`'s `new_survivors`/`removed_mutants` still list both. What's new is `likely_shifted`, a separate, purely additive field: an unambiguous match between a removed entry and a brand-new-ID entry on file, operator, rule, original/replacement text, column, and the actual pre-mutation source line (not just position -- two different comparisons that happen to sit at the same column are not enough to match). When exactly one candidate exists on each side, it's reported with `verdict_changed: false` here, since nothing about the mutant's actionable-status actually changed, only its ID. A genuine regression that happens to coincide with a shift -- say, a mutant that really was killed before the edit and really does survive after -- still gets `verdict_changed: true` and is never discounted as noise; the correlation adds context, it never overrides the exact computation. An ambiguous fingerprint (matching zero, or more than one, candidate on either side) is correctly left uncorrelated rather than guessed -- see `internal/compare.findLikelyShifts`'s doc comment for exactly what has to match and why.
 
+`compare` also takes `--format html` for a browsable page instead of terminal text or JSON -- the same six buckets and shift correlations, colour-coded by verdict the same way the main report's HTML output is:
+
+```bash
+./bin/mutation-judge compare --baseline baseline.json --current current.json --format html --output compare.html
+```
+
 For a running score history:
 
 ```bash

@@ -23,7 +23,7 @@ The four operators formerly listed under "Optional expansion" as future work -- 
 
 "GitHub annotations and SARIF output" is implemented as two `--format` values: `sarif` (SARIF 2.1.0, for `github/codeql-action/upload-sarif`) and `github` (workflow-command annotations written directly to stdout, no upload step). Both apply the same inclusion policy -- only `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts produce a finding (`KILLED` and `INVALID` are not actionable findings). See `docs/tutorial.md` section 15.
 
-"Cross-run comparison and trend" is implemented as three subcommands: `compare` (diffs two `--format json` reports at the mutant level into six buckets -- new survivors, fixed survivors, still-open, reclassified, removed mutants, and an unchanged count -- plus `likely_shifted`), and `record`/`trend` (an NDJSON score-history log and a table over it). HTML visualization of two reports is not implemented. See limitation 12 above for the ID-matching caveat, and `docs/tutorial.md` section 16.
+"Cross-run comparison and trend" is implemented as three subcommands: `compare` (diffs two `--format json` reports at the mutant level into six buckets -- new survivors, fixed survivors, still-open, reclassified, removed mutants, and an unchanged count -- plus `likely_shifted`), and `record`/`trend` (an NDJSON score-history log and a table over it). `compare` supports text, JSON, and HTML output (`--format html`); the HTML page renders the same six buckets and shift correlations as a self-contained, browsable report, styled to match the single-report HTML output's verdict colour-coding. See limitation 12 above for the ID-matching caveat, and `docs/tutorial.md` section 16.
 
 ## Optional expansion
 

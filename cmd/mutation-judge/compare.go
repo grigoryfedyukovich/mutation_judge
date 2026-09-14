@@ -17,13 +17,13 @@ func runCompare(args []string) int {
 	fs.SetOutput(os.Stderr)
 	baselinePath := fs.String("baseline", "", "baseline report JSON file (e.g. the base branch's report); required")
 	currentPath := fs.String("current", "", "current report JSON file (e.g. the pull request's report); required")
-	format := fs.String("format", "text", "output format: text or json")
+	format := fs.String("format", "text", "output format: text, json, or html")
 	output := fs.String("output", "", "write output to this path instead of stdout")
 	failOnNew := fs.Bool("fail-on-new-survivors", false, "exit with --fail-exit-code if any new survivors are found")
 	failExitCode := fs.Int("fail-exit-code", 10, "exit code used when --fail-on-new-survivors triggers")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: mutation-judge compare --baseline old.json --current new.json [flags]")
-		fmt.Fprintln(fs.Output(), "Diffs two --format json reports at the mutant level into six buckets: new\nsurvivors (newly actionable, or TIMEOUT/UNKNOWN that became a confirmed SURVIVED),\nfixed survivors (still present and now KILLED), still-open (actionable on both\nsides with a different inconclusive verdict), reclassified (actionable in\nbaseline but now INVALID/EQUIVALENT/UNSUPPORTED -- not a test fix), removed\nmutants (no longer present at all), and an unchanged count. Matching is by\nmutant ID, which hashes each mutant's file and byte offset -- an edit\nanywhere earlier in a file shifts every later mutant's ID even if that\nmutation site itself didn't change; see docs/limitations.md before relying on\nthis across a large, heavily-edited file. Unambiguous same-file relocations\nare additionally noted as likely-shifted, without changing the six buckets.")
+		fmt.Fprintln(fs.Output(), "Diffs two --format json reports at the mutant level into six buckets: new\nsurvivors (newly actionable, or TIMEOUT/UNKNOWN that became a confirmed SURVIVED),\nfixed survivors (still present and now KILLED), still-open (actionable on both\nsides with a different inconclusive verdict), reclassified (actionable in\nbaseline but now INVALID/EQUIVALENT/UNSUPPORTED -- not a test fix), removed\nmutants (no longer present at all), and an unchanged count. --format html\nrenders the same six buckets as a browsable page instead of terminal text or\nJSON. Matching is by\nmutant ID, which hashes each mutant's file and byte offset -- an edit\nanywhere earlier in a file shifts every later mutant's ID even if that\nmutation site itself didn't change; see docs/limitations.md before relying on\nthis across a large, heavily-edited file. Unambiguous same-file relocations\nare additionally noted as likely-shifted, without changing the six buckets.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -72,6 +72,8 @@ func runCompare(args []string) int {
 		renderErr = compare.RenderText(dst, d)
 	case "json":
 		renderErr = compare.RenderJSON(dst, d)
+	case "html":
+		renderErr = compare.RenderHTML(dst, d)
 	default:
 		renderErr = fmt.Errorf("unsupported format %q", *format)
 	}

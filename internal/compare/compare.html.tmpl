@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mutation Judge compare</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #202124; }
+    code, pre { font-family: ui-monospace, monospace; }
+    header { border-bottom: 1px solid #ddd; margin-bottom: 1.5rem; }
+    .scores { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    section.bucket { margin: 1.5rem 0; }
+    section.bucket > h2 { border-bottom: 1px solid #eee; padding-bottom: 0.25rem; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+    .KILLED { border-left: 6px solid #188038; }
+    .SURVIVED { border-left: 6px solid #d93025; }
+    .INVALID, .TIMEOUT, .UNKNOWN, .UNSUPPORTED { border-left: 6px solid #f9ab00; }
+    .EQUIVALENT { border-left: 6px solid #1a73e8; }
+    .shift-note { background: #f6f8fa; border-radius: 6px; padding: 0.5rem 0.75rem; margin-top: 0.5rem; }
+    .muted { color: #5f6368; }
+    .empty { color: #5f6368; font-style: italic; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Mutation Judge compare</h1>
+  <p class="scores">
+    <span>baseline score: {{.BaselineText}}</span>
+    <span>current score: {{.CurrentText}}</span>
+  </p>
+</header>
+
+<section class="bucket">
+  <h2>New survivors ({{len .NewSurvivors}})</h2>
+  {{if not .NewSurvivors}}<p class="empty">none</p>{{end}}
+  {{range .NewSurvivors}}
+  <article class="card {{.Current.Verdict}}">
+    <h3>{{.Current.Verdict}} <code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code></h3>
+    <p>{{.Mutation.Description}}</p>
+    {{if .Baseline}}<p class="muted">was {{.Baseline.Verdict}} in the baseline report</p>
+    {{else}}<p class="muted">new mutant: not present in the baseline report</p>{{end}}
+    {{if .Current.Mutation.Suggestion}}<p><strong>Suggested test:</strong> {{.Current.Mutation.Suggestion}}</p>{{end}}
+    {{with index $.ShiftByNewID .ID}}<p class="shift-note">likely shifted from the removed entry at {{.File}}:{{.OldLine}} ({{.Note}})</p>{{end}}
+  </article>
+  {{end}}
+</section>
+
+<section class="bucket">
+  <h2>Fixed survivors ({{len .FixedSurvivors}})</h2>
+  {{if not .FixedSurvivors}}<p class="empty">none</p>{{end}}
+  {{range .FixedSurvivors}}
+  <article class="card {{.Current.Verdict}}">
+    <h3>{{.Current.Verdict}} <code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code></h3>
+    <p>{{.Mutation.Description}}</p>
+    <p class="muted">was {{.Baseline.Verdict}} in the baseline report</p>
+  </article>
+  {{end}}
+</section>
+
+<section class="bucket">
+  <h2>Still open ({{len .StillOpen}})</h2>
+  {{if not .StillOpen}}<p class="empty">none</p>{{end}}
+  {{range .StillOpen}}
+  <article class="card {{.Current.Verdict}}">
+    <h3>{{.Current.Verdict}} <code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code></h3>
+    <p>{{.Mutation.Description}}</p>
+    <p class="muted">was {{.Baseline.Verdict}} in the baseline report -- not fixed, still actionable</p>
+  </article>
+  {{end}}
+</section>
+
+<section class="bucket">
+  <h2>Reclassified ({{len .Reclassified}})</h2>
+  {{if not .Reclassified}}<p class="empty">none</p>{{end}}
+  {{range .Reclassified}}
+  <article class="card {{.Current.Verdict}}">
+    <h3>{{.Current.Verdict}} <code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code></h3>
+    <p>{{.Mutation.Description}}</p>
+    <p class="muted">was {{.Baseline.Verdict}} in the baseline report -- not a test fix</p>
+  </article>
+  {{end}}
+</section>
+
+<section class="bucket">
+  <h2>Removed mutants ({{len .RemovedMutants}})</h2>
+  {{if not .RemovedMutants}}<p class="empty">none</p>{{end}}
+  {{range .RemovedMutants}}
+  <article class="card {{.Baseline.Verdict}}">
+    <h3>was {{.Baseline.Verdict}} <code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code></h3>
+    <p>{{.Mutation.Description}}</p>
+    <p class="muted">no longer present in the current report</p>
+    {{with index $.ShiftByRemovedID .ID}}<p class="shift-note">likely shifted to the new entry at {{.File}}:{{.NewLine}} ({{.Note}})</p>{{end}}
+  </article>
+  {{end}}
+</section>
+
+<section class="bucket">
+  <h2>Unchanged</h2>
+  <p>{{.UnchangedCount}} mutant ID{{if ne .UnchangedCount 1}}s{{end}} unchanged between the two reports.</p>
+</section>
+</body>
+</html>
