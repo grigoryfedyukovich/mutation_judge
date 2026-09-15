@@ -29,6 +29,8 @@ Or execute all non-Git examples:
 | `switch` | Deleting a `case` clause: killed, an untested case surviving, and `default` removal breaking compilation | `./bin/mutation-judge --no-cache --operators switch ./examples/switch` | 1 killed, 1 survived, 1 invalid |
 | `loop` | Forcing a `for` loop's condition false, and breaking out of a `range` loop's body immediately | `./bin/mutation-judge --no-cache --operators loop ./examples/loop` | 1 killed, 1 survived |
 | `channel` | A buffered channel's capacity replaced with 0, probed safely with `select`/`default` | `./bin/mutation-judge --no-cache --operators channel ./examples/channel` | 1 killed |
+| `assignment` | Compound assignment (`+=`/`-=`/`*=`/`/=`) and increment/decrement (`++`/`--`) mutation, one killed and two untested survivors | `./bin/mutation-judge --no-cache --operators assignment ./examples/assignment` | 1 killed, 2 survived |
+| `relational` | Equality/inequality (`==`/`!=`) mutation, one killed and one untested survivor | `./bin/mutation-judge --no-cache --operators relational ./examples/relational` | 1 killed, 1 survived |
 
 The examples are intentionally small enough that each mutant can be reasoned about manually. The exact timing fields vary by machine; mutant IDs remain stable only for the same path, source offset, original text, and replacement.
 

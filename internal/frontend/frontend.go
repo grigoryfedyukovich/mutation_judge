@@ -16,7 +16,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v3"
+const SemanticsVersion = "mutation-judge-operators/v5"
 
 type Options struct {
 	Operators        map[string]bool
@@ -96,6 +96,21 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// see detectGuardedComparison's doc comment for exactly what
 	// pattern this requires.
 	equivalentGuard := map[*ast.BinaryExpr]string{}
+	// loopProgressStmt marks exactly the statements that are a for
+	// loop's own Post clause (`for init; cond; post { ... }`),
+	// populated by the *ast.ForStmt case below before ast.Inspect's
+	// pre-order walk reaches that same nested statement. The
+	// assignment operator refuses to mutate any statement in this set
+	// -- see its case below for why.
+	loopProgressStmt := map[ast.Stmt]bool{}
+	// loopCondExpr marks every *ast.BinaryExpr appearing anywhere
+	// within a for statement's own condition -- including nested
+	// inside a compound `&&`/`||` condition, not just a bare top-level
+	// comparison -- populated by the *ast.ForStmt case below before
+	// ast.Inspect's pre-order walk reaches those same nested nodes.
+	// The relational operator refuses to mutate any expression in
+	// this set -- see its case below for why.
+	loopCondExpr := map[*ast.BinaryExpr]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.BinaryExpr:
@@ -122,6 +137,13 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					add("arithmetic", "MJ-ARITHMETIC", x.OpPos, x.OpPos+token.Pos(len(x.Op.String())), repl,
 						fmt.Sprintf("replace arithmetic operator %s with %s", x.Op, repl),
 						"add a small table-driven case that distinguishes the original arithmetic result from the mutant", "")
+				}
+			}
+			if opts.Operators["relational"] && !loopCondExpr[x] {
+				if repl, ok := relationalReplacement(x.Op); ok {
+					add("relational", "MJ-RELATIONAL", x.OpPos, x.OpPos+token.Pos(len(x.Op.String())), repl.String(),
+						fmt.Sprintf("replace %s with %s", x.Op, repl),
+						"add a small table-driven case that distinguishes the original equality result from the mutant", "")
 				}
 			}
 		case *ast.UnaryExpr:
@@ -178,6 +200,33 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					fmt.Sprintf("add a test that exercises case %s and would fail if that case were missing", label), "")
 			}
 		case *ast.ForStmt:
+			if x.Post != nil {
+				// Recorded unconditionally, regardless of whether the
+				// loop operator itself is enabled: this is the
+				// assignment operator's exclusion, not the loop
+				// operator's, and needs to be in place before the walk
+				// reaches x.Post either way.
+				loopProgressStmt[x.Post] = true
+			}
+			if x.Cond != nil {
+				// Recorded unconditionally, same reasoning as above,
+				// but for the relational operator's exclusion instead:
+				// flipping == to != (or back) anywhere in a loop's own
+				// termination test -- including nested inside a
+				// compound && / || condition -- can turn a terminating
+				// loop into one that never terminates, unlike a
+				// boundary (</<=/>/>=) swap, which only ever shifts a
+				// monotonic threshold by one step and so cannot change
+				// whether the comparison eventually flips. ast.Inspect
+				// here is a small, separate walk over just this one
+				// condition subtree, not the whole file.
+				ast.Inspect(x.Cond, func(n ast.Node) bool {
+					if be, ok := n.(*ast.BinaryExpr); ok {
+						loopCondExpr[be] = true
+					}
+					return true
+				})
+			}
 			if opts.Operators["loop"] {
 				if x.Cond != nil {
 					add("loop", "MJ-LOOP-COND-FALSE", x.Cond.Pos(), x.Cond.End(), "false",
@@ -196,6 +245,24 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				add("loop", "MJ-LOOP-BREAK-FIRST", first.Pos(), first.End(), "break",
 					"insert an immediate break (loop body never executes)",
 					"add a test that depends on the loop body actually running", "")
+			}
+		case *ast.IncDecStmt:
+			if opts.Operators["assignment"] && !loopProgressStmt[x] {
+				repl, ok := incDecReplacement(x.Tok)
+				if ok {
+					add("assignment", "MJ-ASSIGN-INCDEC", x.TokPos, x.TokPos+token.Pos(len(x.Tok.String())), repl.String(),
+						fmt.Sprintf("replace %s with %s", x.Tok, repl),
+						"add a test that distinguishes the original increment/decrement direction from its opposite", "")
+				}
+			}
+		case *ast.AssignStmt:
+			if opts.Operators["assignment"] && !loopProgressStmt[x] {
+				repl, ok := assignmentOpReplacement(x.Tok)
+				if ok {
+					add("assignment", "MJ-ASSIGN-OP", x.TokPos, x.TokPos+token.Pos(len(x.Tok.String())), repl.String(),
+						fmt.Sprintf("replace compound assignment %s with %s", x.Tok, repl),
+						"add a small table-driven case that distinguishes the original assignment result from the mutant", "")
+				}
 			}
 		case *ast.SelectStmt:
 			if opts.Operators["channel"] && len(x.Body.List) > 1 {
@@ -427,6 +494,74 @@ func arithmeticReplacement(op token.Token) (string, bool) {
 		return "*", true
 	default:
 		return "", false
+	}
+}
+
+// assignmentOpReplacement mirrors arithmeticReplacement's four
+// operators (+/-, */÷) one level up, at the compound-assignment
+// statement (`x += y`) instead of the binary expression (`x + y`).
+// Deliberately excluded, matching arithmeticReplacement's own
+// restraint: %=, the bitwise/shift compound assignments (&=, |=, ^=,
+// &^=, <<=, >>=), and plain `=`/`:=` (not an operator to mutate at
+// all -- there is no sibling to swap it with).
+func assignmentOpReplacement(op token.Token) (token.Token, bool) {
+	switch op {
+	case token.ADD_ASSIGN:
+		return token.SUB_ASSIGN, true
+	case token.SUB_ASSIGN:
+		return token.ADD_ASSIGN, true
+	case token.MUL_ASSIGN:
+		return token.QUO_ASSIGN, true
+	case token.QUO_ASSIGN:
+		return token.MUL_ASSIGN, true
+	default:
+		return token.ILLEGAL, false
+	}
+}
+
+// incDecReplacement swaps ++ for -- and back. The one thing that
+// makes this different from every other pointwise-swap operator in
+// this file is that the single most common home for an IncDecStmt is
+// a for loop's own post clause (`for i := 0; i < n; i++`), where
+// flipping the direction doesn't produce a fast KILLED or SURVIVED --
+// it produces an infinite loop for essentially any ordinary counting
+// loop, the same "runs forever" failure mode the loop and channel
+// operators already refuse to generate. See loopProgressStmt in
+// discoverFile and its check at this function's call site; this
+// function itself has no way to know where its argument came from, so
+// the exclusion has to happen there, not here.
+func incDecReplacement(op token.Token) (token.Token, bool) {
+	switch op {
+	case token.INC:
+		return token.DEC, true
+	case token.DEC:
+		return token.INC, true
+	default:
+		return token.ILLEGAL, false
+	}
+}
+
+// relationalReplacement swaps == for != and back -- Relational
+// Operator Replacement restricted to equality, the one relational
+// pair boundary's </<=/>/>= swap does not already cover. Unlike a
+// boundary swap, which only ever shifts a monotonic threshold by one
+// step and so cannot change whether a loop's own termination test
+// eventually flips, an equality/inequality swap inverts the test's
+// polarity outright: a `for x != target { ... }` loop mutated to `for
+// x == target` can run zero times or run forever, depending entirely
+// on x's actual trajectory, which this pass has no way to know. See
+// loopCondExpr in discoverFile and its check at this function's call
+// site for the resulting exclusion; this function itself has no way
+// to know where its argument came from, so the exclusion has to
+// happen there, not here.
+func relationalReplacement(op token.Token) (token.Token, bool) {
+	switch op {
+	case token.EQL:
+		return token.NEQ, true
+	case token.NEQ:
+		return token.EQL, true
+	default:
+		return token.ILLEGAL, false
 	}
 }
 

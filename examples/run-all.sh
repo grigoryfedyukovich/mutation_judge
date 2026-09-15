@@ -27,6 +27,8 @@ run "error-return survivor" --operators errorreturn ./examples/errorreturn
 run "switch case deletion" --operators switch ./examples/switch
 run "loop skip" --operators loop ./examples/loop
 run "channel buffer mutation" --operators channel ./examples/channel
+run "assignment survivor" --operators assignment ./examples/assignment
+run "relational survivor" --operators relational ./examples/relational
 run "sarif output" --operators boundary --format sarif ./examples/boundary
 run "github annotations (survivor)" --operators boundary --format github ./examples/boundary
 run "github annotations (clean)" --operators boundary --format github ./examples/boundary_fixed

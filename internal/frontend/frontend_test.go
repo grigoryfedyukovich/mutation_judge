@@ -659,3 +659,214 @@ func Less(a, b Item) bool {
 		t.Fatalf("an == guard (and an unguarded fallback comparison) must not be suppressed: %#v", m)
 	}
 }
+
+func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func apply(total *int, delta, factor int) {
+	*total += delta
+	*total -= delta
+	*total *= factor
+	*total /= factor
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"assignment": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 4 {
+		t.Fatalf("expected 4 mutants (one per compound assignment), got %d: %#v", len(ms), ms)
+	}
+	want := map[string]string{"+=": "-=", "-=": "+=", "*=": "/=", "/=": "*="}
+	for _, m := range ms {
+		if m.RuleID != "MJ-ASSIGN-OP" {
+			t.Fatalf("unexpected rule: %#v", m)
+		}
+		if want[m.Original] != m.Replacement {
+			t.Fatalf("expected %s to become %s, got %#v", m.Original, want[m.Original], m)
+		}
+	}
+}
+
+func TestDiscoverAssignmentSwapsIncDec(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func bump(n *int) {
+	*n++
+	*n--
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"assignment": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 2 {
+		t.Fatalf("expected 2 mutants (++ and --), got %d: %#v", len(ms), ms)
+	}
+	want := map[string]string{"++": "--", "--": "++"}
+	for _, m := range ms {
+		if m.RuleID != "MJ-ASSIGN-INCDEC" {
+			t.Fatalf("unexpected rule: %#v", m)
+		}
+		if want[m.Original] != m.Replacement {
+			t.Fatalf("expected %s to become %s, got %#v", m.Original, want[m.Original], m)
+		}
+	}
+}
+
+// TestDiscoverAssignmentExcludesForLoopPostClause is the operator's
+// key safety property, not just a shape check: flipping the direction
+// of a for loop's own post-clause increment is, for essentially any
+// ordinary counting loop, the same "produces a guaranteed, fast,
+// uninformative TIMEOUT instead of a KILLED or SURVIVED" failure mode
+// the loop and channel operators already refuse to generate (see
+// docs/semantics.md). The fixture's other two compound-assignment
+// sites -- one inside the same loop's body, one entirely outside any
+// loop -- are unaffected by this exclusion and must still be mutated
+// normally; the point is that the exclusion is scoped to exactly the
+// for statement's own Post field, not to "anything that looks like a
+// counter".
+func TestDiscoverAssignmentExcludesForLoopPostClause(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func sum(xs []int) int {
+	total := 0
+	for i := 0; i < len(xs); i++ {
+		total += xs[i]
+	}
+	total -= 1
+	return total
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"assignment": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 2 {
+		t.Fatalf("expected exactly 2 mutants (the loop's own i++ must be excluded), got %d: %#v", len(ms), ms)
+	}
+	for _, m := range ms {
+		if m.Original == "++" {
+			t.Fatalf("the for loop's own post-clause increment must never be mutated: %#v", m)
+		}
+	}
+}
+
+// TestDiscoverAssignmentExcludesRangeLoopPostIsNotApplicable documents,
+// via a passing assertion rather than a comment alone, that a range
+// loop has no Post clause to exclude in the first place: range's own
+// iteration variable is advanced by the runtime, not by a mutable
+// IncDecStmt/AssignStmt this operator could ever see, so there is
+// nothing here for loopProgressStmt to need to track.
+func TestDiscoverAssignmentExcludesRangeLoopPostIsNotApplicable(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func sum(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"assignment": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].RuleID != "MJ-ASSIGN-OP" {
+		t.Fatalf("expected exactly 1 mutant (the body's total += x), got %#v", ms)
+	}
+}
+
+func TestDiscoverRelationalSwapsEqualityOperators(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func classify(a, b int) string {
+	if a == b {
+		return "eq"
+	}
+	if a != b {
+		return "neq"
+	}
+	return ""
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"relational": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 2 {
+		t.Fatalf("expected 2 mutants (== and !=), got %d: %#v", len(ms), ms)
+	}
+	want := map[string]string{"==": "!=", "!=": "=="}
+	for _, m := range ms {
+		if m.RuleID != "MJ-RELATIONAL" {
+			t.Fatalf("unexpected rule: %#v", m)
+		}
+		if want[m.Original] != m.Replacement {
+			t.Fatalf("expected %s to become %s, got %#v", m.Original, want[m.Original], m)
+		}
+	}
+}
+
+// TestDiscoverRelationalExcludesForLoopCondition is this operator's
+// key safety property, not just a shape check: an equality/inequality
+// swap inverts a comparison's polarity outright (unlike a boundary
+// </<=/>/>= swap, which only ever shifts a monotonic threshold by one
+// step), so applying it to a for loop's own termination test can turn
+// a terminating loop into one that runs zero times or never
+// terminates, depending on the loop variable's actual trajectory --
+// the same "guaranteed uninformative TIMEOUT" failure mode the loop,
+// channel, and assignment operators already refuse to generate. The
+// exclusion must reach into a compound `&&` condition too, not just a
+// bare top-level comparison, and must leave an unrelated equality
+// check elsewhere in the same function alone.
+func TestDiscoverRelationalExcludesForLoopCondition(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func countUntil(next func() int, target, limit int) int {
+	n := 0
+	for x := next(); x != target && n < limit; x = next() {
+		n++
+	}
+	if n == 0 {
+		return -1
+	}
+	return n
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"relational": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("expected exactly 1 mutant (the loop's own x != target must be excluded, even nested in &&), got %d: %#v", len(ms), ms)
+	}
+	if ms[0].Original != "==" {
+		t.Fatalf("expected the surviving mutant to be the unrelated n == 0 check, got %#v", ms[0])
+	}
+}

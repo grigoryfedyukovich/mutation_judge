@@ -80,7 +80,7 @@ Important flags:
 
 | Flag | Meaning |
 |---|---|
-| `--operators` | `boundary`, `boolean` on by default; `arithmetic`, `errorreturn`, `switch`, `loop`, `channel` are opt-in |
+| `--operators` | `boundary`, `boolean` on by default; `arithmetic`, `errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational` are opt-in |
 | `--changed REV` | Generate mutants only on added or modified lines from `git diff REV` |
 | `--test-run REGEXP` | Pass a test selection regexp to `go test -run` |
 | `--timeout DURATION` | Per-baseline and per-mutant command deadline |

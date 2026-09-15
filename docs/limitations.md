@@ -19,7 +19,7 @@
 
 None outstanding from the original trust backlog. See `ISSUES.md`. macOS `clonefile(2)` remains deferred (Linux `FICLONE` exists; clone success path is environment-dependent).
 
-The four operators formerly listed under "Optional expansion" as future work -- error-return, switch-case deletion, loop-bound changes, and channel/select behavior -- are implemented (`errorreturn`, `switch`, `loop`, `channel`; all opt-in, none in `Default()`). See `docs/semantics.md` for what each one matches and, for `loop` and `channel`, what each deliberately does *not* mutate to avoid producing slow, uninformative `TIMEOUT` verdicts.
+The four operators formerly listed under "Optional expansion" as future work -- error-return, switch-case deletion, loop-bound changes, and channel/select behavior -- are implemented (`errorreturn`, `switch`, `loop`, `channel`; all opt-in, none in `Default()`). Two more, `assignment` (compound-assignment and increment/decrement mutation) and `relational` (equality/inequality mutation), were added afterward as further optional expansion. See `docs/semantics.md` for what each one matches and, for `loop`, `channel`, `assignment`, and `relational`, what each deliberately does *not* mutate to avoid producing slow, uninformative `TIMEOUT` verdicts.
 
 "GitHub annotations and SARIF output" is implemented as two `--format` values: `sarif` (SARIF 2.1.0, for `github/codeql-action/upload-sarif`) and `github` (workflow-command annotations written directly to stdout, no upload step). Both apply the same inclusion policy -- only `SURVIVED`, `TIMEOUT`, and `UNKNOWN` verdicts produce a finding (`KILLED` and `INVALID` are not actionable findings). See `docs/tutorial.md` section 15.
 
