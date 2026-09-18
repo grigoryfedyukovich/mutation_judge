@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,7 +18,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v5"
+const SemanticsVersion = "mutation-judge-operators/v6"
 
 type Options struct {
 	Operators        map[string]bool
@@ -111,6 +113,13 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// The relational operator refuses to mutate any expression in
 	// this set -- see its case below for why.
 	loopCondExpr := map[*ast.BinaryExpr]bool{}
+	// loopSensitiveLit marks every *ast.BasicLit appearing anywhere
+	// within a for statement's own condition or post clause, for the
+	// same reason and by the same nested-walk technique as
+	// loopCondExpr and loopProgressStmt. The literal operator refuses
+	// to mutate any integer literal in this set -- see its case below
+	// for why.
+	loopSensitiveLit := map[*ast.BasicLit]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.BinaryExpr:
@@ -210,19 +219,48 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			}
 			if x.Cond != nil {
 				// Recorded unconditionally, same reasoning as above,
-				// but for the relational operator's exclusion instead:
-				// flipping == to != (or back) anywhere in a loop's own
-				// termination test -- including nested inside a
-				// compound && / || condition -- can turn a terminating
-				// loop into one that never terminates, unlike a
-				// boundary (</<=/>/>=) swap, which only ever shifts a
-				// monotonic threshold by one step and so cannot change
-				// whether the comparison eventually flips. ast.Inspect
-				// here is a small, separate walk over just this one
-				// condition subtree, not the whole file.
+				// but for the relational and literal operators'
+				// exclusions instead: flipping == to != (or back)
+				// anywhere in a loop's own termination test --
+				// including nested inside a compound && / ||
+				// condition -- can turn a terminating loop into one
+				// that never terminates, unlike a boundary (</<=/>/>=)
+				// swap, which only ever shifts a monotonic threshold
+				// by one step and so cannot change whether the
+				// comparison eventually flips. A literal shift is
+				// ordinarily just as safe as a boundary shift for the
+				// same reason, but this pass has no way to rule out an
+				// exotic non-monotonic loop whose termination depends
+				// on an exact value (`for i != 10 { i *= 2 }`), so
+				// literal mutation is excluded from a loop's own
+				// condition too, matching relational's scope exactly
+				// rather than trying to draw a finer, harder-to-verify
+				// line. ast.Inspect here is a small, separate walk
+				// over just this one condition subtree, not the whole
+				// file.
 				ast.Inspect(x.Cond, func(n ast.Node) bool {
-					if be, ok := n.(*ast.BinaryExpr); ok {
-						loopCondExpr[be] = true
+					switch v := n.(type) {
+					case *ast.BinaryExpr:
+						loopCondExpr[v] = true
+					case *ast.BasicLit:
+						loopSensitiveLit[v] = true
+					}
+					return true
+				})
+			}
+			if x.Post != nil {
+				// A for loop's post clause is where a literal
+				// mutation is genuinely, structurally dangerous: `for
+				// i := n; i > 0; i -= 1 { ... }` mutated to `i -= 0`
+				// removes the loop's only progress toward termination
+				// outright, the same "runs forever" failure mode
+				// loopProgressStmt already exists to prevent at the
+				// operator level (a += / -= / ++ / -- swap) -- this
+				// closes the same hole reached through a literal
+				// operand instead of the assignment operator itself.
+				ast.Inspect(x.Post, func(n ast.Node) bool {
+					if lit, ok := n.(*ast.BasicLit); ok {
+						loopSensitiveLit[lit] = true
 					}
 					return true
 				})
@@ -262,6 +300,17 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					add("assignment", "MJ-ASSIGN-OP", x.TokPos, x.TokPos+token.Pos(len(x.Tok.String())), repl.String(),
 						fmt.Sprintf("replace compound assignment %s with %s", x.Tok, repl),
 						"add a small table-driven case that distinguishes the original assignment result from the mutant", "")
+				}
+			}
+		case *ast.BasicLit:
+			if opts.Operators["literal"] && x.Kind == token.INT && !loopSensitiveLit[x] {
+				if inc, dec, ok := literalIntReplacements(x); ok {
+					add("literal", "MJ-LITERAL-INC", x.Pos(), x.End(), inc,
+						fmt.Sprintf("replace integer literal %s with %s", x.Value, inc),
+						"add a small table-driven case that distinguishes the original constant from one larger", "")
+					add("literal", "MJ-LITERAL-DEC", x.Pos(), x.End(), dec,
+						fmt.Sprintf("replace integer literal %s with %s", x.Value, dec),
+						"add a small table-driven case that distinguishes the original constant from one smaller", "")
 				}
 			}
 		case *ast.SelectStmt:
@@ -563,6 +612,38 @@ func relationalReplacement(op token.Token) (token.Token, bool) {
 	default:
 		return token.ILLEGAL, false
 	}
+}
+
+// literalIntReplacements returns the decimal text of lit's value plus
+// one and minus one. It uses go/constant rather than strconv directly
+// because go/ast's BasicLit.Value is the literal exactly as written --
+// hex (`0x2A`), octal (`0o17`/`017`), binary (`0b101`), and
+// underscore-separated (`1_000_000`) forms are all valid Go source
+// go/constant already knows how to parse; reimplementing that parsing
+// with strconv would either reject valid literals or silently misread
+// them. The replacement text is always plain decimal regardless of
+// the original literal's base -- simpler and just as correct, since
+// Go accepts any integer literal in any base wherever one is valid;
+// only the mutant's diff looks different from the original's style.
+// A literal too large to fit in an int64 (valid Go for a uint64
+// constant, or one only ever used as an untyped constant) is skipped
+// rather than risk misrepresenting it, and so is a literal sitting
+// exactly on the int64 boundary, where n+1 or n-1 would silently wrap
+// around in Go's own int64 arithmetic (confirmed with a standalone
+// experiment: int64(math.MaxInt64)+1 wraps to math.MinInt64) --
+// astronomically unlikely to matter for a real literal, but wrong is
+// wrong, and skipping the whole literal at that exact edge case costs
+// nothing worth having.
+func literalIntReplacements(lit *ast.BasicLit) (inc, dec string, ok bool) {
+	v := constant.MakeFromLiteral(lit.Value, lit.Kind, 0)
+	if v.Kind() != constant.Int {
+		return "", "", false
+	}
+	n, exact := constant.Int64Val(v)
+	if !exact || n == math.MaxInt64 || n == math.MinInt64 {
+		return "", "", false
+	}
+	return fmt.Sprintf("%d", n+1), fmt.Sprintf("%d", n-1), true
 }
 
 // notNilOperand returns the non-nil side of a top-level `X != nil` (or

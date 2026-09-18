@@ -870,3 +870,186 @@ func countUntil(next func() int, target, limit int) int {
 		t.Fatalf("expected the surviving mutant to be the unrelated n == 0 check, got %#v", ms[0])
 	}
 }
+
+func TestDiscoverLiteralGeneratesIncAndDecMutants(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func threshold() int {
+	return 42
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 2 {
+		t.Fatalf("expected 2 mutants (inc and dec), got %d: %#v", len(ms), ms)
+	}
+	got := map[string]string{}
+	for _, m := range ms {
+		if m.Original != "42" {
+			t.Fatalf("unexpected original: %#v", m)
+		}
+		got[m.RuleID] = m.Replacement
+	}
+	if got["MJ-LITERAL-INC"] != "43" || got["MJ-LITERAL-DEC"] != "41" {
+		t.Fatalf("expected 43 (inc) and 41 (dec), got %#v", got)
+	}
+}
+
+// TestDiscoverLiteralHandlesNonDecimalBases confirms literal parsing
+// goes through go/constant rather than a naive strconv call: hex,
+// octal, binary, and underscore-separated literals are all valid Go
+// syntax that a plain base-10 parse would either misread or reject
+// outright.
+func TestDiscoverLiteralHandlesNonDecimalBases(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func values() (int, int, int, int) {
+	return 0x2A, 0o17, 0b101, 1_000
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 8 {
+		t.Fatalf("expected 8 mutants (inc+dec for each of 4 literals), got %d: %#v", len(ms), ms)
+	}
+	want := map[string][2]string{ // original -> {inc, dec}
+		"0x2A":  {"43", "41"},
+		"0o17":  {"16", "14"},
+		"0b101": {"6", "4"},
+		"1_000": {"1001", "999"},
+	}
+	for _, m := range ms {
+		pair, known := want[m.Original]
+		if !known {
+			t.Fatalf("unexpected original literal: %#v", m)
+		}
+		if m.RuleID == "MJ-LITERAL-INC" && m.Replacement != pair[0] {
+			t.Fatalf("%s: expected inc %s, got %s", m.Original, pair[0], m.Replacement)
+		}
+		if m.RuleID == "MJ-LITERAL-DEC" && m.Replacement != pair[1] {
+			t.Fatalf("%s: expected dec %s, got %s", m.Original, pair[1], m.Replacement)
+		}
+	}
+}
+
+// TestDiscoverLiteralSkipsInt64Boundary guards the overflow this
+// operator could otherwise silently produce: Go's own int64 addition
+// wraps math.MaxInt64+1 around to math.MinInt64, so incrementing a
+// literal sitting exactly on that boundary the naive way would emit a
+// wildly wrong "mutant" instead of the small, off-by-one change every
+// other literal gets. Skipping the whole literal at that exact edge is
+// the correct, honest behavior, not a workaround.
+func TestDiscoverLiteralSkipsInt64Boundary(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func bounds() (int64, int64) {
+	return 9223372036854775807, -9223372036854775808
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 0 {
+		t.Fatalf("expected 0 mutants at the int64 boundary (both literals must be skipped), got %d: %#v", len(ms), ms)
+	}
+}
+
+// TestDiscoverLiteralExcludesForLoopPostClause is this operator's key
+// safety property for the post clause: mutating the decrement amount
+// itself to zero removes a loop's only progress toward termination,
+// same "runs forever" failure mode loopProgressStmt already guards at
+// the assignment-operator level -- this closes the identical hole
+// reached through the literal operand instead.
+func TestDiscoverLiteralExcludesForLoopPostClause(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func countdown(n int) int {
+	steps := 0
+	for i := n; i > 0; i -= 1 {
+		steps++
+	}
+	return steps + 100
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Original == "1" {
+			t.Fatalf("the for loop's own post-clause decrement amount must never be mutated: %#v", m)
+		}
+	}
+	// The unrelated literal 100 outside the loop must still be mutated
+	// normally -- the exclusion must be scoped to the loop, not global.
+	found := false
+	for _, m := range ms {
+		if m.Original == "100" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the unrelated literal 100 to still be mutated, got %#v", ms)
+	}
+}
+
+// TestDiscoverLiteralExcludesForLoopCondition covers the condition
+// side of the same exclusion, including a literal nested inside a
+// compound && condition -- matching relational's own scope exactly
+// rather than trying to draw a finer, harder-to-verify line about
+// which loops are "safe" to mutate.
+func TestDiscoverLiteralExcludesForLoopCondition(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func countUntil(next func() int, limit int) int {
+	n := 0
+	for x := next(); x != 10 && n < limit; x = next() {
+		n++
+	}
+	return n + 5
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Original == "10" {
+			t.Fatalf("a literal inside the loop's own condition (even nested in &&) must never be mutated: %#v", m)
+		}
+	}
+	found := false
+	for _, m := range ms {
+		if m.Original == "5" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the unrelated literal 5 to still be mutated, got %#v", ms)
+	}
+}

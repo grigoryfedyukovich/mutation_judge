@@ -523,7 +523,7 @@ func ValidExitCode(code int) error {
 }
 
 func Validate(c Config) error {
-	known := map[string]bool{"boundary": true, "boolean": true, "arithmetic": true, "errorreturn": true, "switch": true, "loop": true, "channel": true, "assignment": true, "relational": true}
+	known := map[string]bool{"boundary": true, "boolean": true, "arithmetic": true, "errorreturn": true, "switch": true, "loop": true, "channel": true, "assignment": true, "relational": true, "literal": true}
 	if len(c.Operators) == 0 {
 		return errors.New("at least one mutation operator is required")
 	}
