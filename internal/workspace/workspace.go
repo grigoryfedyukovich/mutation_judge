@@ -207,13 +207,23 @@ func parseGoWorkUsePaths(workFile string) ([]string, error) {
 }
 
 type Package struct {
-	Dir        string
-	GoFiles    []string
-	CgoFiles   []string
-	ImportPath string
-	Deps       []string
-	ForTest    string
-	Error      *struct{ Err string }
+	Dir          string
+	GoFiles      []string
+	CgoFiles     []string
+	TestGoFiles  []string
+	XTestGoFiles []string
+	ImportPath   string
+	Deps         []string
+	ForTest      string
+	Error        *struct{ Err string }
+}
+
+// HasOwnTests reports whether p has any test files of its own -- an
+// internal (`package foo`) or external (`package foo_test`) test file
+// declared directly in this package's directory. It says nothing about
+// whether some *other* package's tests exercise p's code.
+func (p Package) HasOwnTests() bool {
+	return len(p.TestGoFiles) > 0 || len(p.XTestGoFiles) > 0
 }
 
 func ListPackages(cwd string, patterns []string) ([]Package, error) {

@@ -620,6 +620,177 @@ func TestMutantTestScopeFallsBackWhenUncertain(t *testing.T) {
 	})
 }
 
+func TestMutantTestRunFallsBackWhenUncertain(t *testing.T) {
+	mut := model.Mutation{Span: model.Span{File: "pkg/foo.go", StartLine: 5, EndLine: 5}}
+	on := Request{Patterns: []string{"./..."}, Config: config.Config{CoverageTestSelection: true}}
+
+	t.Run("disabled entirely", func(t *testing.T) {
+		off := Request{Patterns: []string{"./..."}, Config: config.Config{CoverageTestSelection: false}}
+		var per covermap.PerTest
+		per.Add("TestFoo", covermap.Map{})
+		got := mutantTestRun(off, preparedAnalysis{perTestCoverage: per}, mut)
+		if got != "" {
+			t.Fatalf("expected no narrowing when the feature is off, got %q", got)
+		}
+	})
+
+	t.Run("user already set --test-run", func(t *testing.T) {
+		withUserRun := Request{Patterns: []string{"./..."}, Config: config.Config{CoverageTestSelection: true, TestRun: "TestSomethingSpecific"}}
+		var per covermap.PerTest
+		per.Add("TestFoo", covermap.Map{})
+		got := mutantTestRun(withUserRun, preparedAnalysis{perTestCoverage: per}, mut)
+		if got != "TestSomethingSpecific" {
+			t.Fatalf("a person's own --test-run must never be overridden or combined, got %q", got)
+		}
+	})
+
+	t.Run("span was never profiled", func(t *testing.T) {
+		var per covermap.PerTest // no Add calls at all: CoveringTests reports known=false
+		got := mutantTestRun(on, preparedAnalysis{perTestCoverage: per}, mut)
+		if got != "" {
+			t.Fatalf("an unknown result must fall back to no restriction, got %q", got)
+		}
+	})
+
+	t.Run("known but confidently uncovered", func(t *testing.T) {
+		var per covermap.PerTest
+		// Covers a different file entirely, so mut's span is known (this
+		// package was profiled) but has zero covering tests.
+		m, err := covermap.Parse(writeCoverageProfile(t, "mode: count\nexample.test/project/pkg/other.go:1.1,3.2 1 1\n"), t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		per.Add("TestOther", m)
+		got := mutantTestRun(on, preparedAnalysis{perTestCoverage: per}, mut)
+		if got != "" {
+			t.Fatalf("a confidently-empty covering set must never narrow to a run pattern that matches nothing, got %q", got)
+		}
+	})
+
+	t.Run("narrows to the exact covering tests, anchored and escaped", func(t *testing.T) {
+		var per covermap.PerTest
+		m, err := covermap.Parse(writeCoverageProfile(t, "mode: count\nexample.test/project/pkg/foo.go:5.1,5.9 1 1\n"), t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		per.Add("TestA", m)
+		per.Add("TestB.Special", m) // a dot is a regexp metacharacter and must be escaped
+		got := mutantTestRun(on, preparedAnalysis{perTestCoverage: per}, mut)
+		want := `^(TestA|TestB\.Special)$`
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func writeCoverageProfile(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "coverage.out")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeTestModule(t *testing.T, source, testSource string) string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module example.test/pertest\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "p_test.go"), []byte(testSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// TestBuildPerTestCoverageAttributesCorrectly is the direct,
+// real-backend counterpart to the integration-level
+// TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest: it
+// exercises runner.ListTests, a real `go test -run '^Name$'
+// -coverprofile=...` invocation per test, and covermap.Parse together,
+// end to end, and checks the resulting attribution directly rather
+// than only inferring it from a mutant's timing.
+func TestBuildPerTestCoverageAttributesCorrectly(t *testing.T) {
+	dir := writeTestModule(t,
+		"package p\n\nfunc A() int { return 1 }\nfunc B() int { return 2 }\n",
+		"package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\nfunc TestB(t *testing.T) { B() }\n")
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	engine := Engine{Version: "test", Backend: runner.GoTest{}}
+	req := Request{CWD: dir, Patterns: []string{"."}, Config: cfg}
+	toolchain, err := runner.DetectToolchain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := engine.prepare(req, toolchain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.cleanup()
+
+	per, err := engine.buildPerTestCoverage(context.Background(), req, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests, known := per.CoveringTests("p.go", 3, 3) // func A() int { return 1 }
+	if !known || len(tests) != 1 || tests[0] != "TestA" {
+		t.Fatalf("expected only TestA to cover line 3, got %v known=%v", tests, known)
+	}
+	tests, known = per.CoveringTests("p.go", 4, 4) // func B() int { return 2 }
+	if !known || len(tests) != 1 || tests[0] != "TestB" {
+		t.Fatalf("expected only TestB to cover line 4, got %v known=%v", tests, known)
+	}
+}
+
+// TestBuildPerTestCoverageFailsWhenATestFailsInIsolation is the
+// specific fallback trigger buildPerTestCoverage's own doc comment
+// describes: a test that passes as part of the full suite (so
+// runBaseline succeeds) but fails when run alone signals that this
+// package's tests are not safely isolatable, which must abort the
+// whole attempt with an error -- the caller (Analyze) then disables
+// coverage-test selection for the entire run rather than trusting any
+// of this package's attribution.
+func TestBuildPerTestCoverageFailsWhenATestFailsInIsolation(t *testing.T) {
+	dir := writeTestModule(t,
+		"package p\n\nvar seq []string\n\nfunc Record(s string) { seq = append(seq, s) }\n",
+		`package p
+
+import "testing"
+
+// TestFirst must run before TestSecond for TestSecond to pass -- an
+// inter-test dependency that is exactly what running each test in
+// isolation (as buildPerTestCoverage does) will break.
+func TestFirst(t *testing.T) { Record("first") }
+
+func TestSecond(t *testing.T) {
+	if len(seq) == 0 {
+		t.Fatal("TestFirst must run before TestSecond")
+	}
+}
+`)
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	engine := Engine{Version: "test", Backend: runner.GoTest{}}
+	req := Request{CWD: dir, Patterns: []string{"."}, Config: cfg}
+	toolchain, err := runner.DetectToolchain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := engine.prepare(req, toolchain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.cleanup()
+
+	if _, err := engine.buildPerTestCoverage(context.Background(), req, prepared); err == nil {
+		t.Fatal("expected an error when a test fails in isolation despite passing as part of the full suite")
+	}
+}
+
 func assertScopeEqual(t *testing.T, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

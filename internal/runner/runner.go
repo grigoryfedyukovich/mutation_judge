@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -141,6 +142,54 @@ func parseGoEnv(out []byte) (ToolchainInfo, error) {
 }
 
 var failRE = regexp.MustCompile(`(?m)^\s*--- FAIL: ([^ (]+)`)
+
+// ListTests returns the top-level Test function names in pattern (a
+// single package import path or relative path, not `./...`-style
+// multi-package expansion -- callers that need per-package attribution
+// must call this once per package, since `go test -list` does not
+// prefix its output by package when given more than one). It never
+// runs a test: `go test -list` only enumerates. The "^Test" list
+// regexp keeps benchmarks and examples out of the result; a package
+// with no test files at all is not an error -- `go test -list` prints
+// `?   pkg  [no test files]` and exits 0, which yields an empty,
+// nil-error result here, since that line does not start with "Test"
+// and every other non-matching line (the "ok pkg time" summary) is
+// filtered the same way.
+func ListTests(ctx context.Context, root, workRel, pattern string, timeout time.Duration) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "test", "-list", "^Test", pattern)
+	cmd.Dir = filepath.Join(root, filepath.FromSlash(workRel))
+	// Same reasoning as GoTest.Run: root is always a temporary sandbox
+	// copy of the module alone, never one of a go.work's use-listed
+	// directories, so an inherited host GOWORK must never apply here.
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go test -list failed for %s: %w", pattern, exitErrorWithStderr(err))
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Test") {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
+// exitErrorWithStderr folds a *exec.ExitError's captured stderr into
+// the returned error text -- exec.Cmd.Output only returns stdout, so a
+// bare err from it (via a *exec.ExitError) carries just an exit-status
+// string with none of the compiler/vet diagnostics a person would need
+// to actually act on a `go test -list` failure.
+func exitErrorWithStderr(err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(string(ee.Stderr)))
+	}
+	return err
+}
 
 // fallbackBuildFailureRE is a last-resort heuristic used only when `go
 // test -json` produces no decodable event stream at all (for example,

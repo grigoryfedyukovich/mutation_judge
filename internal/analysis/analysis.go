@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,8 @@ type preparedAnalysis struct {
 	toolchain      runner.ToolchainInfo
 	filePackage    map[string]string   // relative file path -> owning package import path
 	testScopes     map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
+	pkgs           []workspace.Package // for buildPerTestCoverage; nil unless CoverageTestSelection is on
+	perTestCoverage covermap.PerTest   // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
 }
 
 func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) {
@@ -85,9 +88,32 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 		return model.Report{}, err
 	}
 
+	var perTestWarning string
+	if req.Config.CoverageTestSelection {
+		perTest, ptErr := e.buildPerTestCoverage(ctx, req, prepared)
+		if ptErr != nil {
+			// Never a hard failure: coverage-test selection is purely a
+			// speed optimization layered on top of whatever test scope
+			// would otherwise apply (the full pattern set, or
+			// --narrow-test-scope's package-level narrowing). Any
+			// uncertainty about it -- a test that fails when run in
+			// isolation, a listing failure, a bad profile -- falls back
+			// to that wider, already-safe scope for every mutant this
+			// run, exactly like mutantTestScope's own fallback rule,
+			// rather than risking a single flaky or order-dependent
+			// test silently narrowing some mutant's run unsafely.
+			perTestWarning = fmt.Sprintf("coverage-test-selection disabled for this run: %v", ptErr)
+		} else {
+			prepared.perTestCoverage = perTest
+		}
+	}
+
 	results, complete, executionMS, warnings, err := e.executeMutants(ctx, req, prepared, coverage, coverageKnown)
 	if err != nil {
 		return model.Report{}, err
+	}
+	if perTestWarning != "" {
+		warnings = append([]string{perTestWarning}, warnings...)
 	}
 	return buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started), nil
 }
@@ -114,6 +140,45 @@ func mutantTestScope(req Request, p preparedAnalysis, mut model.Mutation) []stri
 		return req.Patterns
 	}
 	return scope
+}
+
+// mutantTestRun returns the `-run` regular expression to use for one
+// mutant's execution. It is req.Config.TestRun unchanged unless all of
+// the following hold, in which case it narrows further to exactly the
+// tests known to reach the mutant's own span:
+//
+//   - config.CoverageTestSelection is enabled and p.perTestCoverage was
+//     successfully built (see buildPerTestCoverage);
+//   - the person has not already set their own --test-run (narrowing on
+//     top of an existing, arbitrary user regular expression would mean
+//     either intersecting two regexes -- not generally expressible as a
+//     single regex -- or silently overriding what the person asked for;
+//     neither is acceptable, so this feature simply does not engage);
+//   - CoveringTests reports a *known*, *non-empty* result. An unknown
+//     result (this span's file was never profiled, e.g. a build-tagged
+//     file coverage never touched) falls back exactly like
+//     mutantTestScope's own fallback. A known-but-empty result is
+//     never turned into `-run '^$'`: an empty `-run` pattern with a
+//     Go regexp does not mean "match nothing", it errors or matches
+//     unpredictably (Go's os/exec + testing flag parsing does not
+//     special-case it into a deliberate empty selection the way the
+//     zero value of TestRun does), and either way running zero tests
+//     for a mutant is never the correct behavior -- something must
+//     always execute so the mutant gets a real, if excludable, verdict
+//     rather than an ambiguous non-run.
+func mutantTestRun(req Request, p preparedAnalysis, mut model.Mutation) string {
+	if req.Config.TestRun != "" || !req.Config.CoverageTestSelection {
+		return req.Config.TestRun
+	}
+	tests, known := p.perTestCoverage.CoveringTests(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine)
+	if !known || len(tests) == 0 {
+		return req.Config.TestRun
+	}
+	quoted := make([]string, len(tests))
+	for i, name := range tests {
+		quoted[i] = regexp.QuoteMeta(name)
+	}
+	return "^(" + strings.Join(quoted, "|") + ")$"
 }
 
 func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAnalysis, error) {
@@ -189,7 +254,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 		root: root, workRel: filepath.ToSlash(workRel), sandbox: sandbox, cleanup: cleanup,
 		mutants: mutants, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
 		coveragePath: coveragePath, backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
-		filePackage: filePackage, testScopes: testScopes,
+		filePackage: filePackage, testScopes: testScopes, pkgs: pkgs,
 	}, nil
 }
 
@@ -232,6 +297,59 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	return coverage, err == nil, elapsed, nil
 }
 
+// buildPerTestCoverage runs every top-level Test function in every
+// package (within p.pkgs) that has its own test files individually,
+// each with its own coverage profile, to determine exactly which
+// tests reach which lines -- the "much heavier machinery" a plain
+// aggregate -coverprofile run cannot provide (it only says a line ran
+// *somewhere* in the full suite, never by which test), and the reason
+// --narrow-test-scope is dependency-graph-guided rather than
+// coverage-guided by default (see docs/performance.md). This is that
+// heavier path, opt-in via --coverage-test-selection.
+//
+// Any single failure here -- a package that fails to list its tests,
+// or a test that fails when run in isolation even though the full
+// baseline (already validated by runBaseline) passed -- aborts the
+// whole attempt and returns an error. It does not try to salvage
+// per-package partial results: a test failing alone when it passed as
+// part of the full suite is itself a signal that this package's tests
+// are not safely isolatable (shared mutable state, execution-order
+// dependence, or similar), which calls the soundness of *any*
+// coverage collected from it into question, not just that one test's.
+// The caller (Analyze) treats any error as reason to disable
+// coverage-test selection for the whole run, not to fail the analysis
+// -- this is a speed optimization layered on top of an already-safe
+// test scope, never a source of correctness risk on its own.
+func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p preparedAnalysis) (covermap.PerTest, error) {
+	var per covermap.PerTest
+	profilePath := filepath.Join(p.sandbox, ".mutation-judge", "pertest-coverage.out")
+	for _, pkg := range p.pkgs {
+		if pkg.Error != nil && pkg.Error.Err != "" || !pkg.HasOwnTests() {
+			continue
+		}
+		names, err := runner.ListTests(ctx, p.sandbox, p.workRel, pkg.ImportPath, req.Config.Timeout)
+		if err != nil {
+			return covermap.PerTest{}, fmt.Errorf("listing tests in %s: %w", pkg.ImportPath, err)
+		}
+		for _, name := range names {
+			result := e.Backend.Run(ctx, runner.Request{
+				Root: p.sandbox, WorkRel: p.workRel, Patterns: []string{pkg.ImportPath},
+				TestRun: "^" + regexp.QuoteMeta(name) + "$", Timeout: req.Config.Timeout, CoverageOut: profilePath,
+				GoVersion: p.toolchain.GoVersion,
+			})
+			if result.Verdict != model.VerdictSurvived {
+				return covermap.PerTest{}, fmt.Errorf("%s (in %s) must pass when run in isolation (verdict %s):\n%s", name, pkg.ImportPath, result.Verdict, result.Output)
+			}
+			m, err := covermap.Parse(profilePath, p.sandbox)
+			if err != nil {
+				return covermap.PerTest{}, fmt.Errorf("parsing coverage profile for %s: %w", name, err)
+			}
+			per.Add(name, m)
+		}
+	}
+	return per, nil
+}
+
 // runOneMutant executes a single mutant against a given sandbox and is
 // shared, unmodified, by both the sequential and parallel execution
 // paths below -- extracted specifically so there is one place that
@@ -249,9 +367,12 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 // `go test` command for a given, already-identified mutant being
 // completely unaffected. Exactly Timeout and TestRun are what actually
 // reach runner.Request in runOneMutant below; nothing else from Config
-// does (Patterns comes from the computed test scope, not directly from
-// Config, and is already captured separately in the cache key via that
-// scope string).
+// does directly (Patterns comes from the computed test scope, and the
+// actual `-run` value comes from mutantTestRun, not directly from
+// Config -- both are already captured separately in the cache key, via
+// the scope string and the testRun string respectively, since either
+// can differ per mutant even when c.TestRun itself does not: that's
+// exactly what --narrow-test-scope and --coverage-test-selection do).
 //
 // This exists because of a real regression, found by testing the
 // finished --workers feature rather than assuming it worked: adding a
@@ -283,6 +404,7 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 		return makeEquivalentResult(mut, covered, known), false, nil, nil
 	}
 	scope := mutantTestScope(req, p, mut)
+	testRun := mutantTestRun(req, p, mut)
 	key := cache.Key(
 		e.Version,
 		frontend.SemanticsVersion,
@@ -294,6 +416,7 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 		mut.ID,
 		mut.Replacement,
 		strings.Join(scope, ","),
+		testRun,
 	)
 	backendResult, hit := store.Get(key)
 	if !hit {
@@ -303,7 +426,7 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 		}
 		backendResult = e.Backend.Run(ctx, runner.Request{
 			Root: sandbox, WorkRel: p.workRel, Patterns: scope,
-			TestRun: req.Config.TestRun, Timeout: req.Config.Timeout,
+			TestRun: testRun, Timeout: req.Config.Timeout,
 			GoVersion: p.toolchain.GoVersion,
 		})
 		if restoreErr := restore(); restoreErr != nil {
