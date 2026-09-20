@@ -13,12 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v6"
+const SemanticsVersion = "mutation-judge-operators/v7"
 
 type Options struct {
 	Operators        map[string]bool
@@ -117,9 +118,20 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// within a for statement's own condition or post clause, for the
 	// same reason and by the same nested-walk technique as
 	// loopCondExpr and loopProgressStmt. The literal operator refuses
-	// to mutate any integer literal in this set -- see its case below
-	// for why.
+	// to mutate any integer or string literal in this set -- see its
+	// case below for why.
 	loopSensitiveLit := map[*ast.BasicLit]bool{}
+	// importPathLit marks an *ast.ImportSpec's own path string,
+	// populated by the *ast.ImportSpec case below before ast.Inspect's
+	// pre-order walk reaches that same nested literal. Not a
+	// timeout-safety exclusion like the two above -- there's no hang
+	// risk here -- but emptying an import path (`import ""`) is a
+	// guaranteed compile failure on essentially every Go file, since
+	// nearly every file imports something. Without this, the literal
+	// operator's string-emptying mutation would spend a mutant on a
+	// 100%-certain, zero-information INVALID verdict on every single
+	// import in every file it ever ran against.
+	importPathLit := map[*ast.BasicLit]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.BinaryExpr:
@@ -302,15 +314,30 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 						"add a small table-driven case that distinguishes the original assignment result from the mutant", "")
 				}
 			}
+		case *ast.ImportSpec:
+			if x.Path != nil {
+				importPathLit[x.Path] = true
+			}
 		case *ast.BasicLit:
-			if opts.Operators["literal"] && x.Kind == token.INT && !loopSensitiveLit[x] {
-				if inc, dec, ok := literalIntReplacements(x); ok {
-					add("literal", "MJ-LITERAL-INC", x.Pos(), x.End(), inc,
-						fmt.Sprintf("replace integer literal %s with %s", x.Value, inc),
-						"add a small table-driven case that distinguishes the original constant from one larger", "")
-					add("literal", "MJ-LITERAL-DEC", x.Pos(), x.End(), dec,
-						fmt.Sprintf("replace integer literal %s with %s", x.Value, dec),
-						"add a small table-driven case that distinguishes the original constant from one smaller", "")
+			if opts.Operators["literal"] && !loopSensitiveLit[x] {
+				switch x.Kind {
+				case token.INT:
+					if inc, dec, ok := literalIntReplacements(x); ok {
+						add("literal", "MJ-LITERAL-INC", x.Pos(), x.End(), inc,
+							fmt.Sprintf("replace integer literal %s with %s", x.Value, inc),
+							"add a small table-driven case that distinguishes the original constant from one larger", "")
+						add("literal", "MJ-LITERAL-DEC", x.Pos(), x.End(), dec,
+							fmt.Sprintf("replace integer literal %s with %s", x.Value, dec),
+							"add a small table-driven case that distinguishes the original constant from one smaller", "")
+					}
+				case token.STRING:
+					if !importPathLit[x] {
+						if repl, ok := literalStringEmptyReplacement(x); ok {
+							add("literal", "MJ-LITERAL-STRING-EMPTY", x.Pos(), x.End(), repl,
+								fmt.Sprintf("replace string literal %s with %s", x.Value, repl),
+								"add a test that distinguishes the original string content from an empty one", "")
+						}
+					}
 				}
 			}
 		case *ast.SelectStmt:
@@ -644,6 +671,27 @@ func literalIntReplacements(lit *ast.BasicLit) (inc, dec string, ok bool) {
 		return "", "", false
 	}
 	return fmt.Sprintf("%d", n+1), fmt.Sprintf("%d", n-1), true
+}
+
+// literalStringEmptyReplacement returns `""` for a non-empty string
+// literal, and reports false for one that's already empty (an empty
+// string mutated to itself is a no-op the generic add() filter would
+// reject anyway, but skipping it here means the whole mutant is never
+// considered in the first place, rather than being built and then
+// discarded). strconv.Unquote handles both interpreted (`"..."`) and
+// raw (backtick) string syntax and their escape sequences correctly;
+// go/ast's BasicLit.Value is the literal exactly as written, quotes
+// included, so the content itself is never available without
+// unquoting it first. The replacement is always the plain
+// double-quoted empty string regardless of the original's quoting
+// style -- always valid Go wherever a string literal is, and there is
+// no meaningful "raw" form of an empty string to preserve.
+func literalStringEmptyReplacement(lit *ast.BasicLit) (string, bool) {
+	s, err := strconv.Unquote(lit.Value)
+	if err != nil || s == "" {
+		return "", false
+	}
+	return `""`, true
 }
 
 // notNilOperand returns the non-nil side of a top-level `X != nil` (or

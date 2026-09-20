@@ -31,7 +31,7 @@ Or execute all non-Git examples:
 | `channel` | A buffered channel's capacity replaced with 0, probed safely with `select`/`default` | `./bin/mutation-judge --no-cache --operators channel ./examples/channel` | 1 killed |
 | `assignment` | Compound assignment (`+=`/`-=`/`*=`/`/=`) and increment/decrement (`++`/`--`) mutation, one killed and two untested survivors | `./bin/mutation-judge --no-cache --operators assignment ./examples/assignment` | 1 killed, 2 survived |
 | `relational` | Equality/inequality (`==`/`!=`) mutation, one killed and one untested survivor | `./bin/mutation-judge --no-cache --operators relational ./examples/relational` | 1 killed, 1 survived |
-| `literal` | Integer literal mutation (each site gets a +1 and a -1 mutant), two constants killed via a loop-count effect and one left untested | `./bin/mutation-judge --no-cache --operators literal ./examples/literal` | 4 killed, 2 survived |
+| `literal` | Integer literal mutation (each site gets a +1 and a -1 mutant) plus non-empty string emptying, several killed via a loop-count or prefix effect and several left untested | `./bin/mutation-judge --no-cache --operators literal ./examples/literal` | 5 killed, 3 survived |
 
 The examples are intentionally small enough that each mutant can be reasoned about manually. The exact timing fields vary by machine; mutant IDs remain stable only for the same path, source offset, original text, and replacement.
 

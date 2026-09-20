@@ -1053,3 +1053,114 @@ func countUntil(next func() int, limit int) int {
 		t.Fatalf("expected the unrelated literal 5 to still be mutated, got %#v", ms)
 	}
 }
+
+func TestDiscoverLiteralEmptiesNonEmptyStrings(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func greet(name string) string {
+	return "Hello, " + name
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("expected exactly 1 mutant, got %d: %#v", len(ms), ms)
+	}
+	if ms[0].RuleID != "MJ-LITERAL-STRING-EMPTY" || ms[0].Original != `"Hello, "` || ms[0].Replacement != `""` {
+		t.Fatalf("unexpected mutant: %#v", ms[0])
+	}
+}
+
+// TestDiscoverLiteralSkipsAlreadyEmptyStrings confirms the no-op case
+// is skipped up front (never even built as a candidate mutant),
+// rather than relying solely on the generic post-hoc no-op filter.
+func TestDiscoverLiteralSkipsAlreadyEmptyStrings(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func empty() string {
+	return ""
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 0 {
+		t.Fatalf("expected 0 mutants for an already-empty string, got %#v", ms)
+	}
+}
+
+// TestDiscoverLiteralNeverEmptiesImportPaths guards a real gap found
+// during development, not a hypothetical one: an *ast.ImportSpec's
+// path is itself an *ast.BasicLit with Kind == STRING, so without this
+// exclusion the literal operator would spend a mutant emptying
+// `import "fmt"` to `import ""` -- a guaranteed compile failure
+// (INVALID, not a hang) on essentially every Go file, since nearly
+// every file imports something. This isn't a timeout-safety exclusion
+// like the for-loop ones above; it's just a mutant that can never be
+// anything but a 100%-certain, zero-information INVALID verdict.
+func TestDiscoverLiteralNeverEmptiesImportPaths(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+import "fmt"
+
+func F() {
+	fmt.Println("hi")
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Original != `"hi"` {
+		t.Fatalf("expected only the real string literal to be mutated, not the import path: %#v", ms)
+	}
+}
+
+// TestDiscoverLiteralExcludesStringInForLoopCondition mirrors the
+// integer-literal version of this test: a string literal used as a
+// for loop's own equality-based termination target is just as
+// susceptible to the "exotic non-monotonic loop" risk an integer
+// literal is (see relationalReplacement's and literalIntReplacements'
+// doc comments) -- loopSensitiveLit is keyed by *ast.BasicLit
+// regardless of Kind, so this should already be covered by the same
+// mechanism the integer case uses, with no extra code of its own.
+func TestDiscoverLiteralExcludesStringInForLoopCondition(t *testing.T) {
+	d := t.TempDir()
+	src := []byte(`package p
+
+func countUntilDone(next func() string) int {
+	n := 0
+	for s := next(); s != "done"; s = next() {
+		n++
+	}
+	return n
+}
+`)
+	if err := os.WriteFile(filepath.Join(d, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"literal": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Original == `"done"` {
+			t.Fatalf("a string literal inside the loop's own condition must never be mutated: %#v", m)
+		}
+	}
+}
