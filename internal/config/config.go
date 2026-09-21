@@ -12,21 +12,22 @@ import (
 )
 
 type Config struct {
-	Operators        []string
-	Timeout          time.Duration
-	TestRun          string
-	Format           string
-	Output           string
-	CacheDir         string
-	Cache            bool
-	MaxMutants       int
-	CIMinScore       float64
-	CIExitCode       int
-	IncludeGenerated bool
-	ChangedBase      string
-	Progress         bool
-	NarrowTestScope  bool
-	Workers          int
+	Operators             []string
+	Timeout               time.Duration
+	TestRun               string
+	Format                string
+	Output                string
+	CacheDir              string
+	Cache                 bool
+	MaxMutants            int
+	CIMinScore            float64
+	CIExitCode            int
+	IncludeGenerated      bool
+	ChangedBase           string
+	Progress              bool
+	NarrowTestScope       bool
+	CoverageTestSelection bool
+	Workers               int
 }
 
 func Default() Config {
@@ -44,21 +45,22 @@ func Default() Config {
 
 func (c Config) AsMap() map[string]any {
 	return map[string]any{
-		"operators":         c.Operators,
-		"timeout":           c.Timeout.String(),
-		"test_run":          c.TestRun,
-		"format":            c.Format,
-		"output":            c.Output,
-		"cache_dir":         c.CacheDir,
-		"cache":             c.Cache,
-		"max_mutants":       c.MaxMutants,
-		"ci_min_score":      c.CIMinScore,
-		"ci_exit_code":      c.CIExitCode,
-		"include_generated": c.IncludeGenerated,
-		"changed":           c.ChangedBase,
-		"progress":          c.Progress,
-		"narrow_test_scope": c.NarrowTestScope,
-		"workers":           c.Workers,
+		"operators":               c.Operators,
+		"timeout":                 c.Timeout.String(),
+		"test_run":                c.TestRun,
+		"format":                  c.Format,
+		"output":                  c.Output,
+		"cache_dir":               c.CacheDir,
+		"cache":                   c.Cache,
+		"max_mutants":             c.MaxMutants,
+		"ci_min_score":            c.CIMinScore,
+		"ci_exit_code":            c.CIExitCode,
+		"include_generated":       c.IncludeGenerated,
+		"changed":                 c.ChangedBase,
+		"progress":                c.Progress,
+		"narrow_test_scope":       c.NarrowTestScope,
+		"coverage_test_selection": c.CoverageTestSelection,
+		"workers":                 c.Workers,
 	}
 }
 
@@ -478,6 +480,12 @@ func set(c *Config, key, value string) error {
 			return err
 		}
 		c.NarrowTestScope = v
+	case "coverage_test_selection":
+		v, err := parseBool()
+		if err != nil {
+			return err
+		}
+		c.CoverageTestSelection = v
 	case "workers":
 		v, err := parseInt()
 		if err != nil {

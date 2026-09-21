@@ -45,5 +45,3 @@ The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, 
 - Assertion or contract attribution beyond named failing tests.
 - General equivalent-mutant proofs (only the one narrow boundary-operator case above is implemented; most equivalence remains undecided by design -- see `docs/limitations.md` limitation 7).
 - Full TOML and YAML language support (permanent non-goal for the flat subset parser).
-- Cross-run HTML comparison (text/JSON `compare` already ships).
-- Coverage-attributed per-test selection (distinct from `--narrow-test-scope`).

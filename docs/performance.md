@@ -147,6 +147,10 @@ silently miss. That distinction was verified empirically against a
 synthetic fixture (packages `a`/`b`/`c`/`d`/`e` with exactly this shape)
 before any code was written, the same way the `go test -json` event
 shapes were verified before `internal/runner`'s classifier was built.
+The heavier, coverage-guided alternative this section describes is now
+available too, as its own separate, stackable opt-in flag -- see
+"Coverage-attributed per-test selection" below for what it costs and
+guarantees.
 
 **Design principle: any uncertainty widens back to the full pattern
 set.** `mutantTestScope` never narrows unless both the mutant's owning
@@ -190,6 +194,25 @@ top-level arguments) but is a correctness question independent of it,
 so it's fixed regardless of whether scoping is enabled — the actual
 computed per-mutant scope is now its own explicit component of the
 cache key.
+
+## Coverage-attributed per-test selection (`--coverage-test-selection`)
+
+Opt-in (default off), independent of `--narrow-test-scope` and stackable on top of it: narrows a mutant's `go test -run` pattern down to the exact top-level test functions whose own baseline coverage reaches that mutant's span, rather than every test in whatever package scope already applies.
+
+This is the "much heavier machinery" the `--narrow-test-scope` section above named and deliberately deferred: Go's aggregate `-coverprofile` data says a line executed at least once somewhere in a test run, never by which test, so getting per-test attribution means running every top-level test individually, each with its own fresh coverage profile. Concretely, before mutant execution begins, mutation-judge:
+
+1. Runs `go test -list '^Test'` once per test-bearing package (a package with no test files of its own is skipped) to enumerate its top-level test functions. Subtests (`t.Run`) are not separately enumerated or attributed — a subtest's coverage is attributed to its enclosing top-level test, the same granularity `-run` itself can select on.
+2. Runs `go test -run '^Name$' -coverprofile=...` once per enumerated test, and parses the resulting profile.
+3. For a given mutant, unions the covering-test sets of every line in the mutant's span (not just its first line) across every test whose individual profile reached any of them, and narrows that mutant's `-run` to exactly that set: `^(TestA|TestB)$`.
+
+The added cost is real and roughly proportional to the number of top-level tests, not the number of mutants — it is a fixed, one-time cost paid once per analysis run, independent of how many mutants exist. It pays off precisely when there are many more mutants than tests and mutants routinely trigger far more of a large test suite than actually needs to run for that specific line, the same shape of situation `--narrow-test-scope` already targets at package granularity; a suite with few tests, or one already narrow per package, will not see much benefit and may simply pay the per-test profiling cost for little gain — try both flags and compare, the same advice the `--narrow-test-scope` section above gives for the same reason. That upfront cost is not currently broken out as its own field in the report's `timing` block (`parse`/`baseline`/`mutants`/`render`/`total`); it is real wall-clock time included in `total` but not itemized in the other four, the same way the sandbox-copy and `go list` cost inside preparation already isn't. This is a known, accepted gap in the timing breakdown's completeness, not a hidden cost with no accounting at all.
+
+**Soundness.** Never running a test against a given mutant is safe exactly when that test cannot possibly observe the mutation -- and a test that never executes the mutated line at all, through however many layers of call depth, cannot observe anything different about it, since coverage instrumentation records every line a process actually runs regardless of how it got there. The one thing this safety argument depends on is that running each test *individually* faithfully reflects what it *would* cover as part of the full suite. Two failure modes of that assumption are handled explicitly, both by disabling the feature for the entire run and adding a `Warnings` entry rather than trusting a partial result:
+
+- **A test that fails when run alone**, even though the full baseline (already validated before this phase ever runs) passed it. This is a real, not hypothetical, thing to guard against — order-dependent or shared-mutable-state tests exist even though idiomatic Go testing discourages them — and a dedicated regression test (`TestBuildPerTestCoverageFailsWhenATestFailsInIsolation`) constructs exactly this scenario (one test's package-level state that a second test depends on) and confirms it is caught.
+- **Any other error** building the map at all — a package's tests failing to list, a coverage profile failing to parse.
+
+What this does *not* try to detect: a test that would cover a line only when run as part of the full suite, in some way that doesn't also make it *fail* alone (for instance, a purely additive side effect a later assertion never checks). This is the same class of risk any statement-coverage-based test-selection or test-impact-analysis tool carries, and idiomatic, independent Go tests are not exposed to it in the first place; it is disclosed here rather than silently assumed away. One further constraint: a person who has already set their own `--test-run` disables this feature entirely for the run, since narrowing further on top of an arbitrary existing regular expression is not something a single resulting regular expression can safely express — two independent restrictions do not compose into one pattern in general — so the choice is to respect the person's own selection unchanged rather than approximate an intersection.
 
 ## Parallel isolated workers (`--workers`)
 

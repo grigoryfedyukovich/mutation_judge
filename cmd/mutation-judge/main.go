@@ -109,6 +109,7 @@ func run() (code int) {
 	includeGenerated := fs.Bool("include-generated", cfg.IncludeGenerated, "include generated Go source")
 	progress := fs.Bool("progress", cfg.Progress, "emit one progress line per mutant to stderr")
 	narrowTestScope := fs.Bool("narrow-test-scope", cfg.NarrowTestScope, "run each mutant only against tests that can observe it, computed from the module's own dependency graph, instead of the full pattern set every time; opt-in, see docs/performance.md")
+	coverageTestSelection := fs.Bool("coverage-test-selection", cfg.CoverageTestSelection, "run each mutant only against the specific tests whose baseline coverage reaches its span, on top of any --narrow-test-scope package narrowing; opt-in and expensive (profiles every top-level test individually up front), see docs/performance.md")
 	workers := fs.Int("workers", cfg.Workers, "run this many mutants concurrently, each in its own sandbox; 0 or 1 (the default) runs sequentially, unchanged from earlier versions; see docs/performance.md")
 	printConfig := fs.Bool("print-config", false, "print the effective configuration and exit")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -143,6 +144,7 @@ func run() (code int) {
 	cfg.IncludeGenerated = *includeGenerated
 	cfg.Progress = *progress
 	cfg.NarrowTestScope = *narrowTestScope
+	cfg.CoverageTestSelection = *coverageTestSelection
 	cfg.Workers = *workers
 	if err := config.Validate(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "configuration error:", err)

@@ -278,6 +278,82 @@ func TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage(t *testing.T) {
 	}
 }
 
+// TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest is the
+// critical correctness test for --coverage-test-selection, the same
+// bar TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency holds
+// --narrow-test-scope to: a mutation-testing tool that silently
+// reports a false SURVIVED because it narrowed test execution
+// incorrectly would be actively harmful, worse than not narrowing at
+// all. This is a different axis of narrowing than --narrow-test-scope
+// (which package's tests to run) -- this is which specific tests
+// *within* an already-included package to run, based on which of them
+// actually reached the mutated line during baseline profiling.
+// tests/integration/testdata/coverage_selection is built specifically
+// so the mutant on Classify's `n > 100` is reachable only through
+// TestClassifyBoundary; TestSlowUnrelated shares the same package but
+// never calls Classify at all, and sleeps 3 seconds so its
+// inclusion/exclusion from a given mutant's own `go test` invocation
+// is an unambiguous, non-flaky timing signal. With coverage-test
+// selection enabled, the mutant must still be KILLED by
+// TestClassifyBoundary, and the mutants phase specifically (not
+// baseline, and not the per-test profiling this feature does up
+// front, both of which legitimately still run every test at least
+// once) must not pay TestSlowUnrelated's 3s cost.
+func TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
+		"--coverage-test-selection", "./tests/integration/testdata/coverage_selection/...")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, text)
+	}
+	if strings.Contains(text, "coverage-test-selection disabled") {
+		t.Fatalf("coverage-test-selection must not fall back to disabled for this well-behaved fixture:\n%s", text)
+	}
+	if !strings.Contains(text, "KILLED") {
+		t.Fatalf("expected the mutant to be KILLED by TestClassifyBoundary even with coverage-test-selection on:\n%s", text)
+	}
+	if strings.Contains(text, "SURVIVED") {
+		t.Fatalf("a SURVIVED result here would mean coverage-test-selection silently excluded the one test that actually kills this mutant:\n%s", text)
+	}
+	if !strings.Contains(text, "killed by: TestClassifyBoundary") {
+		t.Fatalf("expected attribution to TestClassifyBoundary specifically:\n%s", text)
+	}
+
+	mutantsMS := parseMutantsTimingMS(t, text)
+	if mutantsMS >= 3000 {
+		t.Fatalf("mutants phase took %dms; --coverage-test-selection should have excluded TestSlowUnrelated from this mutant's own `go test -run` invocation specifically (full output:\n%s)", mutantsMS, text)
+	}
+}
+
+// TestWithoutCoverageTestSelectionRunsTheSlowUnrelatedTest is the
+// control for the timing assertion above, the same role
+// TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage plays for
+// --narrow-test-scope: it proves the fixture's 3-second signal is
+// real -- caused by coverage-test selection, not some other reason
+// TestSlowUnrelated wouldn't run anyway -- by confirming the default
+// (feature off) behavior does pay that cost on the single mutant's own
+// run.
+func TestWithoutCoverageTestSelectionRunsTheSlowUnrelatedTest(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
+		"./tests/integration/testdata/coverage_selection/...")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, text)
+	}
+	mutantsMS := parseMutantsTimingMS(t, text)
+	if mutantsMS < 3000 {
+		t.Fatalf("mutants phase took only %dms without --coverage-test-selection; expected TestSlowUnrelated to run as part of the mutant's own full-package test invocation (full output:\n%s)", mutantsMS, text)
+	}
+}
+
 // parseMutantsTimingMS extracts the "mutants=Nms" component from a text
 // report's trailing timing line, to assert on the mutant-execution
 // phase specifically rather than total wall time, which always includes

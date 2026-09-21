@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -548,4 +549,44 @@ func testModule(t *testing.T, source, testSource string) string {
 		}
 	}
 	return root
+}
+
+func TestListTestsReturnsTopLevelTestNames(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() {}\n",
+		"package p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\nfunc TestTwo(t *testing.T) {}\nfunc BenchmarkThing(b *testing.B) {}\n")
+	names, err := ListTests(context.Background(), root, ".", ".", 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "TestOne" || names[1] != "TestTwo" {
+		t.Fatalf("got %v, want [TestOne TestTwo] (benchmarks must be excluded)", names)
+	}
+}
+
+// TestListTestsHandlesNoTestFiles confirms a package with no test
+// files at all is not an error -- `go test -list` reports
+// "[no test files]" and exits 0 for that case, which must yield an
+// empty, nil-error result rather than being mistaken for a failure.
+func TestListTestsHandlesNoTestFiles(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() {}\n", "")
+	names, err := ListTests(context.Background(), root, ".", ".", 10*time.Second)
+	if err != nil {
+		t.Fatalf("a package with no test files must not be an error: %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("expected no test names, got %v", names)
+	}
+}
+
+// TestListTestsFailsOnBuildError confirms a genuine build failure
+// (as opposed to "no test files") is reported as an error, with the
+// compiler's own diagnostic included -- not silently treated as an
+// empty test list.
+func TestListTestsFailsOnBuildError(t *testing.T) {
+	root := testModule(t, "package p\nfunc F() {\n", "")
+	_, err := ListTests(context.Background(), root, ".", ".", 10*time.Second)
+	if err == nil {
+		t.Fatal("expected an error for a package that fails to build")
+	}
 }

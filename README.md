@@ -92,6 +92,7 @@ Important flags:
 | `--ci-exit-code CODE` | CI policy failure code, default `10` |
 | `--progress=false` | Suppress per-mutant progress lines on stderr |
 | `--narrow-test-scope` | Run each mutant only against tests that can observe it, computed from the module's dependency graph, instead of the full pattern set every time; opt-in, see `docs/performance.md` |
+| `--coverage-test-selection` | Run each mutant only against the specific tests whose baseline coverage reaches its span, on top of any `--narrow-test-scope` package narrowing; opt-in and expensive (profiles every top-level test individually up front), see `docs/performance.md` |
 | `--workers N` | Run N mutants concurrently, each in its own sandbox; default 1 (sequential, unchanged from earlier versions), see `docs/performance.md` |
 
 A successful analysis returns `0` regardless of survivors. Invalid input and baseline failures return `2`; internal failures return `3`; an enabled CI score policy uses its configured code.
