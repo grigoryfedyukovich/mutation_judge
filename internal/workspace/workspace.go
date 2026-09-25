@@ -369,7 +369,10 @@ func SourceFiles(root string, pkgs []Package) ([]string, error) {
 // Symlinks whose resolved target path would leave the module root are
 // skipped (not recreated in the sandbox and not fingerprinted). Internal
 // and dangling-but-in-tree-target symlinks are still visited; see
-// symlinkTargetInsideRoot.
+// symlinkTargetInsideRoot. Absolute targets that resolve inside the
+// module are rewritten on copy to a path relative to the sandbox link
+// (see sandboxSymlinkTarget) so tests cannot read the host file through
+// the link while Apply mutates the sandbox copy.
 func sandboxEntries(root, cacheDir string, fn func(path, rel string, d fs.DirEntry) error) error {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
@@ -490,12 +493,55 @@ func symlinkTargetInsideRoot(rootAbs, linkPath, target string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// sandboxSymlinkTarget is the target string CopyModule writes into the
+// sandbox for a kept symlink. Relative targets are copied as-is (they
+// already resolve inside the copied tree). Absolute targets that
+// symlinkTargetInsideRoot already accepted still point at the *host*
+// path -- recreating that string would let a sandbox test read the
+// unmutated original while Apply only changes the copy. Rewrite those
+// to a path relative to the sandbox link, aiming at the same module-
+// relative file in the sandbox.
+func sandboxSymlinkTarget(rootAbs, sandboxRoot, dst, target string) (string, error) {
+	if !filepath.IsAbs(target) {
+		return target, nil
+	}
+	relFromRoot, err := filepath.Rel(rootAbs, filepath.Clean(target))
+	if err != nil {
+		return "", err
+	}
+	dest := filepath.Join(sandboxRoot, relFromRoot)
+	return filepath.Rel(filepath.Dir(dst), dest)
+}
+
+// fingerprintSymlinkTarget is what Digest hashes for a kept symlink.
+// Relative targets are the Readlink string (same as the sandbox
+// recreation). Absolute in-tree targets are hashed as "abs:" plus the
+// slash-separated path relative to the module root -- the same identity
+// sandboxSymlinkTarget rewrites to -- so a checkout at a different
+// absolute prefix does not churn the cache key, and retargeting the
+// link to a different in-module file still does.
+func fingerprintSymlinkTarget(rootAbs, target string) string {
+	if !filepath.IsAbs(target) {
+		return target
+	}
+	rel, err := filepath.Rel(rootAbs, filepath.Clean(target))
+	if err != nil {
+		return target
+	}
+	return "abs:" + filepath.ToSlash(rel)
+}
+
 func CopyModule(root, cacheDir string) (string, func(), error) {
 	tmp, err := os.MkdirTemp("", "mutation-judge-*")
 	if err != nil {
 		return "", nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(tmp) }
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
 	err = sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
 		dst := filepath.Join(tmp, filepath.FromSlash(rel))
 		if d.IsDir() {
@@ -506,7 +552,11 @@ func CopyModule(root, cacheDir string) (string, func(), error) {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(target, dst)
+			rewritten, err := sandboxSymlinkTarget(rootAbs, tmp, dst, target)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(rewritten, dst)
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -615,24 +665,27 @@ func writeFileAtomicWithRename(path string, data []byte, mode os.FileMode, renam
 // selection, not two independently maintained lists) so it can't
 // silently reappear by CopyModule and Digest drifting apart again.
 //
-// A symlink is fingerprinted by its own link target string (via
-// os.Readlink), never by dereferencing to the target's content:
-// CopyModule recreates it as a symlink object pointing at that exact
-// target, not a copy of whatever the target currently contains, so
-// that target string is what actually changes the sandbox. Outbound
-// symlinks (targets that resolve outside the module root) are omitted
-// by sandboxEntries on both the Digest and CopyModule paths, so they
-// neither affect the cache key nor reappear as host-escape links in
-// the sandbox. Internal dangling links are still fingerprinted and
-// recreated.
+// A symlink is fingerprinted by its own link target, never by
+// dereferencing to the target's content: CopyModule recreates a
+// symlink object, not a copy of whatever the target currently
+// contains. Relative targets are hashed as the Readlink string (the
+// same string written into the sandbox). Absolute in-tree targets are
+// hashed as "abs:" plus the module-relative path -- matching the
+// rewrite CopyModule applies -- so a different checkout prefix does
+// not churn the cache, and retargeting still does. Outbound
+// symlinks are omitted by sandboxEntries on both paths.
 func Digest(root, cacheDir string) (string, error) {
 	type file struct {
 		rel     string
 		symlink bool
 		target  string // set only when symlink is true
 	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
 	var files []file
-	err := sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
+	err = sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
 		if d.IsDir() {
 			return nil
 		}
@@ -641,7 +694,7 @@ func Digest(root, cacheDir string) (string, error) {
 			if err != nil {
 				return err
 			}
-			files = append(files, file{rel: rel, symlink: true, target: target})
+			files = append(files, file{rel: rel, symlink: true, target: fingerprintSymlinkTarget(rootAbs, target)})
 			return nil
 		}
 		files = append(files, file{rel: rel})

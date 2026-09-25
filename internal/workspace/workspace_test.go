@@ -407,6 +407,100 @@ func TestSandboxSkipsOutboundSymlinks(t *testing.T) {
 	}
 }
 
+// TestSandboxRewritesAbsoluteInTreeSymlinks reproduces the leftover
+// host-read: CopyModule used to recreate an in-module absolute symlink
+// with the same absolute target string, so a test that opened the link
+// read the host file while Apply only mutated the sandbox copy -- a
+// false SURVIVED. The copy must rewrite the target to a sandbox-relative
+// path, and Apply through the original file must be visible when reading
+// the sandbox link. Digest must treat two checkouts that differ only in
+// absolute prefix as the same, and must still change when the link is
+// retargeted to a different in-module file.
+func TestSandboxRewritesAbsoluteInTreeSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions vary on Windows")
+	}
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.test/m\n\ngo 1.22\n", 0o644)
+	original := "package p\nfunc Answer() int { return 1 }\n"
+	mustWrite(t, filepath.Join(root, "p.go"), original, 0o644)
+	mustWrite(t, filepath.Join(root, "q.go"), "package p\n", 0o644)
+	if err := os.MkdirAll(filepath.Join(root, "testdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	absP := filepath.Join(root, "p.go")
+	if err := os.Symlink(absP, filepath.Join(root, "testdata", "alias.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	tmp, cleanup, err := CopyModule(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	sandboxLink := filepath.Join(tmp, "testdata", "alias.go")
+	gotTarget, err := os.Readlink(sandboxLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(gotTarget) {
+		t.Fatalf("sandbox link still absolute (%q); would read the host file", gotTarget)
+	}
+	resolved, err := filepath.Abs(filepath.Join(filepath.Dir(sandboxLink), gotTarget))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxRoot, err := filepath.Abs(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(sandboxRoot, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("rewritten target %q resolves outside the sandbox: %q", gotTarget, resolved)
+	}
+
+	restore, err := Apply(tmp, "p.go", strings.Index(original, "1"), strings.Index(original, "1")+1, "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	throughLink, err := os.ReadFile(sandboxLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(throughLink), "return 2") {
+		t.Fatalf("Apply on sandbox p.go must be visible through the rewritten symlink, got %q", throughLink)
+	}
+	host, err := os.ReadFile(absP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(host) != original {
+		t.Fatalf("host file changed: %q", host)
+	}
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+
+	d1, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "testdata", "alias.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "q.go"), filepath.Join(root, "testdata", "alias.go")); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d1 == d2 {
+		t.Fatal("retargeting an absolute in-tree symlink to another module file must change the digest")
+	}
+}
+
 func TestSandboxSkipsNodeModulesJunkVendorAndRootBin(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "go.mod"), "module example.test/m\n\ngo 1.22\n", 0o644)
