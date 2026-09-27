@@ -9,7 +9,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 | Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and seven further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational`, `literal`) in `internal/frontend`. |
 | One mutant at a time | Implemented | Atomic apply/run/restore per sandbox; `--workers N` uses one independent sandbox per concurrent mutant. |
 | Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, `UNSUPPORTED`, and `EQUIVALENT` model values. |
-| Responsible tests | Implemented with documented limits | Standard `--- FAIL:` events are extracted and sorted. |
+| Responsible tests and assertions | Implemented with documented limits | Failed test names from `go test -json` events; assertion log text from the same stream's indented `file.go:N:` Output lines as `responsible_assertions`. |
 | Exact survivor diff and suggestion | Implemented | Every surviving result carries a unified diff and operator-specific scenario. |
 | Git diff mode | Implemented | Zero-context changed-line mapping with deleted-file and zero-count handling. |
 | Coverage explanation | Implemented | Baseline statement coverage annotates each mutation span. |
@@ -42,6 +42,6 @@ The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, 
 ## Not yet implemented
 
 - Distributed CI execution (shard mutants across jobs and merge reports; distinct from in-process `--workers`).
-- Assertion or contract attribution beyond named failing tests.
+- Contract attribution, or naming the assertion in the test source (testing.T log lines from failed tests are already captured; test-file AST is not).
 - General equivalent-mutant proofs (only the one narrow boundary-operator case above is implemented; most equivalence remains undecided by design -- see `docs/limitations.md` limitation 7).
 - Full TOML and YAML language support (permanent non-goal for the flat subset parser).

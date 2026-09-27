@@ -122,6 +122,9 @@ func renderText(dst io.Writer, r model.Report) error {
 		if len(x.Responsible) > 0 {
 			w.printf("  killed by: %s\n", strings.Join(x.Responsible, ", "))
 		}
+		for _, a := range x.Assertions {
+			w.printf("  assertion: %s\n", formatAssertion(a))
+		}
 		if x.Verdict == model.VerdictSurvived {
 			w.printf("  suggested test: %s\n", x.Mutation.Suggestion)
 			for _, line := range strings.Split(strings.TrimSuffix(x.Mutation.Diff, "\n"), "\n") {
@@ -145,3 +148,22 @@ func renderText(dst io.Writer, r model.Report) error {
 }
 
 func renderHTML(w io.Writer, r model.Report) error { return page.Execute(w, r) }
+
+// formatAssertion renders one responsible assertion for the text report.
+func formatAssertion(a model.Assertion) string {
+	var b strings.Builder
+	if a.Test != "" {
+		b.WriteString(a.Test)
+		b.WriteString(": ")
+	}
+	if a.File != "" {
+		b.WriteString(a.File)
+		if a.Line > 0 {
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(a.Line))
+		}
+		b.WriteString(": ")
+	}
+	b.WriteString(a.Message)
+	return b.String()
+}

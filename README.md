@@ -223,7 +223,7 @@ JSON output uses schema `mutation-judge.report/v1`. Each result contains:
 
 - a stable mutant and verdict rule ID;
 - exact source span and unified diff;
-- verdict and responsible tests;
+- verdict, responsible tests, and responsible assertions (testing.T log lines from failed tests);
 - baseline coverage status when available;
 - evidence, assumptions, and a mechanically grounded suggestion for survivors;
 - tool/backend versions, effective configuration, explicit bounds, and phase timing.
@@ -243,7 +243,7 @@ The integration test runs the boundary example through the actual CLI. Unit test
 
 ## Honest limitations
 
-The v0.1 implementation mutates ordinary production Go files returned by `go list`; it does not mutate tests, generated files by default, assembly, templates, or code generated during tests. It runs package patterns as one selected test command and infers responsible tests from standard `go test` failure lines. Coverage is baseline statement coverage, not mutant-specific dynamic slicing. See [docs/limitations.md](docs/limitations.md).
+The v0.1 implementation mutates ordinary production Go files returned by `go list`; it does not mutate tests, generated files by default, assembly, templates, or code generated during tests. It runs package patterns as one selected test command and infers responsible tests and assertion log text from standard `go test` failure output. Coverage is baseline statement coverage, not mutant-specific dynamic slicing. See [docs/limitations.md](docs/limitations.md).
 
 ## Documentation
 

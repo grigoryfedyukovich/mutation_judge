@@ -23,6 +23,52 @@ func TestTextIncludesSuggestion(t *testing.T) {
 	}
 }
 
+func TestTextIncludesAssertions(t *testing.T) {
+	r := model.Report{
+		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{"max_mutants": 0, "per_mutant_timeout": "1s"},
+		Summary: model.Summary{Generated: 1, Killed: 1, ScoreText: "100.0%"},
+		Results: []model.Result{{
+			Verdict: model.VerdictKilled, Responsible: []string{"TestF"},
+			Assertions: []model.Assertion{{Test: "TestF", File: "p_test.go", Line: 6, Message: "got 1 want 2"}},
+			Mutation:   model.Mutation{ID: "M-1", Span: model.Span{File: "p.go", StartLine: 3, StartCol: 5}, Description: "change"},
+		}},
+	}
+	var b bytes.Buffer
+	if err := Render(&b, "text", r); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "killed by: TestF") {
+		t.Fatalf("missing killed by: %s", out)
+	}
+	if !strings.Contains(out, "assertion: TestF: p_test.go:6: got 1 want 2") {
+		t.Fatalf("missing assertion line: %s", out)
+	}
+}
+
+func TestHTMLIncludesAssertions(t *testing.T) {
+	r := model.Report{
+		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{},
+		Summary: model.Summary{Generated: 1, Killed: 1, ScoreText: "100%"},
+		Results: []model.Result{{
+			Verdict: model.VerdictKilled, Responsible: []string{"TestF"},
+			Assertions: []model.Assertion{{Test: "TestF", File: "p_test.go", Line: 6, Message: "got <1> want 2"}},
+			Mutation:   model.Mutation{ID: "M-1", Description: "change", Span: model.Span{File: "p.go", StartLine: 1, StartCol: 1}},
+		}},
+	}
+	var b bytes.Buffer
+	if err := Render(&b, "html", r); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "Responsible assertions") {
+		t.Fatalf("missing assertions heading: %s", out)
+	}
+	if !strings.Contains(out, "got &lt;1&gt; want 2") {
+		t.Fatalf("assertion message must be HTML-escaped: %s", out)
+	}
+}
+
 func TestTextIncludesEquivalentProof(t *testing.T) {
 	r := model.Report{
 		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{"max_mutants": 0, "per_mutant_timeout": "1s"},

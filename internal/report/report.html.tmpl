@@ -48,6 +48,12 @@
   <h2>{{.Verdict}} <code>{{.Mutation.ID}}</code></h2>
   <p><code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}:{{.Mutation.Span.StartCol}}</code> — {{.Mutation.Description}}</p>
   {{if .Responsible}}<p><strong>Responsible tests:</strong> {{join .Responsible ", "}}</p>{{end}}
+  {{if .Assertions}}
+  <p><strong>Responsible assertions:</strong></p>
+  <ul>
+  {{range .Assertions}}<li><code>{{.Test}}</code> {{.File}}:{{.Line}}: {{.Message}}</li>{{end}}
+  </ul>
+  {{end}}
   {{if eq .Verdict "SURVIVED"}}
   <p><strong>Suggested test:</strong> {{.Mutation.Suggestion}}</p>
   <pre>{{.Mutation.Diff}}</pre>

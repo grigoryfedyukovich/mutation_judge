@@ -193,7 +193,7 @@ The test names explain two different obligations:
 - `TestNilFailure` preserves the nil guard and short-circuit behavior.
 - `TestPermanentFailure` preserves the retryability predicate.
 
-Responsible-test attribution is extracted from standard `go test` failure lines. A package-level panic, initialization failure, or unusual test harness can kill a mutant without yielding a named test.
+Responsible-test attribution is extracted from standard `go test` failure lines. When a failed test also emitted a testing.T log (`file.go:N: message`), that text is attached as a responsible assertion (text report `assertion:` lines; JSON field `responsible_assertions`). A package-level panic, initialization failure, or unusual test harness can kill a mutant without yielding a named test or assertion.
 
 ## 5. Walkthrough: test selection changes the claim
 
@@ -835,7 +835,7 @@ Increase the explicit timeout only after deciding that the test is expected to c
 
 ### A killed mutant has no responsible test
 
-The process may have failed before Go printed a `--- FAIL:` line, for example during package initialization or from a process-wide crash. Inspect `diagnostic.evidence.backend_output` in JSON.
+The process may have failed before Go printed a `--- FAIL:` line, for example during package initialization or from a process-wide crash. Inspect `diagnostic.evidence.backend_output` in JSON. The same cases also produce no `responsible_assertions`.
 
 ## 19. Apply Mutation Judge to a real package
 

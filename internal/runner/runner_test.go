@@ -369,6 +369,81 @@ func TestGoTestDoesNotClassifyUnrelatedFailureMentioningTimeoutPhraseAsTimeout(t
 	if len(got.Tests) != 1 || got.Tests[0] != "TestF" {
 		t.Fatalf("Tests = %v, want [TestF]", got.Tests)
 	}
+	if len(got.Assertions) != 1 {
+		t.Fatalf("Assertions = %#v, want one fatalf message", got.Assertions)
+	}
+	if got.Assertions[0].Test != "TestF" || !strings.Contains(got.Assertions[0].Message, "expected retry to succeed") {
+		t.Fatalf("unexpected assertion: %#v", got.Assertions[0])
+	}
+	if got.Assertions[0].File == "" || got.Assertions[0].Line <= 0 {
+		t.Fatalf("assertion must carry file and line: %#v", got.Assertions[0])
+	}
+}
+
+// TestExtractAssertionsFromEvents pins the pure extraction path against
+// the real go test -json Output shape (indented file.go:N: message),
+// including t.Log on a failing test (indistinguishable from t.Error),
+// empty messages, multi-assertion tests, and control-line rejection.
+func TestExtractAssertionsFromEvents(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Test: "TestF"},
+		{Action: "output", Test: "TestF", Output: "=== RUN   TestF\n"},
+		{Action: "output", Test: "TestF", Output: "    p_test.go:4: setup note\n"},
+		{Action: "output", Test: "TestF", Output: "    p_test.go:6: got 1 want 2\n"},
+		{Action: "output", Test: "TestF", Output: "--- FAIL: TestF (0.00s)\n"},
+		{Action: "fail", Test: "TestF"},
+		{Action: "run", Test: "TestPass"},
+		{Action: "output", Test: "TestPass", Output: "    p_test.go:20: should not appear\n"},
+		{Action: "pass", Test: "TestPass"},
+		{Action: "run", Test: "TestEmpty"},
+		{Action: "output", Test: "TestEmpty", Output: "    p_test.go:10: \n"},
+		{Action: "fail", Test: "TestEmpty"},
+		{Action: "run", Test: "TestMulti"},
+		{Action: "output", Test: "TestMulti", Output: "    p_test.go:13: first\n"},
+		{Action: "output", Test: "TestMulti", Output: "    p_test.go:14: second\n"},
+		{Action: "fail", Test: "TestMulti"},
+		{Action: "run", Test: "TestLib"},
+		{Action: "output", Test: "TestLib", Output: "    lib_test.go:8: \n"},
+		{Action: "output", Test: "TestLib", Output: "        Error Trace:\tlib_test.go:8\n"},
+		{Action: "output", Test: "TestLib", Output: "        Error:      \tNot equal:\n"},
+		{Action: "fail", Test: "TestLib"},
+	}
+	got := extractAssertions(events, []string{"TestF", "TestEmpty", "TestMulti", "TestLib"})
+	if len(got) != 5 {
+		t.Fatalf("got %d assertions, want 5 (2 from TestF including t.Log, 2 from TestMulti, 1 from TestLib Error:): %#v", len(got), got)
+	}
+	if got[0].Message != "setup note" || got[1].Message != "got 1 want 2" {
+		t.Fatalf("TestF assertions: %#v", got[:2])
+	}
+	if got[2].Message != "first" || got[3].Message != "second" {
+		t.Fatalf("TestMulti assertions: %#v", got[2:4])
+	}
+	if got[4].Test != "TestLib" || got[4].Message != "Not equal:" {
+		t.Fatalf("TestLib assertion should use Error: continuation: %#v", got[4])
+	}
+}
+
+func TestExtractAssertionsNilWhenNoFailedTests(t *testing.T) {
+	events := []testEvent{
+		{Action: "output", Test: "TestPass", Output: "    p_test.go:1: note\n"},
+		{Action: "pass", Test: "TestPass"},
+	}
+	if got := extractAssertions(events, nil); got != nil {
+		t.Fatalf("want nil, got %#v", got)
+	}
+}
+
+func TestParseTestingLogLineRejectsControlAndUnindented(t *testing.T) {
+	if _, _, _, ok := parseTestingLogLine("=== RUN   TestF\n"); ok {
+		t.Fatal("control line must not parse")
+	}
+	if _, _, _, ok := parseTestingLogLine("./p.go:3:9: invalid operation\n"); ok {
+		t.Fatal("unindented compiler diagnostic must not parse")
+	}
+	file, line, msg, ok := parseTestingLogLine("    p_test.go:6: got 1 want 2\n")
+	if !ok || file != "p_test.go" || line != 6 || msg != "got 1 want 2" {
+		t.Fatalf("got %q %d %q ok=%v", file, line, msg, ok)
+	}
 }
 
 // A vet failure (not just a compile error) must also classify as

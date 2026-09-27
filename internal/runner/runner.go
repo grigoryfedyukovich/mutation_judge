@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -34,12 +35,13 @@ type Request struct {
 }
 
 type Result struct {
-	Verdict    model.Verdict `json:"verdict"`
-	Output     string        `json:"output"`
-	Tests      []string      `json:"tests,omitempty"`
-	DurationMS int64         `json:"duration_ms"`
-	ExitCode   int           `json:"exit_code"`
-	GoVersion  string        `json:"go_version"`
+	Verdict    model.Verdict     `json:"verdict"`
+	Output     string            `json:"output"`
+	Tests      []string          `json:"tests,omitempty"`
+	Assertions []model.Assertion `json:"assertions,omitempty"`
+	DurationMS int64             `json:"duration_ms"`
+	ExitCode   int               `json:"exit_code"`
+	GoVersion  string            `json:"go_version"`
 }
 
 type Backend interface {
@@ -347,6 +349,9 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	}
 
 	res.Verdict, res.Tests = classifyEvents(events)
+	if res.Verdict == model.VerdictKilled {
+		res.Assertions = extractAssertions(events, res.Tests)
+	}
 	return res
 }
 
@@ -475,6 +480,151 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 		}
 	}
 	return model.VerdictKilled, nil
+}
+
+// extractAssertions collects testing.T log lines from failed tests'
+// own Output events. Control lines (`=== RUN`, `--- FAIL`) and
+// package-level output are ignored. Empty messages are ignored unless
+// a same-test continuation supplies one (the `Error:` line some
+// assertion libraries print after a blank `file.go:N:` prefix).
+//
+// t.Log and t.Error share this format in the event stream; we cannot
+// tell them apart, so a failing test's t.Log lines may appear here.
+// That is preferred to guessing an assertion from the test source.
+// Passing tests are never consulted, even if they logged.
+func extractAssertions(events []testEvent, failedTests []string) []model.Assertion {
+	if len(failedTests) == 0 {
+		return nil
+	}
+	failed := make(map[string]bool, len(failedTests))
+	for _, n := range failedTests {
+		failed[n] = true
+	}
+	type logLine struct {
+		test string
+		text string
+	}
+	var lines []logLine
+	for _, e := range events {
+		if e.Action != "output" || e.Test == "" || !failed[e.Test] {
+			continue
+		}
+		for _, raw := range strings.SplitAfter(e.Output, "\n") {
+			if raw == "" || raw == "\n" {
+				continue
+			}
+			lines = append(lines, logLine{test: e.Test, text: raw})
+		}
+	}
+	var out []model.Assertion
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		file, lineno, msg, ok := parseTestingLogLine(lines[i].text)
+		if !ok {
+			continue
+		}
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			var first string
+			for j := i + 1; j < len(lines); j++ {
+				if lines[j].test != lines[i].test {
+					break
+				}
+				if _, _, _, isLog := parseTestingLogLine(lines[j].text); isLog {
+					break
+				}
+				if isTestControlLine(lines[j].text) {
+					break
+				}
+				cont := strings.TrimSpace(lines[j].text)
+				if cont == "" {
+					continue
+				}
+				if strings.HasPrefix(cont, "Error:") {
+					msg = strings.TrimSpace(strings.TrimPrefix(cont, "Error:"))
+					first = ""
+					break
+				}
+				if first == "" {
+					first = cont
+				}
+			}
+			if msg == "" {
+				msg = first
+			}
+		}
+		msg = clipAssertionMessage(msg)
+		if msg == "" {
+			continue
+		}
+		a := model.Assertion{Test: lines[i].test, File: file, Line: lineno, Message: msg}
+		key := a.Test + "\x00" + a.File + "\x00" + strconv.Itoa(a.Line) + "\x00" + a.Message
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+// parseTestingLogLine recognizes a testing.T log line as go test
+// prints it: leading indent, then `file.go:N: message`. The testing
+// package always indents Error/Fatal/Log this way. Compiler
+// diagnostics sit at column 0 and are package-scoped (Test == ""),
+// so they never match here even if extractAssertions were handed
+// them. `=== RUN` / `--- FAIL` control lines are rejected even when
+// indented (subtests indent `--- FAIL:`).
+func parseTestingLogLine(s string) (file string, line int, msg string, ok bool) {
+	s = strings.TrimRight(s, "\r\n")
+	if s == "" {
+		return "", 0, "", false
+	}
+	if s[0] != ' ' && s[0] != '\t' {
+		return "", 0, "", false
+	}
+	trimmed := strings.TrimLeft(s, " \t")
+	if isTestControlLine(trimmed) {
+		return "", 0, "", false
+	}
+	i := strings.Index(trimmed, ".go:")
+	if i < 0 {
+		return "", 0, "", false
+	}
+	file = trimmed[:i+3]
+	rest := trimmed[i+4:]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return "", 0, "", false
+	}
+	n, err := strconv.Atoi(rest[:colon])
+	if err != nil || n <= 0 {
+		return "", 0, "", false
+	}
+	msg = rest[colon+1:]
+	if strings.HasPrefix(msg, " ") {
+		msg = msg[1:]
+	}
+	return file, n, msg, true
+}
+
+func isTestControlLine(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "=== ") || strings.HasPrefix(s, "--- ")
+}
+
+const assertionMessageRuneLimit = 240
+
+func clipAssertionMessage(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= assertionMessageRuneLimit {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:assertionMessageRuneLimit]) + "…"
 }
 
 // reconstructOutput rebuilds a single human-readable text block from the

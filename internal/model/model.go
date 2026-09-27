@@ -98,6 +98,27 @@ const (
 	VerdictEquivalent Verdict = "EQUIVALENT"
 )
 
+// Assertion is one testing.T log line attributed to a failed test,
+// parsed from that test's own go test -json Output events. File and
+// Line come from the testing package's `file.go:N:` prefix when
+// present; Message is the remainder of that line (or a compact
+// continuation when the first line was empty, as some assertion
+// libraries print).
+//
+// This is not a claim about which assertion in the test *source*
+// killed the mutant, and it is not a parsed contract. It is the log
+// text go test actually emitted for a test that failed. t.Log on a
+// failing test is indistinguishable from t.Error in the event stream
+// and may appear here; a failing test with no such log (panic,
+// t.FailNow, package init) simply has none -- the result then stays
+// test-only rather than guessing from the test file.
+type Assertion struct {
+	Test    string `json:"test"`
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Message string `json:"message"`
+}
+
 type Timing struct {
 	ParsingMS   int64 `json:"parsing_ms"`
 	BaselineMS  int64 `json:"baseline_ms"`
@@ -116,15 +137,16 @@ type Diagnostic struct {
 }
 
 type Result struct {
-	Mutation      Mutation   `json:"mutation"`
-	Verdict       Verdict    `json:"verdict"`
-	Responsible   []string   `json:"responsible_tests,omitempty"`
-	Covered       bool       `json:"covered_by_selected_tests"`
-	CoverageKnown bool       `json:"coverage_known"`
-	Cached        bool       `json:"cached"`
-	DurationMS    int64      `json:"duration_ms"`
-	Output        string     `json:"output,omitempty"`
-	Diagnostic    Diagnostic `json:"diagnostic"`
+	Mutation      Mutation    `json:"mutation"`
+	Verdict       Verdict     `json:"verdict"`
+	Responsible   []string    `json:"responsible_tests,omitempty"`
+	Assertions    []Assertion `json:"responsible_assertions,omitempty"`
+	Covered       bool        `json:"covered_by_selected_tests"`
+	CoverageKnown bool        `json:"coverage_known"`
+	Cached        bool        `json:"cached"`
+	DurationMS    int64       `json:"duration_ms"`
+	Output        string      `json:"output,omitempty"`
+	Diagnostic    Diagnostic  `json:"diagnostic"`
 }
 
 type Summary struct {

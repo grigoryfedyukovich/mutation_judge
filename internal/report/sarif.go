@@ -115,6 +115,9 @@ func renderSARIF(w io.Writer, r model.Report) error {
 		if len(x.Responsible) > 0 {
 			props["responsible_tests"] = x.Responsible
 		}
+		if len(x.Assertions) > 0 {
+			props["responsible_assertions"] = x.Assertions
+		}
 		results = append(results, sarifResult{
 			RuleID:  m.RuleID,
 			Level:   level,
