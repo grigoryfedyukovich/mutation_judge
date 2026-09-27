@@ -482,6 +482,47 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 	return model.VerdictKilled, nil
 }
 
+// failedPkgTests returns the same package-qualified (pkg + "\x00" +
+// test) failure determination classifyEvents makes for the verdict
+// itself: an explicit "fail" event, or a test that started and never
+// resolved before the event stream ended (in-flight when the process
+// crashed). extractAssertions matches against this -- never against a
+// bare test name -- because the same Test name commonly recurs across
+// packages in one combined event stream (e.g. `./...`); matching by
+// name alone would let a *passing* same-named test in another package
+// leak its own Output lines into the failing test's attributed
+// assertions, misattributing evidence to the wrong test entirely. This
+// duplicates classifyEvents' own key scheme deliberately rather than
+// importing its internal `failed` map, so a caller can independently
+// verify one against the other; see classifyEvents for the twin logic.
+func failedPkgTests(events []testEvent) map[string]bool {
+	started := map[string]bool{}
+	failed := map[string]bool{}
+	key := func(pkg, test string) string { return pkg + "\x00" + test }
+	for _, e := range events {
+		switch e.Action {
+		case "run":
+			if e.Test != "" {
+				started[key(e.Package, e.Test)] = true
+			}
+		case "pass", "skip":
+			if e.Test != "" {
+				delete(started, key(e.Package, e.Test))
+			}
+		case "fail":
+			if e.Test != "" {
+				k := key(e.Package, e.Test)
+				delete(started, k)
+				failed[k] = true
+			}
+		}
+	}
+	for k := range started {
+		failed[k] = true
+	}
+	return failed
+}
+
 // extractAssertions collects testing.T log lines from failed tests'
 // own Output events. Control lines (`=== RUN`, `--- FAIL`) and
 // package-level output are ignored. Empty messages are ignored unless
@@ -491,22 +532,21 @@ func classifyEvents(events []testEvent) (model.Verdict, []string) {
 // t.Log and t.Error share this format in the event stream; we cannot
 // tell them apart, so a failing test's t.Log lines may appear here.
 // That is preferred to guessing an assertion from the test source.
-// Passing tests are never consulted, even if they logged.
+// Passing tests are never consulted, even if they logged -- including
+// a same-named passing test in a *different* package sharing this
+// event stream: see failedPkgTests.
 func extractAssertions(events []testEvent, failedTests []string) []model.Assertion {
 	if len(failedTests) == 0 {
 		return nil
 	}
-	failed := make(map[string]bool, len(failedTests))
-	for _, n := range failedTests {
-		failed[n] = true
-	}
+	failed := failedPkgTests(events)
 	type logLine struct {
 		test string
 		text string
 	}
 	var lines []logLine
 	for _, e := range events {
-		if e.Action != "output" || e.Test == "" || !failed[e.Test] {
+		if e.Action != "output" || e.Test == "" || !failed[e.Package+"\x00"+e.Test] {
 			continue
 		}
 		for _, raw := range strings.SplitAfter(e.Output, "\n") {

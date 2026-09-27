@@ -423,6 +423,33 @@ func TestExtractAssertionsFromEvents(t *testing.T) {
 	}
 }
 
+// TestExtractAssertionsScopedByPackageNotJustTestName reproduces a
+// same-named-test collision across two packages sharing one combined
+// `go test ./...`-style event stream (the default, unscoped execution
+// path -- see mutantTestScope). Package "a"'s TestScan fails; package
+// "b" happens to define its own, unrelated TestScan that passes in the
+// same run. Only "a"'s own Output lines may be attributed: matching by
+// bare test name alone (ignoring testEvent.Package) would incorrectly
+// pull "b"'s passing TestScan's log line in too, attributing a
+// passing, unrelated test's message to the actual kill.
+func TestExtractAssertionsScopedByPackageNotJustTestName(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "example.com/a", Test: "TestScan"},
+		{Action: "output", Package: "example.com/a", Test: "TestScan", Output: "    a_test.go:10: wrong result\n"},
+		{Action: "fail", Package: "example.com/a", Test: "TestScan"},
+		{Action: "run", Package: "example.com/b", Test: "TestScan"},
+		{Action: "output", Package: "example.com/b", Test: "TestScan", Output: "    b_test.go:99: should not appear\n"},
+		{Action: "pass", Package: "example.com/b", Test: "TestScan"},
+	}
+	got := extractAssertions(events, []string{"TestScan"})
+	if len(got) != 1 {
+		t.Fatalf("got %d assertions, want exactly 1 from package a only: %#v", len(got), got)
+	}
+	if got[0].File != "a_test.go" || got[0].Message != "wrong result" {
+		t.Fatalf("assertion leaked from the wrong package's same-named test: %#v", got[0])
+	}
+}
+
 func TestExtractAssertionsNilWhenNoFailedTests(t *testing.T) {
 	events := []testEvent{
 		{Action: "output", Test: "TestPass", Output: "    p_test.go:1: note\n"},
