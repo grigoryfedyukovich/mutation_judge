@@ -118,7 +118,7 @@ mutation-judge trend
 - `>` → `>=`
 - `>=` → `>`
 
-A comparison dominated by an exact `if X != Y { return X < Y }`-shaped guard on the same two operands is provably equivalent under this mutation and is classified `EQUIVALENT` instead -- never executed. This is deliberately narrow; see `docs/semantics.md`, "Conservative equivalent-mutant suppression."
+A comparison dominated by an exact `if X != Y { return X < Y }`-shaped guard on the same two operands is provably equivalent under this mutation and is classified `EQUIVALENT` instead -- never executed. The boolean operator likewise classifies a `v := true`/`false` initializer as `EQUIVALENT` when the very next statement overwrites `v` without reading it (a plain assignment, or an exhaustive if/else whose condition never mentions `v`). This is deliberately narrow; see `docs/semantics.md`, "Conservative equivalent-mutant suppression."
 
 ### Boolean
 
@@ -163,7 +163,7 @@ Deliberately excluded: deleting a `close(ch)` call, for the same slow-`TIMEOUT` 
 - **INVALID:** the mutant does not compile or type-check.
 - **TIMEOUT:** the explicit command deadline expired.
 - **UNKNOWN / UNSUPPORTED:** reserved first-class report values for future backends.
-- **EQUIVALENT:** discovery itself proved the mutant behaviorally identical to the original before any test ran; never executed. Currently only the boundary operator's one narrow guarded-comparison case (see "Supported mutations" above and `docs/limitations.md` limitation 7).
+- **EQUIVALENT:** discovery itself proved the mutant behaviorally identical to the original before any test ran; never executed. Currently only two narrow cases: the boundary operator's guarded comparison and the boolean operator's immediately overwritten initializer (see "Supported mutations" above and `docs/limitations.md` limitation 7).
 
 The score is `killed / (killed + survived)`. Invalid, timeout, and equivalent mutants are excluded. The report always prints the configured mutant and timeout bounds.
 

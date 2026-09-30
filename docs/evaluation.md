@@ -282,3 +282,12 @@ an idempotent string replacement respectively) or to any equivalence
 argument that isn't this one guarded-comparison shape -- see
 `docs/limitations.md` limitation 7.
 
+A second narrow shape, a dead-store boolean initializer
+(`internal/frontend.detectDeadStoreLiteral`), was added afterward. It matches
+only a `v := true`/`false` whose very next statement overwrites `v` without
+reading it. It does **not** match `go-humanize`'s `hasComma`: there the
+initial value stays live when no comma is present, and the equivalence rests
+on `strings.Replace` being a no-op in that case, which is library semantics,
+not a dead store. The `oom()` discarded-return finding is also still
+unhandled, since it needs every in-module call site.
+

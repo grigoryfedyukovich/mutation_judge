@@ -660,6 +660,234 @@ func Less(a, b Item) bool {
 	}
 }
 
+// discoverBoolFixture runs discovery with only the boolean operator
+// enabled, for the dead-store tests below.
+func discoverBoolFixture(t *testing.T, src string) []model.Mutation {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"boolean": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms
+}
+
+// boolLiteralMutantAtLine finds the single MJ-BOOL-LITERAL mutant on
+// the given 1-based source line, failing loudly if there isn't exactly
+// one so a fixture edit can never silently check the wrong literal.
+func boolLiteralMutantAtLine(t *testing.T, ms []model.Mutation, line int) model.Mutation {
+	t.Helper()
+	var found []model.Mutation
+	for _, m := range ms {
+		if m.RuleID == "MJ-BOOL-LITERAL" && m.Span.StartLine == line {
+			found = append(found, m)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly 1 MJ-BOOL-LITERAL mutant on line %d, got %d: %#v", line, len(found), found)
+	}
+	return found[0]
+}
+
+func TestDeadStoreSuppressesStraightLineOverwrite(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool) bool {
+	seen := false
+	seen = g()
+	return seen
+}
+`)
+	m := boolLiteralMutantAtLine(t, ms, 4)
+	if m.EquivalentReason == "" {
+		t.Fatalf("expected the immediately overwritten initializer to be marked equivalent: %#v", m)
+	}
+}
+
+func TestDeadStoreSuppressesExhaustiveIfElseOverwrite(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool, h func() bool) bool {
+	seen := false
+	if g() {
+		seen = h()
+	} else {
+		seen = g()
+	}
+	return seen
+}
+`)
+	m := boolLiteralMutantAtLine(t, ms, 4)
+	if m.EquivalentReason == "" {
+		t.Fatalf("expected the if/else-overwritten initializer to be marked equivalent: %#v", m)
+	}
+	if !strings.Contains(m.EquivalentReason, "g()") {
+		t.Fatalf("reason should cite the actual condition, got: %q", m.EquivalentReason)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressSelfReferentialOverwrite(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool) bool {
+	seen := false
+	seen = seen || g()
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("an overwrite that reads the variable must not be suppressed: %#v", m)
+	}
+}
+
+// TestDeadStoreDoesNotSuppressWhenConditionReadsVariable is the
+// counter-example that motivated the condition restriction: the
+// original returns false, a true-initialized mutant returns true.
+func TestDeadStoreDoesNotSuppressWhenConditionReadsVariable(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f() bool {
+	seen := false
+	if seen {
+		seen = true
+	} else {
+		seen = false
+	}
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("a condition that reads the variable must not be suppressed: %#v", m)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressIfWithoutElse(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool, h func() bool) bool {
+	seen := false
+	if g() {
+		seen = h()
+	}
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("a path that skips the overwrite keeps the initializer live: %#v", m)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressElseIfChain(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool, h func() bool) bool {
+	seen := false
+	if g() {
+		seen = h()
+	} else if h() {
+		seen = g()
+	}
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("an else-if chain must not be suppressed: %#v", m)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressMultiStatementBranch(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool) bool {
+	seen := false
+	if g() {
+		_ = seen
+		seen = g()
+	} else {
+		seen = g()
+	}
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("a branch that reads the variable first must not be suppressed: %#v", m)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressWithInitStatement(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool) bool {
+	seen := false
+	if ok := g(); ok {
+		seen = g()
+	} else {
+		seen = g()
+	}
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("an if with an Init statement must not be suppressed: %#v", m)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressNonAdjacentOverwrite(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool) bool {
+	seen := false
+	_ = seen
+	seen = g()
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("an overwrite that is not the very next statement must not be suppressed: %#v", m)
+	}
+}
+
+// TestDeadStoreDoesNotSuppressLoopFlag guards against the shape that
+// looks like a dead store but is not: a flag set only on some paths
+// keeps its initializer live on the others.
+func TestDeadStoreDoesNotSuppressLoopFlag(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(xs []int) bool {
+	found := false
+	for _, x := range xs {
+		if x == 0 {
+			found = true
+		}
+	}
+	return found
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("a conditionally set flag must not be suppressed: %#v", m)
+	}
+}
+
+func TestDeadStoreDoesNotSuppressNestedShadowingDeclaration(t *testing.T) {
+	ms := discoverBoolFixture(t, `package p
+
+func f(g func() bool) bool {
+	seen := false
+	{
+		seen := g()
+		_ = seen
+	}
+	return seen
+}
+`)
+	if m := boolLiteralMutantAtLine(t, ms, 4); m.EquivalentReason != "" {
+		t.Fatalf("a nested shadowing declaration is not an overwrite: %#v", m)
+	}
+}
+
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
 	d := t.TempDir()
 	src := []byte(`package p

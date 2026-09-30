@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v7"
+const SemanticsVersion = "mutation-judge-operators/v8"
 
 type Options struct {
 	Operators        map[string]bool
@@ -99,6 +99,14 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// see detectGuardedComparison's doc comment for exactly what
 	// pattern this requires.
 	equivalentGuard := map[*ast.BinaryExpr]string{}
+	// deadStoreLit maps a `:=` short variable declaration's own boolean
+	// literal RHS (*ast.Ident, "true" or "false") to the human-readable
+	// reason it's provably equivalent under boolean-literal mutation,
+	// populated by the *ast.BlockStmt case below before ast.Inspect's
+	// pre-order walk reaches that same nested node (that literal is a
+	// descendant of the very declaration statement inside the block
+	// being scanned) -- see detectDeadStoreLiteral's doc comment.
+	deadStoreLit := map[*ast.Ident]string{}
 	// loopProgressStmt marks exactly the statements that are a for
 	// loop's own Post clause (`for init; cond; post { ... }`),
 	// populated by the *ast.ForStmt case below before ast.Inspect's
@@ -180,7 +188,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					repl = "false"
 				}
 				add("boolean", "MJ-BOOL-LITERAL", x.Pos(), x.End(), repl,
-					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant", "")
+					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant", deadStoreLit[x])
 			}
 		case *ast.IfStmt:
 			if opts.Operators["errorreturn"] {
@@ -210,6 +218,15 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			// (possibly-marked) boundary mutant once ast.Inspect's
 			// pre-order walk reaches the nested comparison node.
 			detectGuardedComparison(x, src, fset, equivalentGuard)
+		case *ast.BlockStmt:
+			// Boolean-literal equivalent-mutant suppression: this only
+			// ever populates deadStoreLit, never calls add() directly --
+			// the *ast.Ident case above is what actually emits the
+			// (possibly-marked) boolean-literal mutant once ast.Inspect's
+			// pre-order walk reaches the nested literal node, which is a
+			// descendant of this very block (see detectDeadStoreLiteral's
+			// doc comment for exactly which pattern this requires).
+			detectDeadStoreLiteral(x.List, src, fset, deadStoreLit)
 		case *ast.CaseClause:
 			if opts.Operators["switch"] && len(x.Body) > 0 {
 				label := "default"
@@ -556,6 +573,163 @@ func unwrapParen(e ast.Expr) ast.Expr {
 		}
 		e = p.X
 	}
+}
+
+// detectDeadStoreLiteral implements the boolean operator's second
+// conservative equivalent-mutant suppression: a `:=` declaration whose
+// literal initializer is provably overwritten before it can be read,
+// so flipping true/false there is unobservable. It recognizes exactly
+// two shapes, each requiring the overwrite to be the very next
+// statement in the same statement list.
+//
+// Straight-line overwrite:
+//
+//	seen := false
+//	seen = probe(x)
+//
+// Exhaustive if/else overwrite:
+//
+//	seen := false
+//	if probe(x) {
+//		seen = true
+//	} else {
+//		seen = false
+//	}
+//
+// In both, the value of seen after that next statement was decided
+// entirely by an assignment that never reads seen, and which
+// assignment ran was decided by a condition that never reads seen
+// either -- so the original and the mutant are in the same state the
+// moment the next statement finishes, in any program state, not just
+// the ones the current suite reaches.
+//
+// This is deliberately as narrow as detectGuardedComparison, for the
+// same reason: every restriction below exists to rule out a way the
+// proof could be wrong, not for simplicity. Anything not recognized --
+// an else-if chain, a multi-statement branch, a read anywhere before
+// the overwrite, a path that leaves the variable untouched, an
+// overwrite that is not the very next statement -- is left as an
+// ordinary mutant, generated and executed exactly as before. In
+// particular this is NOT a general liveness analysis: a variable that
+// is only overwritten on some paths (a loop that sets a flag when it
+// finds something, say) keeps its initializer live on the other
+// paths and is never matched.
+//
+// Restrictions:
+//
+//   - The declaration must be `:=` with exactly one identifier on the
+//     left (not `_`) and a bare `true`/`false` identifier as the whole
+//     right-hand side.
+//   - The overwrite must be the immediately following statement of the
+//     same statement list, so nothing can run, and no label or goto
+//     target can intervene, between the declaration and it.
+//   - An overwrite is a plain `v = <expr>` (never `:=`, which would
+//     shadow, and never a compound assignment) with exactly one
+//     variable on each side, where <expr> does not mention v by name
+//     (see referencesIdent): `v = v || c` reads the very value the
+//     proof needs to be unreadable.
+//   - For the if/else shape, the if must have no init clause (it could
+//     introduce or shadow a variable), its condition must not mention
+//     v, and it must have a plain `else` block -- never an `else if`
+//     chain and never a missing else, since a path that skips both
+//     assignments would still hold the original literal. Both blocks
+//     must be exactly one statement, an overwrite as defined above;
+//     as with detectGuardedComparison's single-statement body there is
+//     no attempt to look into longer branches, where an earlier
+//     statement could read v first.
+//
+// The condition restriction is what makes the if/else proof hold. If
+// the condition read v, the two runs could take different branches: with
+// `seen := false; if seen { seen = true } else { seen = false }` the
+// original ends false and a true-initialized mutant ends true.
+func detectDeadStoreLiteral(list []ast.Stmt, src []byte, fset *token.FileSet, out map[*ast.Ident]string) {
+	for i := 0; i+1 < len(list); i++ {
+		decl, ok := list[i].(*ast.AssignStmt)
+		if !ok || decl.Tok != token.DEFINE || len(decl.Lhs) != 1 || len(decl.Rhs) != 1 {
+			continue
+		}
+		v, ok := decl.Lhs[0].(*ast.Ident)
+		if !ok || v.Name == "_" {
+			continue
+		}
+		lit, ok := decl.Rhs[0].(*ast.Ident)
+		if !ok || (lit.Name != "true" && lit.Name != "false") {
+			continue
+		}
+		switch next := list[i+1].(type) {
+		case *ast.AssignStmt:
+			if !isOverwrite(next, v.Name) {
+				continue
+			}
+			out[lit] = fmt.Sprintf(
+				"the next statement (line %d) reassigns %s without reading it, so this initializer's literal value can never be observed",
+				fset.Position(next.Pos()).Line, v.Name,
+			)
+		case *ast.IfStmt:
+			if next.Init != nil || referencesIdent(next.Cond, v.Name) {
+				continue
+			}
+			elseBlock, ok := next.Else.(*ast.BlockStmt)
+			if !ok {
+				continue
+			}
+			if !isSoleOverwrite(next.Body, v.Name) || !isSoleOverwrite(elseBlock, v.Name) {
+				continue
+			}
+			out[lit] = fmt.Sprintf(
+				"the next statement (line %d, if %q) reassigns %s without reading it on every branch, so this initializer's literal value can never be observed",
+				fset.Position(next.Pos()).Line, compact(source(src, fset, next.Cond.Pos(), next.Cond.End())), v.Name,
+			)
+		}
+	}
+}
+
+// isOverwrite reports whether assign is a plain (non-shadowing,
+// non-compound) single assignment `name = <expr>` whose right-hand
+// side does not itself reference name -- see detectDeadStoreLiteral
+// for why both restrictions matter.
+func isOverwrite(assign *ast.AssignStmt, name string) bool {
+	if assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return false
+	}
+	lhs, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok || lhs.Name != name {
+		return false
+	}
+	return !referencesIdent(assign.Rhs[0], name)
+}
+
+// isSoleOverwrite reports whether block is exactly one statement, and
+// that statement is an isOverwrite of name.
+func isSoleOverwrite(block *ast.BlockStmt, name string) bool {
+	if len(block.List) != 1 {
+		return false
+	}
+	assign, ok := block.List[0].(*ast.AssignStmt)
+	return ok && isOverwrite(assign, name)
+}
+
+// referencesIdent reports whether e contains an *ast.Ident named name
+// anywhere in its subtree. Purely syntactic, like sameOperand: it does
+// not need type information, only "does this expression mention this
+// name at all", answered conservatively (matching by name, not by
+// resolved identity) so a false negative here would require an
+// entirely unrelated, differently-scoped variable that happens to
+// share the name -- a case detectDeadStoreLiteral's single-statement,
+// single-assignment scope gives no room for.
+func referencesIdent(e ast.Expr, name string) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func arithmeticReplacement(op token.Token) (string, bool) {

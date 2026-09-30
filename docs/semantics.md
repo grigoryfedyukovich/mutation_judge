@@ -67,7 +67,7 @@ This operator needs two loop-safety exclusions of its own, both reusing the same
 
 ## Conservative equivalent-mutant suppression
 
-The boundary operator recognizes exactly one locally provable equivalent-mutant shape, first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:
+Two locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:
 
 ```go
 if a.Field != b.Field {
@@ -87,6 +87,35 @@ The match is deliberately narrow, and every restriction exists specifically to r
 See `internal/frontend.detectGuardedComparison` for the implementation and `internal/frontend.isSideEffectFreeOperand`/`sameOperand` for the two structural checks it relies on. A comparison that doesn't match this exact shape is generated and executed as an ordinary mutant, same as before this suppression existed -- a missed equivalent mutant is a survivor a human can review; a wrongly suppressed one would be a false claim of certainty printed in a report, which is the failure mode this feature exists to avoid, not merely reduce.
 
 A suppressed mutant is marked `EQUIVALENT` (see the verdict table above), carries the specific guard it was dominated by as its `equivalent_reason`, and is never executed at all -- not run and discarded, genuinely skipped, since there is no test outcome that could change a proof already established at discovery time. Confirming this against Mutation Judge's own source finds the exact case `docs/evaluation.md` originally described by hand: the `sort.Slice` comparator inside `internal/frontend.Discover` is now suppressed at both of its guarded comparisons.
+
+### Dead-store boolean initializer
+
+The boolean operator's literal mutation (`MJ-BOOL-LITERAL`) is suppressed for a `:=` declaration whose literal initializer is overwritten before it can be read. Two shapes, each requiring the overwrite to be the very next statement in the same statement list:
+
+```go
+seen := false
+seen = probe(x)
+```
+
+```go
+seen := false
+if probe(x) {
+	seen = true
+} else {
+	seen = false
+}
+```
+
+After the next statement, the variable's value was decided entirely by an assignment that never reads it, and which assignment ran was decided by a condition that never reads it either, so the original and the mutant are in the same state in any program state. Every restriction exists to keep that proof from being wrong:
+
+- The declaration is `:=` with one non-blank identifier and a bare `true`/`false` as the entire right-hand side.
+- The overwrite is the immediately following statement, so nothing (including a label or goto target) can intervene.
+- An overwrite is a plain `v = <expr>` (not `:=`, not a compound assignment) whose `<expr>` does not mention `v`.
+- For the if/else shape: no init statement; the condition must not mention `v` (otherwise the two runs could take different branches -- `seen := false; if seen { seen = true } else { seen = false }` ends `false` originally and `true` when mutated); a plain `else` block (no `else if`, no missing else, since a path skipping both assignments still holds the literal); both blocks exactly one overwrite statement.
+
+This is not a liveness analysis. A flag set only on some paths (`found := false` set to `true` inside a loop's `if`) is never matched, because its initializer is live on the other paths. Anything not matching exactly is generated and executed as an ordinary mutant. A suppressed mutant is marked `EQUIVALENT`, carries the reason (citing the overwriting statement's line and condition) as `equivalent_reason`, and is never executed. See `internal/frontend.detectDeadStoreLiteral`.
+
+Not implemented: a discarded return value whose mutation never reaches an assertion. That needs every in-module call site of the function, so it is a heavier analysis and easier to get wrong.
 
 ## Trust and reproducibility
 
