@@ -980,6 +980,91 @@ func TestRecordAndTrendEndToEnd(t *testing.T) {
 	}
 }
 
+// TestAssertionAttributionEndToEnd proves responsible_assertions through
+// the whole pipeline, on the two outcomes that matter (see the fixture's
+// package comment): a KILLED mutant names the assertion that fired, and
+// a SURVIVED mutant in a test that only compared the error -- the
+// google/uuid TestNullUUIDScan shape -- carries no assertion at all,
+// rather than one guessed from the test source.
+func TestAssertionAttributionEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	run := func(format string) []byte {
+		t.Helper()
+		cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", format, "./tests/integration/testdata/assertions")
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command failed: %v\n%s", err, out)
+		}
+		return out
+	}
+
+	out := run("json")
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				Span struct {
+					File string `json:"file"`
+				} `json:"span"`
+			} `json:"mutation"`
+			Verdict     string   `json:"verdict"`
+			Responsible []string `json:"responsible_tests"`
+			Assertions  []struct {
+				Test    string `json:"test"`
+				File    string `json:"file"`
+				Line    int    `json:"line"`
+				Message string `json:"message"`
+			} `json:"responsible_assertions"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	if len(report.Results) != 2 {
+		t.Fatalf("want exactly 2 mutants (Over, Scan), got %d:\n%s", len(report.Results), out)
+	}
+	var sawKilled, sawSurvived bool
+	for _, r := range report.Results {
+		file := filepath.Base(r.Mutation.Span.File)
+		switch file {
+		case "over.go":
+			sawKilled = true
+			if r.Verdict != "KILLED" {
+				t.Fatalf("over.go mutant: verdict %s, want KILLED:\n%s", r.Verdict, out)
+			}
+			if len(r.Responsible) != 1 || r.Responsible[0] != "TestOverAtLimit" {
+				t.Fatalf("over.go mutant: responsible_tests = %v, want [TestOverAtLimit]", r.Responsible)
+			}
+			if len(r.Assertions) != 1 {
+				t.Fatalf("over.go mutant: want exactly 1 responsible assertion, got %#v", r.Assertions)
+			}
+			a := r.Assertions[0]
+			if a.Test != "TestOverAtLimit" || a.File != "over_test.go" || a.Line <= 0 || !strings.Contains(a.Message, "want false") {
+				t.Fatalf("over.go mutant: assertion not attributed to the firing t.Errorf: %#v", a)
+			}
+		case "scan.go":
+			sawSurvived = true
+			if r.Verdict != "SURVIVED" {
+				t.Fatalf("scan.go mutant: verdict %s, want SURVIVED (the test never reads .Valid):\n%s", r.Verdict, out)
+			}
+			if len(r.Assertions) != 0 || len(r.Responsible) != 0 {
+				t.Fatalf("scan.go mutant: a survivor must carry no tests or assertions, got %v / %#v", r.Responsible, r.Assertions)
+			}
+		default:
+			t.Fatalf("unexpected mutant file %q", r.Mutation.Span.File)
+		}
+	}
+	if !sawKilled || !sawSurvived {
+		t.Fatalf("expected one KILLED (over.go) and one SURVIVED (scan.go) mutant:\n%s", out)
+	}
+
+	text := string(run("text"))
+	if !strings.Contains(text, "assertion: TestOverAtLimit: over_test.go:") || !strings.Contains(text, "want false") {
+		t.Fatalf("text report should show the killing assertion:\n%s", text)
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

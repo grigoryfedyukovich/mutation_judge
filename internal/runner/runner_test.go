@@ -460,6 +460,30 @@ func TestExtractAssertionsNilWhenNoFailedTests(t *testing.T) {
 	}
 }
 
+// TestExtractAssertionsIgnoresIndentedSubtestControlLines covers what
+// isTestControlLine exists for: subtests indent their `--- FAIL:` line,
+// so the unindented-line guard alone would let it through as if it were
+// a `file.go:N:` log line. Only the real t.Errorf inside the subtest may
+// be attributed, and it must be attributed to the subtest, not the parent.
+func TestExtractAssertionsIgnoresIndentedSubtestControlLines(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "p", Test: "TestP"},
+		{Action: "run", Package: "p", Test: "TestP/case"},
+		{Action: "output", Package: "p", Test: "TestP/case", Output: "    p_test.go:12: got 1, want 2\n"},
+		{Action: "output", Package: "p", Test: "TestP/case", Output: "    --- FAIL: TestP/case (0.00s)\n"},
+		{Action: "fail", Package: "p", Test: "TestP/case"},
+		{Action: "output", Package: "p", Test: "TestP", Output: "--- FAIL: TestP (0.00s)\n"},
+		{Action: "fail", Package: "p", Test: "TestP"},
+	}
+	got := extractAssertions(events, []string{"TestP", "TestP/case"})
+	if len(got) != 1 {
+		t.Fatalf("want exactly the one real assertion, got %#v", got)
+	}
+	if got[0].Test != "TestP/case" || got[0].File != "p_test.go" || got[0].Line != 12 || got[0].Message != "got 1, want 2" {
+		t.Fatalf("unexpected assertion: %#v", got[0])
+	}
+}
+
 func TestParseTestingLogLineRejectsControlAndUnindented(t *testing.T) {
 	if _, _, _, ok := parseTestingLogLine("=== RUN   TestF\n"); ok {
 		t.Fatal("control line must not parse")
