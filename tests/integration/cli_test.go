@@ -1065,6 +1065,45 @@ func TestAssertionAttributionEndToEnd(t *testing.T) {
 	}
 }
 
+// TestStatementDeletionSurvivesWhenTestOnlyChecksError is the uuid
+// finding end to end: TestScan covers Scan, yet deleting the
+// `f.Valid = n > 0` assignment survives because the test only compares
+// the returned error. Coverage cannot see that gap; the statement
+// operator makes it a survivor with a description naming the statement.
+func TestStatementDeletionSurvivesWhenTestOnlyChecksError(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "statement", "--format", "json", "./tests/integration/testdata/assertions")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				RuleID      string `json:"rule_id"`
+				Original    string `json:"original"`
+				Replacement string `json:"replacement"`
+			} `json:"mutation"`
+			Verdict string `json:"verdict"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("want exactly 1 statement mutant (Scan's f.Valid assignment), got %d:\n%s", len(report.Results), out)
+	}
+	r := report.Results[0]
+	if r.Mutation.RuleID != "MJ-STMT-DELETE-ASSIGN" || r.Mutation.Original != "f.Valid = n > 0" || r.Mutation.Replacement != "" {
+		t.Fatalf("unexpected mutant: %#v", r.Mutation)
+	}
+	if r.Verdict != "SURVIVED" {
+		t.Fatalf("verdict %s, want SURVIVED (the test never reads .Valid):\n%s", r.Verdict, out)
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

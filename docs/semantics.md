@@ -65,6 +65,21 @@ A seventh opt-in operator, **literal**, mutates a `*ast.BasicLit`. For an intege
 
 This operator needs two loop-safety exclusions of its own, both reusing the same `for`-statement condition/post tracking `relational` and `assignment` already build, and both apply to string literals exactly as they apply to integer ones (the underlying map is keyed by `*ast.BasicLit` regardless of kind): (1) inside a `for` loop's own post clause, a literal is exactly as dangerous as the operator it's an operand of -- `i -= 1` mutated to `i -= 0` removes the loop's only progress toward termination, the identical failure mode `assignment`'s own post-clause exclusion prevents at the operator level, just reached through the literal operand instead; (2) inside a `for` loop's own condition, ordinarily a literal shift is just as safe as a `boundary` shift (both just move a threshold by a bounded amount), but this pass cannot rule out an exotic non-monotonic loop whose termination depends on hitting an exact value (`for i != 10 { i *= 2 }`, or equally `for s != "done" { ... }`), so literal mutation is excluded from a loop's condition too, matching `relational`'s scope exactly rather than drawing a finer, harder-to-verify line. A loop's *init* value carries neither risk and is mutated normally -- it can only change how many iterations run, never whether the loop terminates at all.
 
+### Statement deletion
+
+The opt-in **statement** operator deletes one bare statement (`MJ-STMT-DELETE-ASSIGN`, `MJ-STMT-DELETE-CALL`). It exists for the gap coverage cannot see: a test that runs a line but never asserts on its effect. A `TestScan` that only compares the returned error "covers" `f.Valid = n > 0` and still lets its deletion survive.
+
+Deletable: an assignment or `++`/`--` whose every target is a field selector, index expression, or pointer dereference, and a call statement. Every exclusion exists to avoid a guaranteed-uninformative verdict or an equivalence the tool cannot decide:
+
+- **Never a bare identifier or `:=`.** Stores to locals and named results are frequently dead stores (see below); deleting one would spend a mutant on an equivalence not yet decided. `:=` would orphan every later use.
+- **Calls that hang or end the run** are not deleted: `Lock`/`Unlock`/`RLock`/`RUnlock`, `Done`, `Wait`, `Signal`, `Broadcast`, `Acquire`/`Release`, `Close*`, `Shutdown`, `Cancel`/`cancel`, `Exit`, `Fatal*`, `Panic*`, `FailNow`, `Skip*`, and the builtins `panic`, `close`, `recover`, `print`, `println`; also `wg.Add(<integer literal>)`, whose deletion only panics on the matching `Done`. This is the same timeout-safety rule the `loop` and `channel` operators follow.
+- **Logging calls** (`log.*`, `slog.*`, and methods named `Print*`, `Debug*`, `Info*`, `Warn*`, `Log*`) are not deleted: nobody asserts on them, so each would only survive.
+- **Anything inside a `go` statement**, and anything inside a `for` loop whose termination it might influence: every statement in a loop with no condition or no post clause, and in a counted loop any statement mentioning a name from the loop header. `range` loops are bounded by their operand and are unaffected.
+- **Anything whose deletion would leave a local variable or an imported package with no remaining read**, which the compiler rejects as a zero-information `INVALID`. Parameters are exempt from that check; package-level variables are treated like locals, which can only skip a legal deletion, never permit an illegal one.
+- Only statements that sit directly in a statement list are considered, never a `for`/`if`/`switch` init or post clause.
+
+Calls whose effect the operator cannot see (a custom wrapper that signals another goroutine, say) can still produce a `TIMEOUT`, reported as such.
+
 ## Conservative equivalent-mutant suppression
 
 Two locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:

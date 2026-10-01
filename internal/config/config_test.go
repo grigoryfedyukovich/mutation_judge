@@ -151,7 +151,7 @@ func TestYAMLEmptyValueWithNoBlockListIsStillAnError(t *testing.T) {
 
 func TestValidateAcceptsAllKnownOperators(t *testing.T) {
 	c := Default()
-	c.Operators = []string{"boundary", "boolean", "arithmetic", "errorreturn", "switch", "loop", "channel", "assignment", "relational", "literal"}
+	c.Operators = []string{"boundary", "boolean", "arithmetic", "errorreturn", "switch", "loop", "channel", "assignment", "relational", "literal", "statement"}
 	if err := Validate(c); err != nil {
 		t.Fatalf("expected all ten known operators to validate, got: %v", err)
 	}

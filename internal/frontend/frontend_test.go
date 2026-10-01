@@ -888,6 +888,283 @@ func f(g func() bool) bool {
 	}
 }
 
+// discoverStatements runs discovery with only the statement operator
+// enabled and returns the statements it would delete, as the trimmed
+// original text of each deleted span.
+func discoverStatements(t *testing.T, src string) []string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"statement": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range ms {
+		if m.Operator != "statement" || m.Replacement != "" {
+			t.Fatalf("unexpected mutant from the statement operator: %#v", m)
+		}
+		out = append(out, m.Original)
+	}
+	return out
+}
+
+func wantDeleted(t *testing.T, src string, want ...string) {
+	t.Helper()
+	got := discoverStatements(t, src)
+	if len(got) != len(want) {
+		t.Fatalf("deleted %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("deleted %q, want %q", got, want)
+		}
+	}
+}
+
+// The uuid shape: Scan assigns .Valid and a test that only checks the
+// error would never notice the assignment is gone.
+func TestStatementDeletesFieldAssignment(t *testing.T) {
+	wantDeleted(t, `package p
+
+type Field struct{ Valid bool }
+
+func Scan(n int) (Field, error) {
+	var f Field
+	f.Valid = n > 0
+	return f, nil
+}
+`, "f.Valid = n > 0")
+}
+
+func TestStatementDeletesCallAndIncDecOnFields(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ n int; seen map[int]bool }
+
+func (s *S) mark(int) {}
+
+func (s *S) Do(k int) {
+	s.mark(k)
+	s.n++
+	s.seen[k] = true
+}
+`, "s.mark(k)", "s.n++", "s.seen[k] = true")
+}
+
+func TestStatementIsOffByDefault(t *testing.T) {
+	d := t.TempDir()
+	src := "package p\n\ntype S struct{ n int }\n\nfunc f(s *S) { s.n = 1 }\n"
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"boundary": true, "boolean": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Operator == "statement" {
+			t.Fatalf("statement operator ran without being enabled: %#v", m)
+		}
+	}
+}
+
+func TestStatementNeverDeletesBareIdentifierOrDefine(t *testing.T) {
+	wantDeleted(t, `package p
+
+func f() (r int) {
+	x := 1
+	x = 2
+	r = x
+	_ = x
+	return
+}
+`)
+}
+
+// Lock/wait/close/terminate primitives and logging are excluded: the
+// first group hangs or ends the run (TIMEOUT), the second only ever
+// survives.
+func TestStatementSkipsUnsafeAndLoggingCalls(t *testing.T) {
+	wantDeleted(t, `package p
+
+import (
+	"fmt"
+	"log"
+	"sync"
+)
+
+type S struct {
+	mu sync.Mutex
+	wg sync.WaitGroup
+	ch chan int
+}
+
+func (s *S) Do() {
+	s.mu.Lock()
+	s.mu.Unlock()
+	s.wg.Add(1)
+	s.wg.Done()
+	s.wg.Wait()
+	close(s.ch)
+	log.Printf("x")
+	fmt.Println("x")
+	panic("x")
+}
+`)
+}
+
+func TestStatementKeepsAddWithNonLiteralArgument(t *testing.T) {
+	wantDeleted(t, `package p
+
+type Set struct{}
+
+func (Set) Add(string) {}
+
+func f(s Set, k string) {
+	s.Add(k)
+}
+`, "s.Add(k)")
+}
+
+func TestStatementSkipsGoStatementBodies(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ n int }
+
+func (s *S) work() {}
+
+func (s *S) Run() {
+	go func() {
+		s.n = 1
+		s.work()
+	}()
+}
+`)
+}
+
+// A loop that ends because of something in its body must not lose it:
+// deleting `s.step()` from `for !s.done() { s.step() }` never returns.
+func TestStatementSkipsConditionLoopBodies(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ n int }
+
+func (s *S) done() bool { return s.n > 3 }
+func (s *S) step()      { s.n++ }
+
+func (s *S) Run() {
+	for !s.done() {
+		s.step()
+	}
+	for {
+		s.n = 0
+		break
+	}
+}
+`)
+}
+
+func TestStatementCountedLoopSkipsHeaderNamesOnly(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ n, total int }
+
+func (s *S) Run(k int) {
+	for s.n = 0; s.n < k; s.n++ {
+		s.total = s.total + 1
+	}
+}
+`)
+	wantDeleted(t, `package p
+
+type S struct{ total int }
+
+func (s *S) Run(k int) {
+	for i := 0; i < k; i++ {
+		s.total = s.total + i
+	}
+}
+`)
+	wantDeleted(t, `package p
+
+type S struct{ total int }
+
+func (s *S) Run(k int) {
+	for i := 0; i < k; i++ {
+		s.total = 1
+	}
+}
+`, "s.total = 1")
+}
+
+func TestStatementSkipsWhenDeletionOrphansAVariable(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ v int }
+
+func compute() int { return 1 }
+
+func (s *S) Do() {
+	y := compute()
+	s.v = y
+}
+`)
+	wantDeleted(t, `package p
+
+type S struct{ v, w int }
+
+func compute() int { return 1 }
+
+func (s *S) Do() {
+	y := compute()
+	s.v = y
+	s.w = y
+}
+`, "s.v = y", "s.w = y")
+}
+
+func TestStatementSkipsWhenDeletionOrphansAnImport(t *testing.T) {
+	wantDeleted(t, `package p
+
+import "strings"
+
+type S struct{ v string }
+
+func (s *S) Do() {
+	s.v = strings.ToUpper("a")
+}
+`)
+	wantDeleted(t, `package p
+
+import "strings"
+
+type S struct{ v string }
+
+func (s *S) Do() string {
+	s.v = strings.ToUpper("a")
+	return strings.ToLower(s.v)
+}
+`, `s.v = strings.ToUpper("a")`)
+}
+
+func TestStatementIgnoresInitAndPostClauses(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ err error }
+
+func f() error { return nil }
+
+func (s *S) Do() {
+	if s.err = f(); s.err != nil {
+		return
+	}
+}
+`)
+}
+
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
 	d := t.TempDir()
 	src := []byte(`package p

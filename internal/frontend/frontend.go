@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v8"
+const SemanticsVersion = "mutation-judge-operators/v9"
 
 type Options struct {
 	Operators        map[string]bool
@@ -140,6 +140,42 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// 100%-certain, zero-information INVALID verdict on every single
 	// import in every file it ever ran against.
 	importPathLit := map[*ast.BasicLit]bool{}
+	// stmtNoDelete marks statements the statement operator must never
+	// delete because the deletion could hang or is unsafe to reason
+	// about: anything inside a `go` statement, and anything inside a
+	// for loop whose termination the statement might influence (see
+	// markLoopStatements). Populated by the *ast.ForStmt and
+	// *ast.GoStmt cases before ast.Inspect's pre-order walk reaches
+	// the nested statements.
+	stmtNoDelete := map[ast.Stmt]bool{}
+	// uses is only built when the statement operator is enabled.
+	var uses *useIndex
+	if opts.Operators["statement"] {
+		uses = newUseIndex(f)
+	}
+	// deleteStatements offers each deletable statement in list to add.
+	// Only statements that sit directly in a statement list are
+	// considered, never a for/if/switch Init or Post clause.
+	deleteStatements := func(list []ast.Stmt) {
+		if !opts.Operators["statement"] {
+			return
+		}
+		for _, st := range list {
+			if stmtNoDelete[st] || !deletableStatement(st) || uses.orphans(st) {
+				continue
+			}
+			text := clipStatement(source(src, fset, st.Pos(), st.End()))
+			if call, ok := callOf(st); ok {
+				add("statement", "MJ-STMT-DELETE-CALL", st.Pos(), st.End(), "",
+					fmt.Sprintf("delete call statement %s", text),
+					fmt.Sprintf("add a test that observes the effect of %s; if nothing observable depends on it, the call may be removable", clipStatement(source(src, fset, call.Pos(), call.End()))), "")
+				continue
+			}
+			add("statement", "MJ-STMT-DELETE-ASSIGN", st.Pos(), st.End(), "",
+				fmt.Sprintf("delete assignment %s", text),
+				"add an assertion on the state this statement sets; a test that only checks the returned error will not notice it is gone", "")
+		}
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.BinaryExpr:
@@ -227,7 +263,16 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			// descendant of this very block (see detectDeadStoreLiteral's
 			// doc comment for exactly which pattern this requires).
 			detectDeadStoreLiteral(x.List, src, fset, deadStoreLit)
+			deleteStatements(x.List)
+		case *ast.CommClause:
+			deleteStatements(x.Body)
+		case *ast.GoStmt:
+			// Recorded unconditionally, like loopProgressStmt: whatever
+			// runs on another goroutine may be what unblocks a waiter,
+			// so deleting any of it risks an uninformative TIMEOUT.
+			markAllStatements(x.Call, stmtNoDelete)
 		case *ast.CaseClause:
+			deleteStatements(x.Body)
 			if opts.Operators["switch"] && len(x.Body) > 0 {
 				label := "default"
 				if len(x.List) > 0 {
@@ -238,6 +283,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					fmt.Sprintf("add a test that exercises case %s and would fail if that case were missing", label), "")
 			}
 		case *ast.ForStmt:
+			markLoopStatements(x, stmtNoDelete)
 			if x.Post != nil {
 				// Recorded unconditionally, regardless of whether the
 				// loop operator itself is enabled: this is the
@@ -730,6 +776,270 @@ func referencesIdent(e ast.Expr, name string) bool {
 		return true
 	})
 	return found
+}
+
+// The statement operator deletes one bare statement. It is the only
+// operator that can reproduce "the test covers this line but never
+// asserts on what it does": a field assignment or a call whose effect
+// no test observes survives deletion no matter how the line is
+// covered. Every restriction below exists to keep a deletion from
+// producing a guaranteed-uninformative verdict (INVALID or TIMEOUT)
+// or from silently duplicating a proof the tool cannot yet make.
+//
+// Deletable statements:
+//
+//   - an assignment or ++/-- whose every target is a field selector,
+//     index expression, or pointer dereference. Never a bare
+//     identifier: stores to locals and named results are very often
+//     dead stores (see detectDeadStoreLiteral), and deleting one would
+//     spend a mutant on an equivalence this tool cannot decide.
+//     `:=` is never deleted; it would orphan every later use.
+//   - a call statement, except the exclusions in deletableCall.
+//
+// Never deleted: anything inside a `go` statement, anything inside a
+// for loop whose termination it might influence (markLoopStatements),
+// and any statement whose deletion would leave a local variable or an
+// imported package with no remaining use (useIndex.orphans), which
+// the compiler rejects.
+func deletableStatement(st ast.Stmt) bool {
+	switch x := st.(type) {
+	case *ast.AssignStmt:
+		if x.Tok == token.DEFINE {
+			return false
+		}
+		for _, l := range x.Lhs {
+			switch unwrapParen(l).(type) {
+			case *ast.SelectorExpr, *ast.IndexExpr, *ast.StarExpr:
+			default:
+				return false
+			}
+		}
+		return len(x.Lhs) > 0
+	case *ast.IncDecStmt:
+		switch unwrapParen(x.X).(type) {
+		case *ast.SelectorExpr, *ast.IndexExpr, *ast.StarExpr:
+			return true
+		}
+		return false
+	case *ast.ExprStmt:
+		call, ok := x.X.(*ast.CallExpr)
+		return ok && deletableCall(call)
+	}
+	return false
+}
+
+func callOf(st ast.Stmt) (*ast.CallExpr, bool) {
+	e, ok := st.(*ast.ExprStmt)
+	if !ok {
+		return nil, false
+	}
+	call, ok := e.X.(*ast.CallExpr)
+	return call, ok
+}
+
+// unsafeCallNames are call names whose deletion tends to hang or end
+// the run rather than change a result: lock/wait/signal primitives,
+// closers, cancellation, and process/test termination. Deleting
+// `mu.Unlock()` or `wg.Done()` produces a TIMEOUT, which is the
+// uninformative verdict the operators avoid by construction.
+var unsafeCallNames = map[string]bool{
+	"Lock": true, "Unlock": true, "RLock": true, "RUnlock": true, "TryLock": true, "TryRLock": true,
+	"Done": true, "Wait": true, "Signal": true, "Broadcast": true, "Acquire": true, "Release": true,
+	"Close": true, "CloseSend": true, "CloseRead": true, "CloseWrite": true, "Shutdown": true,
+	"Cancel": true, "cancel": true,
+	"Exit": true, "Fatal": true, "Fatalf": true, "Fatalln": true, "Panic": true, "Panicf": true, "Panicln": true,
+	"FailNow": true, "Skip": true, "Skipf": true, "SkipNow": true,
+	"panic": true, "close": true, "recover": true, "print": true, "println": true,
+}
+
+// loggingCallNames are excluded for noise rather than safety: nobody
+// asserts on log output, so every such deletion would just survive.
+var loggingCallNames = map[string]bool{
+	"Debug": true, "Debugf": true, "Info": true, "Infof": true, "Warn": true, "Warnf": true,
+	"Log": true, "Logf": true, "Print": true, "Printf": true, "Println": true,
+}
+
+func deletableCall(call *ast.CallExpr) bool {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return !unsafeCallNames[fn.Name]
+	case *ast.SelectorExpr:
+		name := fn.Sel.Name
+		if unsafeCallNames[name] || loggingCallNames[name] {
+			return false
+		}
+		// wg.Add(1): deleting it panics on the matching Done -- a fast
+		// but meaningless kill.
+		if name == "Add" && len(call.Args) == 1 {
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
+				return false
+			}
+		}
+		if base, ok := fn.X.(*ast.Ident); ok && (base.Name == "log" || base.Name == "slog") {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// markAllStatements marks every assignment, ++/--, and call statement
+// under n as undeletable.
+func markAllStatements(n ast.Node, out map[ast.Stmt]bool) {
+	ast.Inspect(n, func(c ast.Node) bool {
+		switch st := c.(type) {
+		case *ast.AssignStmt:
+			out[st] = true
+		case *ast.IncDecStmt:
+			out[st] = true
+		case *ast.ExprStmt:
+			out[st] = true
+		}
+		return true
+	})
+}
+
+// markLoopStatements marks the statements in a for loop's body that
+// must not be deleted because they may be what makes the loop end. In
+// a loop with no post clause or no condition, that is everything:
+// `for !done() { step() }` ends only because of something in the body,
+// and nothing local says what. In a counted loop
+// (`for i := 0; i < n; i++`) only a statement that mentions a name from
+// the loop header is at risk. Range loops are bounded by their operand
+// and are not marked.
+func markLoopStatements(loop *ast.ForStmt, out map[ast.Stmt]bool) {
+	if loop.Cond == nil || loop.Post == nil {
+		markAllStatements(loop.Body, out)
+		return
+	}
+	header := map[string]bool{}
+	for _, n := range []ast.Node{loop.Init, loop.Cond, loop.Post} {
+		if n == nil {
+			continue
+		}
+		ast.Inspect(n, func(c ast.Node) bool {
+			if id, ok := c.(*ast.Ident); ok {
+				header[id.Name] = true
+			}
+			return true
+		})
+	}
+	ast.Inspect(loop.Body, func(c ast.Node) bool {
+		st, ok := c.(ast.Stmt)
+		if !ok {
+			return true
+		}
+		switch st.(type) {
+		case *ast.AssignStmt, *ast.IncDecStmt, *ast.ExprStmt:
+		default:
+			return true
+		}
+		mentions := false
+		ast.Inspect(st, func(x ast.Node) bool {
+			if id, ok := x.(*ast.Ident); ok && header[id.Name] {
+				mentions = true
+			}
+			return !mentions
+		})
+		if mentions {
+			out[st] = true
+		}
+		return true
+	})
+}
+
+func clipStatement(s string) string {
+	s = compact(s)
+	if r := []rune(s); len(r) > 60 {
+		return string(r[:57]) + "..."
+	}
+	return s
+}
+
+// useIndex answers "would deleting this statement leave something
+// unused?", because Go rejects an unused local variable and an unused
+// import, and a mutant that fails to compile is a guaranteed
+// zero-information INVALID. It counts read occurrences: the bare
+// identifier on the left of an assignment, a ++/--, a range key or
+// value, and a declaring name are writes, not reads, and do not keep a
+// variable alive. Parameters are exempt from the compiler's check and
+// are ignored; package-level variables are treated like locals, which
+// is conservative (it may skip a legal deletion, never permit an
+// illegal one). Package names are recognized as unresolved selector
+// bases (`strings` in `strings.ToUpper`) without needing import
+// aliases. Built on go/ast object resolution, which is deprecated but
+// populated by the parse mode discovery uses; anything unresolved
+// simply makes the check more conservative.
+type useIndex struct {
+	reads map[*ast.Object]int
+	bases map[string]int
+}
+
+func newUseIndex(f *ast.File) *useIndex {
+	u := &useIndex{reads: map[*ast.Object]int{}, bases: map[string]int{}}
+	countUses(f, u.reads, u.bases)
+	return u
+}
+
+func countUses(root ast.Node, reads map[*ast.Object]int, bases map[string]int) {
+	write := map[*ast.Ident]bool{}
+	mark := func(e ast.Expr) {
+		if id, ok := unwrapParen(e).(*ast.Ident); ok {
+			write[id] = true
+		}
+	}
+	ast.Inspect(root, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for _, l := range x.Lhs {
+				mark(l)
+			}
+		case *ast.IncDecStmt:
+			mark(x.X)
+		case *ast.RangeStmt:
+			if x.Key != nil {
+				mark(x.Key)
+			}
+			if x.Value != nil {
+				mark(x.Value)
+			}
+		case *ast.ValueSpec:
+			for _, name := range x.Names {
+				write[name] = true
+			}
+		case *ast.SelectorExpr:
+			if id, ok := x.X.(*ast.Ident); ok && id.Obj == nil {
+				bases[id.Name]++
+			}
+		case *ast.Ident:
+			if !write[x] && x.Obj != nil && x.Obj.Kind == ast.Var {
+				reads[x.Obj]++
+			}
+		}
+		return true
+	})
+}
+
+// orphans reports whether deleting n would leave a variable or an
+// imported package with no remaining read outside n.
+func (u *useIndex) orphans(n ast.Node) bool {
+	reads := map[*ast.Object]int{}
+	bases := map[string]int{}
+	countUses(n, reads, bases)
+	for obj, c := range reads {
+		if _, param := obj.Decl.(*ast.Field); param {
+			continue
+		}
+		if u.reads[obj]-c < 1 {
+			return true
+		}
+	}
+	for name, c := range bases {
+		if u.bases[name]-c < 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func arithmeticReplacement(op token.Token) (string, bool) {
