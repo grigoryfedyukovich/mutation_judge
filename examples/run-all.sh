@@ -17,6 +17,7 @@ run() {
 run "boundary survivor" --operators boundary ./examples/boundary
 run "boundary fixed" --operators boundary ./examples/boundary_fixed
 run "boundary equivalent suppression" --operators boundary ./examples/equivalent
+run "boolean dead-store equivalence" --operators boolean ./examples/deadstore
 run "boolean attribution" --operators boolean ./examples/boolean
 run "full selected tests" --operators boolean ./examples/test_selection
 run "filtered selected tests" --operators boolean --test-run '^TestVIPDiscount$' ./examples/test_selection

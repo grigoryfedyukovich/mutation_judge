@@ -112,12 +112,11 @@ func renderSARIF(w io.Writer, r model.Report) error {
 			"coverage_known": x.CoverageKnown,
 			"covered":        x.Covered,
 		}
-		if len(x.Responsible) > 0 {
-			props["responsible_tests"] = x.Responsible
-		}
-		if len(x.Assertions) > 0 {
-			props["responsible_assertions"] = x.Assertions
-		}
+		// No responsible_tests / responsible_assertions here on purpose:
+		// SARIF carries only SURVIVED, TIMEOUT and UNKNOWN results (see
+		// sarifIncluded), and a failing test is only ever attributed to a
+		// KILLED mutant, so those properties could never be populated.
+		// The JSON report carries them.
 		results = append(results, sarifResult{
 			RuleID:  m.RuleID,
 			Level:   level,

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `examples/deadstore` (dead-store equivalence demo, wired into `examples/run-all.sh`). Removed two unreachable SARIF properties (`responsible_tests`, `responsible_assertions`): SARIF only carries SURVIVED/TIMEOUT/UNKNOWN results and a failing test is only attributed to a KILLED mutant; the JSON report still carries both. Added tests for the end-to-end `responsible_assertions` path and for indented subtest control lines.
+
 - New opt-in `condition` operator (`MJ-COND-NEGATE`): negates an `if`/`else if` condition to `!(c)`. Skips ifs in loops that could hang (no-condition/no-post `for`, header-mentioning ifs in counted loops, `range` ifs with `break`), functions with `goto` or direct self-recursion, ifs touching channels/`select`/`go`/lock-wait-close calls, constant conditions, and `!x` / `==` / `!=` conditions when `boolean` / `relational` already cover them. Bumped `SemanticsVersion` to `v10`.
 
 - New opt-in `statement` operator (`MJ-STMT-DELETE-ASSIGN`, `MJ-STMT-DELETE-CALL`): deletes a bare field/index/deref assignment, `++`/`--` on one, or a call statement. Reproduces the google/uuid finding (a test that covers `f.Valid = n > 0` but only compares the error) as a survivor. Excludes bare-identifier and `:=` stores, lock/wait/close/terminate and logging calls, statements in `go` bodies and in loops they could affect, and deletions that would orphan a local variable or import. Bumped `SemanticsVersion` to `v9`.
