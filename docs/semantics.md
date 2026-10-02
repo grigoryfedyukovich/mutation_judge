@@ -80,6 +80,16 @@ Deletable: an assignment or `++`/`--` whose every target is a field selector, in
 
 Calls whose effect the operator cannot see (a custom wrapper that signals another goroutine, say) can still produce a `TIMEOUT`, reported as such.
 
+### Condition negation
+
+The opt-in **condition** operator replaces an `if` or `else if` condition `c` with `!(c)` (`MJ-COND-NEGATE`). It answers whether each branch was actually distinguished: a suite that never makes the condition false (or never true) lets the negation survive. It never negates a `for` condition; the `loop` operator owns those. Every exclusion avoids a guaranteed-uninformative `TIMEOUT` or runaway recursion, or a duplicate execution:
+
+- **Loops.** Not in a `for` with no condition or no post clause (its exit may depend on the negated if); in a counted loop, not an if that mentions a name from the loop header; in a `range` loop, not an if containing `break` (over a channel that break may be the only exit).
+- **Functions** containing `goto` (a goto loop's exit is an if) or calling themselves by name (negating a base case recurses until the runtime kills the process). Mutual recursion is not detected.
+- **Concurrency.** Not an if whose condition or branches contain a channel send/receive, `select`, `go`, or a call excluded from statement deletion (`Lock`, `Wait`, `Done`, `Close`, ...), since negating the guard can starve a waiter forever.
+- **Constants.** Not a bare `true`/`false` condition.
+- **Duplicates.** Not a `!x` condition when `boolean` is enabled (`MJ-BOOL-DROP-NOT` yields the same program), nor a `==`/`!=` comparison when `relational` is enabled.
+
 ## Conservative equivalent-mutant suppression
 
 Two locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:

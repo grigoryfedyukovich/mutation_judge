@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v9"
+const SemanticsVersion = "mutation-judge-operators/v10"
 
 type Options struct {
 	Operators        map[string]bool
@@ -148,6 +148,12 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// *ast.GoStmt cases before ast.Inspect's pre-order walk reaches
 	// the nested statements.
 	stmtNoDelete := map[ast.Stmt]bool{}
+	// condNoNegate marks if statements the condition operator must
+	// not negate because the negation could hang, recurse forever, or
+	// starve a waiter (see the condition operator's comment). Populated
+	// by the *ast.FuncDecl, *ast.FuncLit, *ast.ForStmt and
+	// *ast.RangeStmt cases before the walk reaches the nested ifs.
+	condNoNegate := map[*ast.IfStmt]bool{}
 	// uses is only built when the statement operator is enabled.
 	var uses *useIndex
 	if opts.Operators["statement"] {
@@ -226,7 +232,21 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				add("boolean", "MJ-BOOL-LITERAL", x.Pos(), x.End(), repl,
 					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant", deadStoreLit[x])
 			}
+		case *ast.FuncDecl:
+			if x.Body != nil && (containsGoto(x.Body) || selfRecursive(x)) {
+				markIfsUnder(x.Body, condNoNegate)
+			}
+		case *ast.FuncLit:
+			if containsGoto(x.Body) {
+				markIfsUnder(x.Body, condNoNegate)
+			}
 		case *ast.IfStmt:
+			if opts.Operators["condition"] && negatableCondition(x, opts, condNoNegate) {
+				text := source(src, fset, x.Cond.Pos(), x.Cond.End())
+				add("condition", "MJ-COND-NEGATE", x.Cond.Pos(), x.Cond.End(), "!("+text+")",
+					fmt.Sprintf("negate condition %s", clipStatement(text)),
+					"add a case where this condition is true and one where it is false, and assert the different outcome of each branch", "")
+			}
 			if opts.Operators["errorreturn"] {
 				if checked, ok := notNilOperand(x.Cond); ok {
 					checkedIdent, ok := checked.(*ast.Ident)
@@ -284,6 +304,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			}
 		case *ast.ForStmt:
 			markLoopStatements(x, stmtNoDelete)
+			markLoopIfs(x, condNoNegate)
 			if x.Post != nil {
 				// Recorded unconditionally, regardless of whether the
 				// loop operator itself is enabled: this is the
@@ -353,6 +374,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				}
 			}
 		case *ast.RangeStmt:
+			markRangeIfs(x, condNoNegate)
 			if opts.Operators["loop"] && len(x.Body.List) > 0 {
 				first := x.Body.List[0]
 				add("loop", "MJ-LOOP-BREAK-FIRST", first.Pos(), first.End(), "break",
@@ -1040,6 +1062,182 @@ func (u *useIndex) orphans(n ast.Node) bool {
 		}
 	}
 	return false
+}
+
+// The condition operator replaces an if statement's condition c with
+// !(c). It is the standard "was each branch actually distinguished?"
+// check: a test suite that never makes the condition false (or never
+// true) lets the negation survive. Only `if` and `else if` conditions
+// are negated -- never a for loop's, which the loop operator already
+// treats with termination-safety rules -- and every restriction below
+// exists to keep a negation from producing a guaranteed-uninformative
+// TIMEOUT or runaway recursion, or from duplicating another operator:
+//
+//   - not inside a `for` loop that has no condition or no post clause
+//     (the loop may end only because of something the negation could
+//     flip), nor, in a counted loop, an if that mentions a name from the
+//     loop header; not inside a `range` loop when the if has a `break`
+//     (over a channel, that break may be the only way out).
+//   - not in a function containing `goto` (a goto loop's exit is an if)
+//     or one that calls itself by name (negating a base case recurses
+//     until the runtime kills the process; mutual recursion is not
+//     detected).
+//   - not when the if's condition or branches touch concurrency: a
+//     channel send or receive, `select`, `go`, or a call excluded by
+//     unsafeCallNames (Lock, Wait, Done, Close, ...): negating the
+//     guard can starve a waiter forever.
+//   - not a constant `true`/`false` condition.
+//   - not a `!x` condition when the boolean operator is enabled, nor a
+//     `==`/`!=` comparison when the relational operator is enabled:
+//     those mutations produce the same program, so the second one
+//     would be a duplicate execution.
+func negatableCondition(x *ast.IfStmt, opts Options, noNegate map[*ast.IfStmt]bool) bool {
+	if noNegate[x] || x.Cond == nil {
+		return false
+	}
+	cond := unwrapParen(x.Cond)
+	switch c := cond.(type) {
+	case *ast.Ident:
+		if c.Name == "true" || c.Name == "false" {
+			return false
+		}
+	case *ast.UnaryExpr:
+		if c.Op == token.NOT && opts.Operators["boolean"] {
+			return false
+		}
+	case *ast.BinaryExpr:
+		if (c.Op == token.EQL || c.Op == token.NEQ) && opts.Operators["relational"] {
+			return false
+		}
+	}
+	if touchesConcurrency(x.Cond) || touchesConcurrency(x.Body) || (x.Else != nil && touchesConcurrency(x.Else)) {
+		return false
+	}
+	return true
+}
+
+// touchesConcurrency reports whether n contains a channel send or
+// receive, a select, a go statement, or a call named in unsafeCallNames.
+func touchesConcurrency(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(c ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := c.(type) {
+		case *ast.SendStmt, *ast.SelectStmt, *ast.GoStmt:
+			found = true
+		case *ast.UnaryExpr:
+			if x.Op == token.ARROW {
+				found = true
+			}
+		case *ast.CallExpr:
+			switch fn := x.Fun.(type) {
+			case *ast.Ident:
+				found = unsafeCallNames[fn.Name]
+			case *ast.SelectorExpr:
+				found = unsafeCallNames[fn.Sel.Name]
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func containsGoto(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(c ast.Node) bool {
+		if b, ok := c.(*ast.BranchStmt); ok && b.Tok == token.GOTO {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// selfRecursive reports whether fn's body calls fn by name (a plain
+// call for a function, a selector call with the method's name for a
+// method). Deliberately name-based and conservative.
+func selfRecursive(fn *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fn.Body, func(c ast.Node) bool {
+		call, ok := c.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		switch f := call.Fun.(type) {
+		case *ast.Ident:
+			found = fn.Recv == nil && f.Name == fn.Name.Name
+		case *ast.SelectorExpr:
+			found = fn.Recv != nil && f.Sel.Name == fn.Name.Name
+		}
+		return !found
+	})
+	return found
+}
+
+func markIfsUnder(n ast.Node, out map[*ast.IfStmt]bool) {
+	ast.Inspect(n, func(c ast.Node) bool {
+		if st, ok := c.(*ast.IfStmt); ok {
+			out[st] = true
+		}
+		return true
+	})
+}
+
+// markLoopIfs mirrors markLoopStatements for if statements.
+func markLoopIfs(loop *ast.ForStmt, out map[*ast.IfStmt]bool) {
+	if loop.Cond == nil || loop.Post == nil {
+		markIfsUnder(loop.Body, out)
+		return
+	}
+	header := map[string]bool{}
+	for _, n := range []ast.Node{loop.Init, loop.Cond, loop.Post} {
+		if n == nil {
+			continue
+		}
+		ast.Inspect(n, func(c ast.Node) bool {
+			if id, ok := c.(*ast.Ident); ok {
+				header[id.Name] = true
+			}
+			return true
+		})
+	}
+	ast.Inspect(loop.Body, func(c ast.Node) bool {
+		st, ok := c.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		mentions := false
+		ast.Inspect(st, func(x ast.Node) bool {
+			if id, ok := x.(*ast.Ident); ok && header[id.Name] {
+				mentions = true
+			}
+			return !mentions
+		})
+		if mentions {
+			out[st] = true
+		}
+		return true
+	})
+}
+
+// markRangeIfs marks the ifs in a range loop's body that contain a
+// break: over a channel, that break may be the only way out.
+func markRangeIfs(loop *ast.RangeStmt, out map[*ast.IfStmt]bool) {
+	ast.Inspect(loop.Body, func(c ast.Node) bool {
+		st, ok := c.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		ast.Inspect(st, func(x ast.Node) bool {
+			if b, ok := x.(*ast.BranchStmt); ok && b.Tok == token.BREAK {
+				out[st] = true
+			}
+			return !out[st]
+		})
+		return true
+	})
 }
 
 func arithmeticReplacement(op token.Token) (string, bool) {

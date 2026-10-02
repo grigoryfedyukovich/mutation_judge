@@ -33,5 +33,5 @@ The four operators formerly listed under "Optional expansion" as future work -- 
 
 - Distributed CI manifests (splitting one run's mutants across separate CI jobs/machines; distinct from `--workers`).
 - Contract attribution, or naming the assertion *in the test source* (testing.T `file.go:N:` log text from failed tests is already captured as `responsible_assertions`; the tool still does not parse the test file to identify `require.Equal` vs `t.Errorf`).
-- Further operators beyond the eight opt-in families now implemented.
+- Further operators beyond the nine opt-in families now implemented.
 - macOS `clonefile(2)` sandbox clone (Linux `FICLONE` exists; the clone success path is untested in the project's Linux CI environment).

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New opt-in `condition` operator (`MJ-COND-NEGATE`): negates an `if`/`else if` condition to `!(c)`. Skips ifs in loops that could hang (no-condition/no-post `for`, header-mentioning ifs in counted loops, `range` ifs with `break`), functions with `goto` or direct self-recursion, ifs touching channels/`select`/`go`/lock-wait-close calls, constant conditions, and `!x` / `==` / `!=` conditions when `boolean` / `relational` already cover them. Bumped `SemanticsVersion` to `v10`.
+
 - New opt-in `statement` operator (`MJ-STMT-DELETE-ASSIGN`, `MJ-STMT-DELETE-CALL`): deletes a bare field/index/deref assignment, `++`/`--` on one, or a call statement. Reproduces the google/uuid finding (a test that covers `f.Valid = n > 0` but only compares the error) as a survivor. Excludes bare-identifier and `:=` stores, lock/wait/close/terminate and logging calls, statements in `go` bodies and in loops they could affect, and deletions that would orphan a local variable or import. Bumped `SemanticsVersion` to `v9`.
 
 - Second locally provable equivalent-mutant shape: the boolean operator's `MJ-BOOL-LITERAL` mutant is marked `EQUIVALENT` (never executed) when a `v := true`/`false` declaration's very next statement overwrites `v` without reading it, as a plain assignment or an exhaustive if/else (`internal/frontend.detectDeadStoreLiteral`). Narrow by design: the if condition and assigned expressions must not mention `v`, no `else if`, one-statement branches; a conditionally set flag is never matched. Not implemented: discarded return values (needs all in-module call sites). Bumped `SemanticsVersion` to `v8`; docs updated (`limitations.md` 7, `semantics.md`, `README.md`, `spec-conformance.md`, `ISSUES.md`).

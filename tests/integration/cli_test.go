@@ -1104,6 +1104,43 @@ func TestStatementDeletionSurvivesWhenTestOnlyChecksError(t *testing.T) {
 	}
 }
 
+// TestConditionNegationEndToEnd runs the condition operator through the
+// real binary: Abs's only if statement yields exactly one mutant,
+// `n < 0` -> `!(n < 0)`, and TestAbs kills it.
+func TestConditionNegationEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "condition", "--format", "json", "./tests/integration/testdata/condition")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				RuleID      string `json:"rule_id"`
+				Original    string `json:"original"`
+				Replacement string `json:"replacement"`
+			} `json:"mutation"`
+			Verdict string `json:"verdict"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("want exactly 1 condition mutant, got %d:\n%s", len(report.Results), out)
+	}
+	r := report.Results[0]
+	if r.Mutation.RuleID != "MJ-COND-NEGATE" || r.Mutation.Original != "n < 0" || r.Mutation.Replacement != "!(n < 0)" {
+		t.Fatalf("unexpected mutant: %#v", r.Mutation)
+	}
+	if r.Verdict != "KILLED" {
+		t.Fatalf("verdict %s, want KILLED:\n%s", r.Verdict, out)
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

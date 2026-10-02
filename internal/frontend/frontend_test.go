@@ -1165,6 +1165,200 @@ func (s *S) Do() {
 `)
 }
 
+// discoverConditions returns "original -> replacement" for every
+// condition-operator mutant in src, with the given extra operators
+// enabled alongside "condition".
+func discoverConditions(t *testing.T, src string, extra ...string) []string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ops := map[string]bool{"condition": true}
+	for _, e := range extra {
+		ops[e] = true
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: ops})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range ms {
+		if m.Operator == "condition" {
+			if m.RuleID != "MJ-COND-NEGATE" {
+				t.Fatalf("unexpected rule: %#v", m)
+			}
+			out = append(out, m.Original+" -> "+m.Replacement)
+		}
+	}
+	return out
+}
+
+func wantConditions(t *testing.T, src string, extra []string, want ...string) {
+	t.Helper()
+	got := discoverConditions(t, src, extra...)
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestConditionNegatesIfAndElseIf(t *testing.T) {
+	wantConditions(t, `package p
+
+func f(n int) int {
+	if n < 0 {
+		return -1
+	} else if n > 10 {
+		return 1
+	}
+	return 0
+}
+`, nil, "n < 0 -> !(n < 0)", "n > 10 -> !(n > 10)")
+}
+
+func TestConditionSkipsConstantAndDuplicatedShapes(t *testing.T) {
+	src := `package p
+
+func f(a, b int, ok bool) int {
+	if true {
+		return 0
+	}
+	if !ok {
+		return 1
+	}
+	if a == b {
+		return 2
+	}
+	return 3
+}
+`
+	wantConditions(t, src, nil, "!ok -> !(!ok)", "a == b -> !(a == b)")
+	wantConditions(t, src, []string{"boolean", "relational"})
+}
+
+func TestConditionSkipsLoopsItCouldHang(t *testing.T) {
+	wantConditions(t, `package p
+
+func f(xs []int, done func() bool) int {
+	n := 0
+	for !done() {
+		if n > 3 {
+			break
+		}
+		n++
+	}
+	for {
+		if n > 9 {
+			return n
+		}
+	}
+}
+`, nil)
+	// Counted loop: only an if mentioning a header name is at risk.
+	wantConditions(t, `package p
+
+func f(xs []int, k int) int {
+	n := 0
+	for i := 0; i < k; i++ {
+		if n > 3 {
+			n--
+		}
+		if i == 2 {
+			n++
+		}
+	}
+	return n
+}
+`, nil, "n > 3 -> !(n > 3)")
+}
+
+func TestConditionSkipsRangeIfWithBreak(t *testing.T) {
+	wantConditions(t, `package p
+
+func f(ch chan int) int {
+	n := 0
+	for v := range ch {
+		if v == 0 {
+			break
+		}
+		if v > 5 {
+			n++
+		}
+	}
+	return n
+}
+`, nil, "v > 5 -> !(v > 5)")
+}
+
+func TestConditionSkipsGotoAndSelfRecursiveFunctions(t *testing.T) {
+	wantConditions(t, `package p
+
+func f(n int) int {
+retry:
+	if n < 3 {
+		n++
+		goto retry
+	}
+	return n
+}
+`, nil)
+	wantConditions(t, `package p
+
+func fact(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	return n * fact(n-1)
+}
+
+type T struct{}
+
+func (t T) walk(n int) int {
+	if n > 0 {
+		return t.walk(n - 1)
+	}
+	return 0
+}
+
+func other(n int) int {
+	if n > 0 {
+		return 1
+	}
+	return 0
+}
+`, nil, "n > 0 -> !(n > 0)")
+}
+
+func TestConditionSkipsConcurrencyTouchingIfs(t *testing.T) {
+	wantConditions(t, `package p
+
+import "sync"
+
+func f(ok bool, ch chan int, mu *sync.Mutex, q chan int) {
+	if ok {
+		ch <- 1
+	}
+	if ok {
+		mu.Unlock()
+	}
+	if ok {
+		<-q
+	}
+	if <-q > 0 {
+		return
+	}
+	if ok {
+		go func() {}()
+	}
+}
+`, nil)
+}
+
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
 	d := t.TempDir()
 	src := []byte(`package p
