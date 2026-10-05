@@ -1053,7 +1053,7 @@ func TestStatementSkipsConditionLoopBodies(t *testing.T) {
 type S struct{ n int }
 
 func (s *S) done() bool { return s.n > 3 }
-func (s *S) step()      { s.n++ }
+func (s *S) step()      {}
 
 func (s *S) Run() {
 	for !s.done() {
@@ -1124,6 +1124,22 @@ func (s *S) Do() {
 	s.w = y
 }
 `, "s.v = y", "s.w = y")
+}
+
+// A variable declared inside the deleted statement goes away with it,
+// so it cannot be orphaned.
+func TestStatementAllowsDeletingLocalsDeclaredInsideTheStatement(t *testing.T) {
+	wantDeleted(t, `package p
+
+type S struct{ fn func() int }
+
+func (s *S) Do() {
+	s.fn = func() int {
+		x := 1
+		return x
+	}
+}
+`, "s.fn = func() int {\n\t\tx := 1\n\t\treturn x\n\t}")
 }
 
 func TestStatementSkipsWhenDeletionOrphansAnImport(t *testing.T) {

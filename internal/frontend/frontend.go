@@ -1052,6 +1052,11 @@ func (u *useIndex) orphans(n ast.Node) bool {
 		if _, param := obj.Decl.(*ast.Field); param {
 			continue
 		}
+		// Declared inside n itself (a function literal's own locals):
+		// deleting n deletes the declaration along with every use.
+		if d, ok := obj.Decl.(ast.Node); ok && d.Pos() >= n.Pos() && d.End() <= n.End() {
+			continue
+		}
 		if u.reads[obj]-c < 1 {
 			return true
 		}
