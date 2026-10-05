@@ -1141,6 +1141,46 @@ func TestConditionNegationEndToEnd(t *testing.T) {
 	}
 }
 
+// TestReturnValueEndToEnd runs the returnvalue operator through the real
+// binary: Scale's result is asserted and its zeroing is KILLED; Count's
+// result is never read, so its zeroing SURVIVES even though TestCountRuns
+// covers it.
+func TestReturnValueEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "returnvalue", "--format", "json", "./tests/integration/testdata/returnvalue")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				RuleID      string `json:"rule_id"`
+				Original    string `json:"original"`
+				Replacement string `json:"replacement"`
+			} `json:"mutation"`
+			Verdict string `json:"verdict"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	want := map[string]string{"n * 2": "KILLED", "len(xs)": "SURVIVED"}
+	if len(report.Results) != len(want) {
+		t.Fatalf("want %d mutants, got %d:\n%s", len(want), len(report.Results), out)
+	}
+	for _, r := range report.Results {
+		if r.Mutation.RuleID != "MJ-RET-ZERO" || r.Mutation.Replacement != "0" {
+			t.Fatalf("unexpected mutant: %#v", r.Mutation)
+		}
+		if v, ok := want[r.Mutation.Original]; !ok || v != r.Verdict {
+			t.Fatalf("mutant %q: verdict %s, want %s:\n%s", r.Mutation.Original, r.Verdict, v, out)
+		}
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

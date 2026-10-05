@@ -6,7 +6,7 @@ This document maps the repository to [the functional specification](../SPECIFICA
 
 | Specification area | Status | Evidence |
 |---|---|---|
-| Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and nine further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational`, `literal`, `statement`, `condition`) in `internal/frontend`. |
+| Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and ten further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational`, `literal`, `statement`, `condition`, `returnvalue`) in `internal/frontend`. |
 | One mutant at a time | Implemented | Atomic apply/run/restore per sandbox; `--workers N` uses one independent sandbox per concurrent mutant. |
 | Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, `UNSUPPORTED`, and `EQUIVALENT` model values. |
 | Responsible tests and assertions | Implemented with documented limits | Failed test names from `go test -json` events; assertion log text from the same stream's indented `file.go:N:` Output lines as `responsible_assertions`. |

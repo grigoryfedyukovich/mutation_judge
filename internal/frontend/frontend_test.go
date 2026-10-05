@@ -1375,6 +1375,142 @@ func f(ok bool, ch chan int, mu *sync.Mutex, q chan int) {
 `, nil)
 }
 
+// discoverReturns returns "original -> replacement" for every
+// returnvalue mutant in src.
+func discoverReturns(t *testing.T, src string) []string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"returnvalue": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range ms {
+		if m.Operator != "returnvalue" || m.RuleID != "MJ-RET-ZERO" {
+			t.Fatalf("unexpected mutant: %#v", m)
+		}
+		out = append(out, m.Original+" -> "+m.Replacement)
+	}
+	return out
+}
+
+func wantReturns(t *testing.T, src string, want ...string) {
+	t.Helper()
+	got := discoverReturns(t, src)
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestReturnValueZeroesNumericStringSliceAndMap(t *testing.T) {
+	wantReturns(t, `package p
+
+func f(a, b int, s string, xs []int, m map[string]int) (int, string, []int, map[string]int) {
+	return a + b, s, xs, m
+}
+`, "a + b -> 0", `s -> ""`, "xs -> nil", "m -> nil")
+}
+
+func TestReturnValueSkipsTypesItCannotZeroSafely(t *testing.T) {
+	wantReturns(t, `package p
+
+type T struct{}
+type ID int
+
+func f(ok bool, err error, t T, p *T, id ID, fn func(), a [2]int, i any) (bool, error, T, *T, ID, func(), [2]int, any) {
+	return ok, err, t, p, id, fn, a, i
+}
+
+func g[V any](x V) V {
+	return x
+}
+`)
+}
+
+func TestReturnValueSkipsLiteralsNilAndEmptyConstructors(t *testing.T) {
+	wantReturns(t, `package p
+
+func f() (int, string, []int, []int, map[string]int, int) {
+	return 1, "x", nil, []int{}, make(map[string]int), -1
+}
+`)
+}
+
+func TestReturnValueSkipsBareReturnAndForwardedCalls(t *testing.T) {
+	wantReturns(t, `package p
+
+func two() (int, string) { return g() }
+
+func g() (int, string) { return h() }
+
+func h() (n int, s string) {
+	n = 1
+	return
+}
+`)
+}
+
+func TestReturnValueUsesTheNearestEnclosingSignature(t *testing.T) {
+	wantReturns(t, `package p
+
+func outer(n int, s string) int {
+	g := func() string {
+		return s
+	}
+	_ = g
+	return n
+}
+`, `s -> ""`, "n -> 0")
+}
+
+func TestReturnValueSkipsWhenReplacementOrphansAVariableOrImport(t *testing.T) {
+	wantReturns(t, `package p
+
+func compute() int { return 7 }
+
+func f() int {
+	x := compute()
+	return x
+}
+`)
+	wantReturns(t, `package p
+
+import "strings"
+
+func f(s string) string {
+	return strings.ToUpper(s)
+}
+`)
+	wantReturns(t, `package p
+
+import "strings"
+
+func f(s string) string {
+	if s == "" {
+		return strings.ToLower(s)
+	}
+	return strings.ToUpper(s)
+}
+`, "strings.ToLower(s) -> \"\"", "strings.ToUpper(s) -> \"\"")
+}
+
+func TestReturnValueGenericSliceStillZeroed(t *testing.T) {
+	wantReturns(t, `package p
+
+func first[T any](xs []T) []T {
+	return xs
+}
+`, "xs -> nil")
+}
+
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
 	d := t.TempDir()
 	src := []byte(`package p

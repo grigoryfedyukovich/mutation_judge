@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v10"
+const SemanticsVersion = "mutation-judge-operators/v11"
 
 type Options struct {
 	Operators        map[string]bool
@@ -156,9 +156,14 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	condNoNegate := map[*ast.IfStmt]bool{}
 	// uses is only built when the statement operator is enabled.
 	var uses *useIndex
-	if opts.Operators["statement"] {
+	if opts.Operators["statement"] || opts.Operators["returnvalue"] {
 		uses = newUseIndex(f)
 	}
+	// retSig maps each return statement to the signature of the
+	// function it returns from (the nearest enclosing FuncDecl or
+	// FuncLit), populated by the *ast.FuncDecl / *ast.FuncLit cases
+	// before the walk reaches the returns.
+	retSig := map[*ast.ReturnStmt]*ast.FuncType{}
 	// deleteStatements offers each deletable statement in list to add.
 	// Only statements that sit directly in a statement list are
 	// considered, never a for/if/switch Init or Post clause.
@@ -233,12 +238,34 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					fmt.Sprintf("replace %s with %s", x.Name, repl), "exercise the branch controlled by this boolean constant", deadStoreLit[x])
 			}
 		case *ast.FuncDecl:
+			if x.Body != nil {
+				mapReturns(x.Body, x.Type, retSig)
+			}
 			if x.Body != nil && (containsGoto(x.Body) || selfRecursive(x)) {
 				markIfsUnder(x.Body, condNoNegate)
 			}
 		case *ast.FuncLit:
+			mapReturns(x.Body, x.Type, retSig)
 			if containsGoto(x.Body) {
 				markIfsUnder(x.Body, condNoNegate)
+			}
+		case *ast.ReturnStmt:
+			if !opts.Operators["returnvalue"] {
+				break
+			}
+			types := resultTypes(retSig[x])
+			if len(types) == 0 || len(types) != len(x.Results) {
+				break
+			}
+			for i, e := range x.Results {
+				zero, ok := zeroValue(types[i])
+				if !ok || trivialResult(e, zero) || uses.orphans(e) {
+					continue
+				}
+				text := source(src, fset, e.Pos(), e.End())
+				add("returnvalue", "MJ-RET-ZERO", e.Pos(), e.End(), zero,
+					fmt.Sprintf("replace returned %s with its zero value %s", clipStatement(text), zero),
+					"add an assertion on this returned value; a test that calls the function but ignores or never varies this result will not notice a zero value", "")
 			}
 		case *ast.IfStmt:
 			if opts.Operators["condition"] && negatableCondition(x, opts, condNoNegate) {
@@ -1243,6 +1270,112 @@ func markRangeIfs(loop *ast.RangeStmt, out map[*ast.IfStmt]bool) {
 		})
 		return true
 	})
+}
+
+// The returnvalue operator replaces one returned expression with the
+// zero value of its declared result type (`return n * 2` -> `return 0`).
+// It is the check for "the test calls this function but never looks at
+// what it returns". Discovery is purely syntactic, so it acts only
+// where the result type is visible in the signature itself:
+//
+//   - the predeclared integer, float and string types, replaced by
+//     `0` / `""`;
+//   - slices and maps, replaced by `nil`.
+//
+// Everything else is left alone, each for a stated reason: `bool`
+// (the replacement is a constant that can hang a caller's loop, and
+// the boolean operators already cover it), `error` (owned by the
+// errorreturn operator), pointers, funcs, channels and interfaces (a
+// nil result just crashes the caller, which is a kill that says
+// nothing about the tests), named and generic types (the zero value is
+// not known without type information), and arrays and structs.
+//
+// Also skipped: results that are already literals or nil (the literal
+// operator owns literals), empty slice/map literals and make(...)
+// calls (nil is almost always equivalent to them), a return that
+// forwards a multi-value call or has a different number of values than
+// the signature, and any replacement that would leave a local variable
+// or an import with no remaining use (useIndex.orphans). A caller that
+// loops until a result becomes non-zero can still hang under this
+// mutation; that is reported as TIMEOUT, not hidden.
+func mapReturns(body *ast.BlockStmt, sig *ast.FuncType, out map[*ast.ReturnStmt]*ast.FuncType) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			out[x] = sig
+		}
+		return true
+	})
+}
+
+// resultTypes flattens a signature's result list to one type
+// expression per returned value (`(a, b int, s string)` is three).
+func resultTypes(sig *ast.FuncType) []ast.Expr {
+	if sig == nil || sig.Results == nil {
+		return nil
+	}
+	var out []ast.Expr
+	for _, f := range sig.Results.List {
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		for i := 0; i < n; i++ {
+			out = append(out, f.Type)
+		}
+	}
+	return out
+}
+
+var zeroNumeric = map[string]bool{
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true, "uintptr": true,
+	"byte": true, "rune": true, "float32": true, "float64": true,
+}
+
+// zeroValue returns the replacement text for a result type this
+// operator understands, and false for every other type.
+func zeroValue(typ ast.Expr) (string, bool) {
+	switch t := typ.(type) {
+	case *ast.Ident:
+		if zeroNumeric[t.Name] {
+			return "0", true
+		}
+		if t.Name == "string" {
+			return `""`, true
+		}
+	case *ast.ArrayType:
+		if t.Len == nil {
+			return "nil", true
+		}
+	case *ast.MapType:
+		return "nil", true
+	}
+	return "", false
+}
+
+// trivialResult reports whether e is already the replacement or a
+// shape the operator deliberately leaves to another operator or to
+// equivalence: a literal, nil, a negated literal, an empty composite
+// literal, or a make call.
+func trivialResult(e ast.Expr, zero string) bool {
+	switch x := unwrapParen(e).(type) {
+	case *ast.BasicLit:
+		return true
+	case *ast.Ident:
+		return x.Name == "nil" || x.Name == "true" || x.Name == "false"
+	case *ast.UnaryExpr:
+		_, lit := unwrapParen(x.X).(*ast.BasicLit)
+		return lit
+	case *ast.CompositeLit:
+		return len(x.Elts) == 0
+	case *ast.CallExpr:
+		id, ok := x.Fun.(*ast.Ident)
+		return ok && id.Name == "make"
+	}
+	return false
 }
 
 func arithmeticReplacement(op token.Token) (string, bool) {

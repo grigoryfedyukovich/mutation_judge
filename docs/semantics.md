@@ -90,6 +90,19 @@ The opt-in **condition** operator replaces an `if` or `else if` condition `c` wi
 - **Constants.** Not a bare `true`/`false` condition.
 - **Duplicates.** Not a `!x` condition when `boolean` is enabled (`MJ-BOOL-DROP-NOT` yields the same program), nor a `==`/`!=` comparison when `relational` is enabled.
 
+### Return-value replacement
+
+The opt-in **returnvalue** operator replaces one returned expression with the zero value of its declared result type (`MJ-RET-ZERO`): `return n * 2` becomes `return 0`. It finds the test that calls a function and never looks at what it returns. Discovery is purely syntactic, so it acts only where the signature itself shows the type: the predeclared integer and float types (`0`), `string` (`""`), and slices and maps (`nil`). Each exclusion has a reason:
+
+- `bool`: the constant can hang a caller's loop, and the boolean operators already cover it. `error`: owned by `errorreturn`.
+- Pointers, funcs, channels, interfaces: a `nil` result just crashes the caller, a kill that says nothing about the tests.
+- Named, generic, array and struct types: the zero value is not known without type information.
+- Results that are already literals, `nil`, or negated literals (the `literal` operator owns those); empty slice/map literals and `make(...)` (nil is almost always equivalent).
+- A return that forwards a multi-value call, has a different number of values than the signature, or is bare.
+- A replacement that would leave a local variable or an imported package with no remaining use, which would not compile.
+
+A caller that loops until a result becomes non-zero can still hang under this mutation; that is reported as `TIMEOUT`, not hidden.
+
 ## Conservative equivalent-mutant suppression
 
 Two locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:

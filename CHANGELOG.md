@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New opt-in `returnvalue` operator (`MJ-RET-ZERO`): replaces a returned expression with the zero value of its declared result type (integers/floats -> `0`, `string` -> `""`, slices/maps -> `nil`) when the signature shows the type. Catches a test that calls a function but never reads its result. Excludes bool, error, pointer/func/chan/interface, named, generic, array and struct results, literals, empty constructors, multi-value forwarding and replacements that would leave an unused variable or import. Bumped `SemanticsVersion` to `v11`.
+
 - Added `examples/deadstore` (dead-store equivalence demo, wired into `examples/run-all.sh`). Removed two unreachable SARIF properties (`responsible_tests`, `responsible_assertions`): SARIF only carries SURVIVED/TIMEOUT/UNKNOWN results and a failing test is only attributed to a KILLED mutant; the JSON report still carries both. Added tests for the end-to-end `responsible_assertions` path and for indented subtest control lines.
 
 - New opt-in `condition` operator (`MJ-COND-NEGATE`): negates an `if`/`else if` condition to `!(c)`. Skips ifs in loops that could hang (no-condition/no-post `for`, header-mentioning ifs in counted loops, `range` ifs with `break`), functions with `goto` or direct self-recursion, ifs touching channels/`select`/`go`/lock-wait-close calls, constant conditions, and `!x` / `==` / `!=` conditions when `boolean` / `relational` already cover them. Bumped `SemanticsVersion` to `v10`.
