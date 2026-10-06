@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Third locally provable equivalent shape, a discarded result: a `returnvalue` mutant (`MJ-RET-ZERO`) is marked `EQUIVALENT` and never executed when result i of an unexported, non-generic, unnamed-result function is thrown away (`_`, or a bare call) at every call site in its package, with at least one call site, and the replaced expression has no side effects and cannot panic. Every same-package `.go` file is scanned (tests and build-constrained files included); any other mention of the name, a parse failure, cgo, `//export`, assembly, or a module-wide `//go:linkname` naming it blocks the claim. Bumped `SemanticsVersion` to `v13`.
+
 - New opt-in `connective` operator (`MJ-CONN-SWAP`): swaps `&&` and `||`. Kept separate from `boolean` (which drops an operand) so default results do not change. Skips loop conditions, loops that could hang, `goto` and self-recursive functions, ifs touching concurrency, and identical operands. Bumped `SemanticsVersion` to `v12`.
 
 - New opt-in `returnvalue` operator (`MJ-RET-ZERO`): replaces a returned expression with the zero value of its declared result type (integers/floats -> `0`, `string` -> `""`, slices/maps -> `nil`) when the signature shows the type. Catches a test that calls a function but never reads its result. Excludes bool, error, pointer/func/chan/interface, named, generic, array and struct results, literals, empty constructors, multi-value forwarding and replacements that would leave an unused variable or import. Bumped `SemanticsVersion` to `v11`.

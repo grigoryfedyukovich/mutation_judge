@@ -19,15 +19,23 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v12"
+const SemanticsVersion = "mutation-judge-operators/v13"
 
 type Options struct {
 	Operators        map[string]bool
 	IncludeGenerated bool
 	ChangedLines     map[string]map[int]bool
+
+	// root and pkgs are set by Discover so discoverFile can read the
+	// other files of a package (see discarded.go). Left zero, no
+	// cross-file equivalence is ever claimed.
+	root string
+	pkgs *pkgCache
 }
 
 func Discover(root string, files []string, opts Options) ([]model.Mutation, error) {
+	opts.root = root
+	opts.pkgs = newPkgCache(root)
 	var all []model.Mutation
 	for _, rel := range files {
 		path := filepath.Join(root, filepath.FromSlash(rel))
@@ -169,6 +177,9 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// FuncLit), populated by the *ast.FuncDecl / *ast.FuncLit cases
 	// before the walk reaches the returns.
 	retSig := map[*ast.ReturnStmt]*ast.FuncType{}
+	// retDecl maps a return statement to its enclosing FuncDecl, or
+	// leaves it absent inside a function literal.
+	retDecl := map[*ast.ReturnStmt]*ast.FuncDecl{}
 	// deleteStatements offers each deletable statement in list to add.
 	// Only statements that sit directly in a statement list are
 	// considered, never a for/if/switch Init or Post clause.
@@ -255,6 +266,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 		case *ast.FuncDecl:
 			if x.Body != nil {
 				mapReturns(x.Body, x.Type, retSig)
+				markDecl(x.Body, x, retDecl)
 			}
 			if x.Body != nil && (containsGoto(x.Body) || selfRecursive(x)) {
 				markIfsUnder(x.Body, condNoNegate)
@@ -280,9 +292,14 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					continue
 				}
 				text := source(src, fset, e.Pos(), e.End())
+				reason := ""
+				if decl := retDecl[x]; decl != nil && opts.pkgs != nil && pureResultExpr(e) {
+					dir := filepath.Dir(filepath.Join(opts.root, filepath.FromSlash(rel)))
+					reason = opts.pkgs.discardReason(dir, f.Name.Name, decl, i, len(types))
+				}
 				add("returnvalue", "MJ-RET-ZERO", e.Pos(), e.End(), zero,
 					fmt.Sprintf("replace returned %s with its zero value %s", clipStatement(text), zero),
-					"add an assertion on this returned value; a test that calls the function but ignores or never varies this result will not notice a zero value", "")
+					"add an assertion on this returned value; a test that calls the function but ignores or never varies this result will not notice a zero value", reason)
 			}
 		case *ast.IfStmt:
 			if opts.Operators["connective"] && (condNoNegate[x] || touchesConcurrency(x.Cond) || touchesConcurrency(x.Body) || (x.Else != nil && touchesConcurrency(x.Else))) {
@@ -1304,6 +1321,20 @@ func mapReturns(body *ast.BlockStmt, sig *ast.FuncType, out map[*ast.ReturnStmt]
 			return false
 		case *ast.ReturnStmt:
 			out[x] = sig
+		}
+		return true
+	})
+}
+
+// markDecl records decl as the enclosing function of every return in
+// body that does not belong to a nested function literal.
+func markDecl(body *ast.BlockStmt, decl *ast.FuncDecl, out map[*ast.ReturnStmt]*ast.FuncDecl) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			out[x] = decl
 		}
 		return true
 	})

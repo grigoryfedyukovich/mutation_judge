@@ -1215,6 +1215,45 @@ func TestConnectiveEndToEnd(t *testing.T) {
 	}
 }
 
+// TestDiscardedResultEndToEnd runs the discarded-result equivalence
+// through the real binary: oom's first result is thrown away by its only
+// caller, so zeroing it is proved EQUIVALENT without running; its second
+// result reaches Level's assertion, so zeroing that is executed and KILLED.
+func TestDiscardedResultEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "returnvalue", "--format", "json", "./tests/integration/testdata/discarded")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				Original         string `json:"original"`
+				EquivalentReason string `json:"equivalent_reason"`
+			} `json:"mutation"`
+			Verdict string `json:"verdict"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	want := map[string]string{"n * 2": "EQUIVALENT", "n + 1": "KILLED"}
+	if len(report.Results) != len(want) {
+		t.Fatalf("want %d mutants, got %d:\n%s", len(want), len(report.Results), out)
+	}
+	for _, r := range report.Results {
+		if v, ok := want[r.Mutation.Original]; !ok || v != r.Verdict {
+			t.Fatalf("mutant %q: verdict %s, want %s:\n%s", r.Mutation.Original, r.Verdict, v, out)
+		}
+		if (r.Verdict == "EQUIVALENT") != strings.Contains(r.Mutation.EquivalentReason, "discarded") {
+			t.Fatalf("mutant %q: equivalent_reason %q does not match verdict %s", r.Mutation.Original, r.Mutation.EquivalentReason, r.Verdict)
+		}
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

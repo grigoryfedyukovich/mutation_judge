@@ -1632,6 +1632,157 @@ func g(a bool) bool { return a || a }
 `)
 }
 
+// discardedFixture writes files (relative path -> source) into a fresh
+// module directory, runs the returnvalue operator over a.go, and
+// returns, per mutated expression, whether it was proved equivalent.
+func discardedFixture(t *testing.T, files map[string]string) map[string]bool {
+	t.Helper()
+	d := t.TempDir()
+	for name, src := range files {
+		path := filepath.Join(d, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ms, err := Discover(d, []string{"a.go"}, Options{Operators: map[string]bool{"returnvalue": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range ms {
+		got[m.Original] = m.EquivalentReason != ""
+	}
+	return got
+}
+
+func wantDiscarded(t *testing.T, files map[string]string, want map[string]bool) {
+	t.Helper()
+	got := discardedFixture(t, files)
+	if len(got) != len(want) {
+		t.Fatalf("mutants %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if g, ok := got[k]; !ok || g != v {
+			t.Fatalf("mutants %v, want %v", got, want)
+		}
+	}
+}
+
+const oomSrc = "package p\n\nfunc oom(n int) (int, int) { return n * 2, n + 1 }\n"
+
+func TestDiscardedResultMarksOnlyTheDiscardedPosition(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go": oomSrc,
+		"b.go": "package p\n\nfunc Level(n int) int {\n\t_, m := oom(n)\n\treturn m\n}\n",
+	}, map[string]bool{"n * 2": true, "n + 1": false})
+}
+
+func TestDiscardedResultNeedsEveryCallSiteToDiscardIt(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go": oomSrc,
+		"b.go": "package p\n\nfunc Level(n int) int {\n\t_, m := oom(n)\n\treturn m\n}\n",
+		"c.go": "package p\n\nfunc Both(n int) int {\n\ta, _ := oom(n)\n\treturn a\n}\n",
+	}, map[string]bool{"n * 2": false, "n + 1": false})
+}
+
+func TestDiscardedResultBareCallDiscardsEverything(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go": oomSrc,
+		"b.go": "package p\n\nfunc Run() {\n\toom(1)\n}\n",
+	}, map[string]bool{"n * 2": true, "n + 1": true})
+}
+
+// A test in the same package is a call site too: it can read the result.
+func TestDiscardedResultCountsCallSitesInTestFiles(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go":      oomSrc,
+		"b.go":      "package p\n\nfunc Run() {\n\t_, _ = oom(1)\n}\n",
+		"a_test.go": "package p\n\nimport \"testing\"\n\nfunc TestOom(t *testing.T) {\n\tgot, _ := oom(1)\n\t_ = got\n}\n",
+	}, map[string]bool{"n * 2": false, "n + 1": true})
+}
+
+func TestDiscardedResultIgnoresExternalTestPackage(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go":      oomSrc,
+		"b.go":      "package p\n\nfunc Run() {\n\toom(1)\n}\n",
+		"x_test.go": "package p_test\n\nvar oom = 1\n",
+	}, map[string]bool{"n * 2": true, "n + 1": true})
+}
+
+func TestDiscardedResultRefusesAnyOtherMention(t *testing.T) {
+	use := "package p\n\nfunc Run() {\n\toom(1)\n}\n"
+	for name, extra := range map[string]string{
+		"function value": "package p\n\nvar f = oom\n",
+		"defer":          "package p\n\nfunc Later() {\n\tdefer oom(1)\n}\n",
+		"go":             "package p\n\nfunc Spawn() {\n\tgo oom(1)\n}\n",
+		"argument":       "package p\n\nfunc id(a, b int) int { return a }\n\nfunc Fwd() int {\n\treturn id(oom(1))\n}\n",
+		"single value":   "package p\n\nfunc One() {\n\t_ = oom\n}\n",
+		"parenthesized":  "package p\n\nfunc Par() {\n\t(oom)(1)\n}\n",
+		"field named":    "package p\n\ntype T struct{ oom int }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			wantDiscarded(t, map[string]string{"a.go": oomSrc, "b.go": use, "c.go": extra},
+				map[string]bool{"n * 2": false, "n + 1": false})
+		})
+	}
+}
+
+func TestDiscardedResultRefusesIneligibleFunctions(t *testing.T) {
+	use := "package p\n\nfunc Run() {\n\tOom(1)\n\toom(1)\n}\n"
+	for name, a := range map[string]string{
+		"exported":        "package p\n\nfunc Oom(n int) (int, int) { return n * 2, n + 1 }\n\nfunc oom(n int) (int, int) { return Oom(n) }\n",
+		"named results":   "package p\n\nfunc oom(n int) (a, b int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
+		"generic":         "package p\n\nfunc oom[T any](n int) (int, int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
+		"export directive": "package p\n\n//export oom\nfunc oom(n int) (int, int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := discardedFixture(t, map[string]string{"a.go": a, "b.go": use})
+			for k, eq := range got {
+				if eq {
+					t.Fatalf("mutant %q must not be proved equivalent: %v", k, got)
+				}
+			}
+		})
+	}
+}
+
+func TestDiscardedResultRefusesMethodsAndUncalledFunctions(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go": "package p\n\ntype T struct{}\n\nfunc (T) oom(n int) (int, int) { return n * 2, n + 1 }\n",
+		"b.go": "package p\n\nfunc Run(t T) {\n\tt.oom(1)\n}\n",
+	}, map[string]bool{"n * 2": false, "n + 1": false})
+	wantDiscarded(t, map[string]string{"a.go": oomSrc},
+		map[string]bool{"n * 2": false, "n + 1": false})
+}
+
+// Replacing a division or a call removes a panic or side effect the
+// caller can observe even though it never sees the value.
+func TestDiscardedResultRequiresAPureExpression(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go": "package p\n\nfunc oom(n int) (int, int) { return n / 2, n + 1 }\n",
+		"b.go": "package p\n\nfunc Run() {\n\t_, _ = oom(1)\n}\n",
+	}, map[string]bool{"n / 2": false, "n + 1": true})
+}
+
+func TestDiscardedResultRefusesWhenAnotherPackageLinknamesIt(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go":       oomSrc,
+		"b.go":       "package p\n\nfunc Run() {\n\toom(1)\n}\n",
+		"other/x.go": "package other\n\n//go:linkname pull example.test/p.oom\nfunc pull(n int) (int, int)\n",
+	}, map[string]bool{"n * 2": false, "n + 1": false})
+}
+
+func TestDiscardedResultRefusesWhenASiblingDoesNotParse(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"a.go": oomSrc,
+		"b.go": "package p\n\nfunc Run() {\n\toom(1)\n}\n",
+		"c.go": "package p\n\nfunc broken( {\n",
+	}, map[string]bool{"n * 2": false, "n + 1": false})
+}
+
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
 	d := t.TempDir()
 	src := []byte(`package p

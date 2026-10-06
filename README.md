@@ -163,7 +163,7 @@ Deliberately excluded: deleting a `close(ch)` call, for the same slow-`TIMEOUT` 
 - **INVALID:** the mutant does not compile or type-check.
 - **TIMEOUT:** the explicit command deadline expired.
 - **UNKNOWN / UNSUPPORTED:** reserved first-class report values for future backends.
-- **EQUIVALENT:** discovery itself proved the mutant behaviorally identical to the original before any test ran; never executed. Currently only two narrow cases: the boundary operator's guarded comparison and the boolean operator's immediately overwritten initializer (see "Supported mutations" above and `docs/limitations.md` limitation 7).
+- **EQUIVALENT:** discovery itself proved the mutant behaviorally identical to the original before any test ran; never executed. Currently only three narrow cases (the last for the `returnvalue` operator: a result discarded at every call site of an unexported function): the boundary operator's guarded comparison and the boolean operator's immediately overwritten initializer (see "Supported mutations" above and `docs/limitations.md` limitation 7).
 
 The score is `killed / (killed + survived)`. Invalid, timeout, and equivalent mutants are excluded. The report always prints the configured mutant and timeout bounds.
 

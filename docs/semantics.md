@@ -107,9 +107,29 @@ A caller that loops until a result becomes non-zero can still hang under this mu
 
 The opt-in **connective** operator swaps `&&` and `||` (`MJ-CONN-SWAP`). The `boolean` operator drops an operand; this changes how the operands combine, which a suite with no case where exactly one operand is true cannot see. It is a separate operator so default `boolean` results do not change. Its exclusions mirror `condition`'s, but apply to a connective anywhere (a return, an assignment), not only in an if: not in a `for` loop's own condition; not in a loop with no condition or post clause, nor, in a counted loop, a connective mentioning a loop-header name; not in a function containing `goto` or calling itself by name; not in the condition of an if excluded from negation or touching concurrency; and not `x && x` / `x || x` over the same side-effect-free operand, which is the same program.
 
+### Discarded result (returnvalue)
+
+A `returnvalue` mutant (`MJ-RET-ZERO`) is proved `EQUIVALENT`, and never executed, when result `i` of a function is thrown away by every caller:
+
+```go
+func oom(n int) (int, int) { return n * 2, n + 1 }
+
+_, m := oom(n)   // result 0 is discarded; zeroing `n * 2` is unobservable
+```
+
+Because the function must be unexported, every possible caller is in its own package directory, which is what keeps this a bounded scan rather than a whole-module call graph. Every restriction exists to keep the proof from being wrong:
+
+- **Eligible functions:** unexported, package-level, non-generic, not `init`/`main`, with **unnamed** results (a deferred closure can read a named result after `return` assigns it, so "the caller discards it" would not mean "nothing observes it"). Methods are excluded: an unexported method can be called through an interface.
+- **Every mention is a discard.** Every unqualified identifier in the package spelling the function's name must be the callee of a bare expression statement, or of the sole right-hand side of an assignment with exactly one left-hand side per result and `_` in position `i`. A function value, a `go`/`defer` call, an argument, a return, `(f)(x)`, a field or shadowing variable of the same name: any other mention blocks the claim, which can only make it more conservative.
+- **At least one call site,** so a function that is simply never called is not reported as discarded.
+- **Every same-package `.go` file is scanned,** test files and files excluded by build constraints included (a call site the current build does not compile could exist on another platform). A file that does not parse, an `import "C"`, an `//export` mentioning the name, an assembly file mentioning it, or a `//go:linkname` anywhere in the module mentioning it blocks the claim. The external `_test` package cannot reference an unexported name and is not counted.
+- **The replaced expression must be pure** (identifiers, literals, and non-dividing, non-shifting arithmetic, ordered comparison and logic over them): replacing a division, call, selector, index or dereference would remove a panic or side effect the caller can observe even though it never sees the value.
+
+Only `MJ-RET-ZERO` is covered. Arithmetic, relational and boundary mutants inside a discarded return expression are not claimed: swapping `*` for `/` can introduce a panic.
+
 ## Conservative equivalent-mutant suppression
 
-Two locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:
+Three locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:
 
 ```go
 if a.Field != b.Field {
