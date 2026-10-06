@@ -103,6 +103,10 @@ The opt-in **returnvalue** operator replaces one returned expression with the ze
 
 A caller that loops until a result becomes non-zero can still hang under this mutation; that is reported as `TIMEOUT`, not hidden.
 
+### Logical-connective swap
+
+The opt-in **connective** operator swaps `&&` and `||` (`MJ-CONN-SWAP`). The `boolean` operator drops an operand; this changes how the operands combine, which a suite with no case where exactly one operand is true cannot see. It is a separate operator so default `boolean` results do not change. Its exclusions mirror `condition`'s, but apply to a connective anywhere (a return, an assignment), not only in an if: not in a `for` loop's own condition; not in a loop with no condition or post clause, nor, in a counted loop, a connective mentioning a loop-header name; not in a function containing `goto` or calling itself by name; not in the condition of an if excluded from negation or touching concurrency; and not `x && x` / `x || x` over the same side-effect-free operand, which is the same program.
+
 ## Conservative equivalent-mutant suppression
 
 Two locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:

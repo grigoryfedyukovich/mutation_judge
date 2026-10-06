@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New opt-in `connective` operator (`MJ-CONN-SWAP`): swaps `&&` and `||`. Kept separate from `boolean` (which drops an operand) so default results do not change. Skips loop conditions, loops that could hang, `goto` and self-recursive functions, ifs touching concurrency, and identical operands. Bumped `SemanticsVersion` to `v12`.
+
 - New opt-in `returnvalue` operator (`MJ-RET-ZERO`): replaces a returned expression with the zero value of its declared result type (integers/floats -> `0`, `string` -> `""`, slices/maps -> `nil`) when the signature shows the type. Catches a test that calls a function but never reads its result. Excludes bool, error, pointer/func/chan/interface, named, generic, array and struct results, literals, empty constructors, multi-value forwarding and replacements that would leave an unused variable or import. Bumped `SemanticsVersion` to `v11`.
 
 - Added `examples/deadstore` (dead-store equivalence demo, wired into `examples/run-all.sh`). Removed two unreachable SARIF properties (`responsible_tests`, `responsible_assertions`): SARIF only carries SURVIVED/TIMEOUT/UNKNOWN results and a failing test is only attributed to a KILLED mutant; the JSON report still carries both. Added tests for the end-to-end `responsible_assertions` path and for indented subtest control lines.

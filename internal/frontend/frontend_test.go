@@ -1511,6 +1511,127 @@ func first[T any](xs []T) []T {
 `, "xs -> nil")
 }
 
+// discoverConnectives returns "original -> replacement" for every
+// connective mutant in src.
+func discoverConnectives(t *testing.T, src string) []string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"connective": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range ms {
+		if m.Operator != "connective" || m.RuleID != "MJ-CONN-SWAP" {
+			t.Fatalf("unexpected mutant: %#v", m)
+		}
+		out = append(out, m.Original+" -> "+m.Replacement)
+	}
+	return out
+}
+
+func wantConnectives(t *testing.T, src string, want ...string) {
+	t.Helper()
+	got := discoverConnectives(t, src)
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestConnectiveSwapsAndAndOr(t *testing.T) {
+	wantConnectives(t, `package p
+
+func both(a, b bool) bool { return a && b }
+
+func either(a, b bool) bool { return a || b }
+`, "&& -> ||", "|| -> &&")
+}
+
+func TestConnectiveSkipsLoopConditions(t *testing.T) {
+	wantConnectives(t, `package p
+
+func f(n int, ok bool) int {
+	i := 0
+	for i < n && ok {
+		i++
+	}
+	return i
+}
+`)
+}
+
+func TestConnectiveSkipsLoopBodiesItCouldHang(t *testing.T) {
+	wantConnectives(t, `package p
+
+func f(a, b bool) {
+	done := false
+	for !done {
+		done = a && b
+	}
+}
+`)
+	// Counted loop: only a connective mentioning a header name is at risk.
+	wantConnectives(t, `package p
+
+func f(k int, a, b bool) bool {
+	r := false
+	for i := 0; i < k; i++ {
+		r = a || b
+		r = r && i > 1
+	}
+	return r
+}
+`, "|| -> &&")
+}
+
+func TestConnectiveSkipsRecursiveAndGotoFunctions(t *testing.T) {
+	wantConnectives(t, `package p
+
+func f(n int) bool {
+	return n == 0 || f(n-1)
+}
+
+func g(n int) int {
+retry:
+	if n < 3 && n > 0 {
+		n++
+		goto retry
+	}
+	return n
+}
+
+func h(a, b bool) bool { return a && b }
+`, "&& -> ||")
+}
+
+func TestConnectiveSkipsConcurrencyTouchingIfs(t *testing.T) {
+	wantConnectives(t, `package p
+
+func f(a, b bool, ch chan int) {
+	if a && b {
+		ch <- 1
+	}
+}
+`)
+}
+
+func TestConnectiveSkipsSameOperandBothSides(t *testing.T) {
+	wantConnectives(t, `package p
+
+func f(a bool) bool { return a && a }
+
+func g(a bool) bool { return a || a }
+`)
+}
+
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
 	d := t.TempDir()
 	src := []byte(`package p

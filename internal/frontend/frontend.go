@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v11"
+const SemanticsVersion = "mutation-judge-operators/v12"
 
 type Options struct {
 	Operators        map[string]bool
@@ -154,6 +154,11 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// by the *ast.FuncDecl, *ast.FuncLit, *ast.ForStmt and
 	// *ast.RangeStmt cases before the walk reaches the nested ifs.
 	condNoNegate := map[*ast.IfStmt]bool{}
+	// connNoSwap marks && / || expressions the connective operator must
+	// not swap, for the same termination and concurrency reasons as
+	// condNoNegate, but covering connectives anywhere (a return, an
+	// assignment), not just in an if condition.
+	connNoSwap := map[*ast.BinaryExpr]bool{}
 	// uses is only built when the statement operator is enabled.
 	var uses *useIndex
 	if opts.Operators["statement"] || opts.Operators["returnvalue"] {
@@ -208,6 +213,16 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					fmt.Sprintf("delete the left operand of %s", connector),
 					booleanDeletionSuggestion(x.Op, compact(right), compact(left)), "")
 			}
+			if opts.Operators["connective"] && (x.Op == token.LAND || x.Op == token.LOR) && !loopCondExpr[x] && !connNoSwap[x] &&
+				!(sameOperand(x.X, x.Y) && isSideEffectFreeOperand(x.X)) {
+				repl := "||"
+				if x.Op == token.LOR {
+					repl = "&&"
+				}
+				add("connective", "MJ-CONN-SWAP", x.OpPos, x.OpPos+token.Pos(len(x.Op.String())), repl,
+					fmt.Sprintf("replace logical connective %s with %s", x.Op, repl),
+					"add cases where exactly one operand is true, so && and || give different results", "")
+			}
 			if opts.Operators["arithmetic"] {
 				if repl, ok := arithmeticReplacement(x.Op); ok {
 					add("arithmetic", "MJ-ARITHMETIC", x.OpPos, x.OpPos+token.Pos(len(x.Op.String())), repl,
@@ -243,11 +258,13 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			}
 			if x.Body != nil && (containsGoto(x.Body) || selfRecursive(x)) {
 				markIfsUnder(x.Body, condNoNegate)
+				markConnectives(x.Body, connNoSwap)
 			}
 		case *ast.FuncLit:
 			mapReturns(x.Body, x.Type, retSig)
 			if containsGoto(x.Body) {
 				markIfsUnder(x.Body, condNoNegate)
+				markConnectives(x.Body, connNoSwap)
 			}
 		case *ast.ReturnStmt:
 			if !opts.Operators["returnvalue"] {
@@ -268,6 +285,9 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 					"add an assertion on this returned value; a test that calls the function but ignores or never varies this result will not notice a zero value", "")
 			}
 		case *ast.IfStmt:
+			if opts.Operators["connective"] && (condNoNegate[x] || touchesConcurrency(x.Cond) || touchesConcurrency(x.Body) || (x.Else != nil && touchesConcurrency(x.Else))) {
+				markConnectives(x.Cond, connNoSwap)
+			}
 			if opts.Operators["condition"] && negatableCondition(x, opts, condNoNegate) {
 				text := source(src, fset, x.Cond.Pos(), x.Cond.End())
 				add("condition", "MJ-COND-NEGATE", x.Cond.Pos(), x.Cond.End(), "!("+text+")",
@@ -332,6 +352,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 		case *ast.ForStmt:
 			markLoopStatements(x, stmtNoDelete)
 			markLoopIfs(x, condNoNegate)
+			markLoopConnectives(x, connNoSwap)
 			if x.Post != nil {
 				// Recorded unconditionally, regardless of whether the
 				// loop operator itself is enabled: this is the
@@ -961,18 +982,7 @@ func markLoopStatements(loop *ast.ForStmt, out map[ast.Stmt]bool) {
 		markAllStatements(loop.Body, out)
 		return
 	}
-	header := map[string]bool{}
-	for _, n := range []ast.Node{loop.Init, loop.Cond, loop.Post} {
-		if n == nil {
-			continue
-		}
-		ast.Inspect(n, func(c ast.Node) bool {
-			if id, ok := c.(*ast.Ident); ok {
-				header[id.Name] = true
-			}
-			return true
-		})
-	}
+	header := loopHeaderNames(loop)
 	ast.Inspect(loop.Body, func(c ast.Node) bool {
 		st, ok := c.(ast.Stmt)
 		if !ok {
@@ -1223,18 +1233,7 @@ func markLoopIfs(loop *ast.ForStmt, out map[*ast.IfStmt]bool) {
 		markIfsUnder(loop.Body, out)
 		return
 	}
-	header := map[string]bool{}
-	for _, n := range []ast.Node{loop.Init, loop.Cond, loop.Post} {
-		if n == nil {
-			continue
-		}
-		ast.Inspect(n, func(c ast.Node) bool {
-			if id, ok := c.(*ast.Ident); ok {
-				header[id.Name] = true
-			}
-			return true
-		})
-	}
+	header := loopHeaderNames(loop)
 	ast.Inspect(loop.Body, func(c ast.Node) bool {
 		st, ok := c.(*ast.IfStmt)
 		if !ok {
@@ -1376,6 +1375,72 @@ func trivialResult(e ast.Expr, zero string) bool {
 		return ok && id.Name == "make"
 	}
 	return false
+}
+
+// The connective operator swaps && and || (`a && b` -> `a || b`).
+// Where the boolean operator drops one operand, this changes how the
+// operands combine, which is the bug a suite with no case where exactly
+// one operand is true cannot see. Every restriction mirrors the
+// condition operator's, because swapping a connective can flip a branch
+// just as negating it does, and it applies to a connective anywhere
+// (a return value, an assignment), not only in an if: not inside a for
+// loop's own condition (the relational operator's rule), not in a loop
+// with no condition or post clause, nor, in a counted loop, a
+// connective mentioning a header name; not in a function containing
+// `goto` or calling itself by name; not in the condition of an if that
+// is excluded from negation or touches concurrency; and not when both
+// operands are the same side-effect-free expression (`x && x` and
+// `x || x` are the same program).
+func markConnectives(n ast.Node, out map[*ast.BinaryExpr]bool) {
+	ast.Inspect(n, func(c ast.Node) bool {
+		if b, ok := c.(*ast.BinaryExpr); ok && (b.Op == token.LAND || b.Op == token.LOR) {
+			out[b] = true
+		}
+		return true
+	})
+}
+
+func markLoopConnectives(loop *ast.ForStmt, out map[*ast.BinaryExpr]bool) {
+	if loop.Cond == nil || loop.Post == nil {
+		markConnectives(loop.Body, out)
+		return
+	}
+	header := loopHeaderNames(loop)
+	ast.Inspect(loop.Body, func(c ast.Node) bool {
+		b, ok := c.(*ast.BinaryExpr)
+		if !ok || (b.Op != token.LAND && b.Op != token.LOR) {
+			return true
+		}
+		mentions := false
+		ast.Inspect(b, func(x ast.Node) bool {
+			if id, ok := x.(*ast.Ident); ok && header[id.Name] {
+				mentions = true
+			}
+			return !mentions
+		})
+		if mentions {
+			out[b] = true
+		}
+		return true
+	})
+}
+
+// loopHeaderNames returns every identifier name in a for loop's init,
+// condition and post clauses.
+func loopHeaderNames(loop *ast.ForStmt) map[string]bool {
+	header := map[string]bool{}
+	for _, n := range []ast.Node{loop.Init, loop.Cond, loop.Post} {
+		if n == nil {
+			continue
+		}
+		ast.Inspect(n, func(c ast.Node) bool {
+			if id, ok := c.(*ast.Ident); ok {
+				header[id.Name] = true
+			}
+			return true
+		})
+	}
+	return header
 }
 
 func arithmeticReplacement(op token.Token) (string, bool) {

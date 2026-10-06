@@ -1181,6 +1181,40 @@ func TestReturnValueEndToEnd(t *testing.T) {
 	}
 }
 
+// TestConnectiveEndToEnd runs the connective operator through the real
+// binary: swapping InRange's && for || makes InRange(0, 1, 10) true, and
+// the table test's out-of-range cases kill it.
+func TestConnectiveEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "connective", "--format", "json", "./tests/integration/testdata/connective")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				RuleID      string `json:"rule_id"`
+				Original    string `json:"original"`
+				Replacement string `json:"replacement"`
+			} `json:"mutation"`
+			Verdict string `json:"verdict"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("want exactly 1 connective mutant, got %d:\n%s", len(report.Results), out)
+	}
+	r := report.Results[0]
+	if r.Mutation.RuleID != "MJ-CONN-SWAP" || r.Mutation.Original != "&&" || r.Mutation.Replacement != "||" || r.Verdict != "KILLED" {
+		t.Fatalf("unexpected result: %#v\n%s", r, out)
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
