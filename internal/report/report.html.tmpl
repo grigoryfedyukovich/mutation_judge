@@ -54,6 +54,12 @@
   {{range .Assertions}}<li><code>{{.Test}}</code> {{.File}}:{{.Line}}: {{.Message}}</li>{{end}}
   </ul>
   {{end}}
+  {{if .Panics}}
+  <p><strong>Crashed:</strong></p>
+  <ul>
+  {{range .Panics}}<li><code>{{.Test}}</code> {{.Message}}</li>{{end}}
+  </ul>
+  {{end}}
   {{if eq .Verdict "SURVIVED"}}
   <p><strong>Suggested test:</strong> {{.Mutation.Suggestion}}</p>
   <pre>{{.Mutation.Diff}}</pre>

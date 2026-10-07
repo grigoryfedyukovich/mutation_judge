@@ -39,6 +39,7 @@ type Result struct {
 	Output     string            `json:"output"`
 	Tests      []string          `json:"tests,omitempty"`
 	Assertions []model.Assertion `json:"assertions,omitempty"`
+	Panics     []model.Panic     `json:"panics,omitempty"`
 	DurationMS int64             `json:"duration_ms"`
 	ExitCode   int               `json:"exit_code"`
 	GoVersion  string            `json:"go_version"`
@@ -351,6 +352,7 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	res.Verdict, res.Tests = classifyEvents(events)
 	if res.Verdict == model.VerdictKilled {
 		res.Assertions = extractAssertions(events, res.Tests)
+		res.Panics = extractPanics(events, res.Tests)
 	}
 	return res
 }
@@ -651,6 +653,53 @@ func parseTestingLogLine(s string) (file string, line int, msg string, ok bool) 
 func isTestControlLine(s string) bool {
 	s = strings.TrimSpace(s)
 	return strings.HasPrefix(s, "=== ") || strings.HasPrefix(s, "--- ")
+}
+
+// extractPanics returns, per failed test, the first line of its own
+// output that begins in column 0 with `panic: ` or `fatal error: `, but
+// only when a `goroutine N [...]:` header follows in that same test's
+// output: the runtime always prints one with a real crash, and requiring
+// it keeps a test that merely prints "panic: ..." from being reported as
+// crashed. Matching is package-qualified for the same reason as
+// extractAssertions (see failedPkgTests). Output with no Test field is
+// never consulted.
+func extractPanics(events []testEvent, failedTests []string) []model.Panic {
+	if len(failedTests) == 0 {
+		return nil
+	}
+	failed := failedPkgTests(events)
+	first := map[string]model.Panic{}
+	trace := map[string]bool{}
+	var order []string
+	for _, e := range events {
+		if e.Action != "output" || e.Test == "" {
+			continue
+		}
+		key := e.Package + "\x00" + e.Test
+		if !failed[key] {
+			continue
+		}
+		for _, raw := range strings.SplitAfter(e.Output, "\n") {
+			line := strings.TrimRight(raw, "\r\n")
+			if _, seen := first[key]; !seen {
+				if strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: ") {
+					first[key] = model.Panic{Test: e.Test, Message: clipAssertionMessage(line)}
+					order = append(order, key)
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "goroutine ") && strings.Contains(line, " [") {
+				trace[key] = true
+			}
+		}
+	}
+	var out []model.Panic
+	for _, key := range order {
+		if trace[key] {
+			out = append(out, first[key])
+		}
+	}
+	return out
 }
 
 const assertionMessageRuneLimit = 240

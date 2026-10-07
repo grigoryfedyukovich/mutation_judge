@@ -69,6 +69,32 @@ func TestHTMLIncludesAssertions(t *testing.T) {
 	}
 }
 
+func TestTextAndHTMLIncludePanics(t *testing.T) {
+	r := model.Report{
+		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{"max_mutants": 0, "per_mutant_timeout": "1s"},
+		Summary: model.Summary{Generated: 1, Killed: 1, ScoreText: "100%"},
+		Results: []model.Result{{
+			Verdict: model.VerdictKilled, Responsible: []string{"TestA"},
+			Panics:   []model.Panic{{Test: "TestA", Message: "panic: index <3> out of range"}},
+			Mutation: model.Mutation{ID: "M-1", Description: "change", Span: model.Span{File: "p.go", StartLine: 1, StartCol: 1}},
+		}},
+	}
+	var text bytes.Buffer
+	if err := Render(&text, "text", r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "crashed: TestA: panic: index <3> out of range") {
+		t.Fatalf("missing crashed line: %s", text.String())
+	}
+	var page bytes.Buffer
+	if err := Render(&page, "html", r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(page.String(), "Crashed:") || !strings.Contains(page.String(), "index &lt;3&gt; out of range") {
+		t.Fatalf("html must show an escaped crash: %s", page.String())
+	}
+}
+
 func TestTextIncludesEquivalentProof(t *testing.T) {
 	r := model.Report{
 		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{"max_mutants": 0, "per_mutant_timeout": "1s"},

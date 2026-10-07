@@ -450,6 +450,75 @@ func TestExtractAssertionsScopedByPackageNotJustTestName(t *testing.T) {
 	}
 }
 
+func TestExtractPanicsReportsCrashWithTraceHeader(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "p", Test: "TestA"},
+		{Action: "output", Package: "p", Test: "TestA", Output: "panic: runtime error: index out of range [3] with length 3\n"},
+		{Action: "output", Package: "p", Test: "TestA", Output: "\n"},
+		{Action: "output", Package: "p", Test: "TestA", Output: "goroutine 7 [running]:\n"},
+		{Action: "output", Package: "p", Test: "TestA", Output: "\tp.go:10 +0x1\n"},
+	}
+	// TestA never gets a fail event: it was in flight when the process died.
+	got := extractPanics(events, []string{"TestA"})
+	if len(got) != 1 || got[0].Test != "TestA" || got[0].Message != "panic: runtime error: index out of range [3] with length 3" {
+		t.Fatalf("unexpected panics: %#v", got)
+	}
+}
+
+func TestExtractPanicsRequiresTraceHeaderAndColumnZero(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "p", Test: "TestPrints"},
+		{Action: "output", Package: "p", Test: "TestPrints", Output: "panic: not a real crash\n"},
+		{Action: "output", Package: "p", Test: "TestPrints", Output: "    p_test.go:5: got 1 want 2\n"},
+		{Action: "fail", Package: "p", Test: "TestPrints"},
+		{Action: "run", Package: "p", Test: "TestLogs"},
+		{Action: "output", Package: "p", Test: "TestLogs", Output: "    p_test.go:9: panic: just a log line\n"},
+		{Action: "output", Package: "p", Test: "TestLogs", Output: "goroutine 1 [running]:\n"},
+		{Action: "fail", Package: "p", Test: "TestLogs"},
+	}
+	if got := extractPanics(events, []string{"TestPrints", "TestLogs"}); len(got) != 0 {
+		t.Fatalf("a printed or indented panic line without a real crash must not count: %#v", got)
+	}
+}
+
+func TestExtractPanicsKeepsFirstLineAndFatalErrors(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "p", Test: "TestNested"},
+		{Action: "output", Package: "p", Test: "TestNested", Output: "panic: first [recovered]\n"},
+		{Action: "output", Package: "p", Test: "TestNested", Output: "\tpanic: second\n"},
+		{Action: "output", Package: "p", Test: "TestNested", Output: "panic: third\n"},
+		{Action: "output", Package: "p", Test: "TestNested", Output: "goroutine 8 [running]:\n"},
+		{Action: "fail", Package: "p", Test: "TestNested"},
+		{Action: "run", Package: "p", Test: "TestDead"},
+		{Action: "output", Package: "p", Test: "TestDead", Output: "fatal error: all goroutines are asleep - deadlock!\n"},
+		{Action: "output", Package: "p", Test: "TestDead", Output: "goroutine 1 [chan receive]:\n"},
+	}
+	got := extractPanics(events, []string{"TestNested", "TestDead"})
+	if len(got) != 2 || got[0].Message != "panic: first [recovered]" || got[1].Message != "fatal error: all goroutines are asleep - deadlock!" {
+		t.Fatalf("unexpected panics: %#v", got)
+	}
+}
+
+func TestExtractPanicsIsPackageScopedAndIgnoresUnattributedOutput(t *testing.T) {
+	events := []testEvent{
+		{Action: "run", Package: "a", Test: "TestScan"},
+		{Action: "output", Package: "a", Test: "TestScan", Output: "    a_test.go:3: wrong\n"},
+		{Action: "fail", Package: "a", Test: "TestScan"},
+		{Action: "run", Package: "b", Test: "TestScan"},
+		{Action: "output", Package: "b", Test: "TestScan", Output: "panic: from the passing package\n"},
+		{Action: "output", Package: "b", Test: "TestScan", Output: "goroutine 1 [running]:\n"},
+		{Action: "pass", Package: "b", Test: "TestScan"},
+		{Action: "output", Package: "a", Output: "panic: package level\n"},
+		{Action: "output", Package: "a", Output: "goroutine 1 [running]:\n"},
+	}
+	if got := extractPanics(events, []string{"TestScan"}); len(got) != 0 {
+		t.Fatalf("passing same-named test or Test-less output leaked: %#v", got)
+	}
+	if got := extractPanics(events, nil); got != nil {
+		t.Fatalf("no failed tests must give nil, got %#v", got)
+	}
+}
+
 func TestExtractAssertionsNilWhenNoFailedTests(t *testing.T) {
 	events := []testEvent{
 		{Action: "output", Test: "TestPass", Output: "    p_test.go:1: note\n"},

@@ -708,6 +708,9 @@ func makeResult(mut model.Mutation, rr runner.Result, cached, covered, coverageK
 	if len(rr.Assertions) > 0 {
 		evidence["responsible_assertions"] = rr.Assertions
 	}
+	if len(rr.Panics) > 0 {
+		evidence["responsible_panics"] = rr.Panics
+	}
 	if rr.Output != "" && rr.Verdict != model.VerdictSurvived {
 		evidence["backend_output"] = rr.Output
 	}
@@ -719,7 +722,7 @@ func makeResult(mut model.Mutation, rr runner.Result, cached, covered, coverageK
 		suggestion = mut.Suggestion
 	}
 	return model.Result{
-		Mutation: mut, Verdict: rr.Verdict, Responsible: rr.Tests, Assertions: rr.Assertions,
+		Mutation: mut, Verdict: rr.Verdict, Responsible: rr.Tests, Assertions: rr.Assertions, Panics: rr.Panics,
 		Covered: covered, CoverageKnown: coverageKnown,
 		Cached: cached, DurationMS: rr.DurationMS, Output: rr.Output,
 		Diagnostic: model.Diagnostic{

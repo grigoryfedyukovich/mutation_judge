@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v13"
+const SemanticsVersion = "mutation-judge-operators/v14"
 
 type Options struct {
 	Operators        map[string]bool

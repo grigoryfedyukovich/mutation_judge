@@ -119,6 +119,24 @@ type Assertion struct {
 	Message string `json:"message"`
 }
 
+// Panic is the first unrecovered panic or fatal error line the go test
+// -json stream attributed to a failed test (`panic: runtime error: index
+// out of range [3] with length 3`), kept only when the same test's
+// output also contains the `goroutine N [...]:` trace header the Go
+// runtime prints with it, so a test that merely prints a line starting
+// with "panic: " is not mistaken for a crash.
+//
+// It exists so a kill by crash is distinguishable from a kill by a
+// failed assertion: a mutant that makes the code panic is KILLED, but
+// the tests did not necessarily check anything about its behavior. A
+// crash that go test cannot attribute to a test (package init, a
+// goroutine that outlives its test, output with no Test field) simply
+// has no Panic -- the result stays test-only rather than guessing.
+type Panic struct {
+	Test    string `json:"test"`
+	Message string `json:"message"`
+}
+
 type Timing struct {
 	ParsingMS   int64 `json:"parsing_ms"`
 	BaselineMS  int64 `json:"baseline_ms"`
@@ -141,6 +159,7 @@ type Result struct {
 	Verdict       Verdict     `json:"verdict"`
 	Responsible   []string    `json:"responsible_tests,omitempty"`
 	Assertions    []Assertion `json:"responsible_assertions,omitempty"`
+	Panics        []Panic     `json:"responsible_panics,omitempty"`
 	Covered       bool        `json:"covered_by_selected_tests"`
 	CoverageKnown bool        `json:"coverage_known"`
 	Cached        bool        `json:"cached"`

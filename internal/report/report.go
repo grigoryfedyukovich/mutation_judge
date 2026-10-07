@@ -125,6 +125,9 @@ func renderText(dst io.Writer, r model.Report) error {
 		for _, a := range x.Assertions {
 			w.printf("  assertion: %s\n", formatAssertion(a))
 		}
+		for _, p := range x.Panics {
+			w.printf("  crashed: %s: %s\n", p.Test, p.Message)
+		}
 		if x.Verdict == model.VerdictSurvived {
 			w.printf("  suggested test: %s\n", x.Mutation.Suggestion)
 			for _, line := range strings.Split(strings.TrimSuffix(x.Mutation.Diff, "\n"), "\n") {
