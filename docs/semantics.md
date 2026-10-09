@@ -127,6 +127,17 @@ Because the function must be unexported, every possible caller is in its own pac
 
 Only `MJ-RET-ZERO` is covered. Arithmetic, relational and boundary mutants inside a discarded return expression are not claimed: swapping `*` for `/` can introduce a panic.
 
+### Slice bounds
+
+The opt-in **bounds** operator shifts one bound of a slice expression by one: the upper bound down (`s[:n]` -> `s[:n - 1]`, `MJ-SLICE-HIGH`) and the lower bound up (`s[k:]` -> `s[k + 1:]`, `MJ-SLICE-LOW`). It is the off-by-one check for slicing: a test that never inspects the exact extent of a returned slice lets either survive. A compound bound is parenthesized (`len(s)-1` -> `(len(s)-1) - 1`).
+
+Only slice expressions are mutated, never `a[i]`: slice bounds are always integers, but an index may be a map key of any type, and `m[k + 1]` on a string-keyed map would not compile. Off-by-one on an integer *literal* index is the `literal` operator's job. Left alone:
+
+- **Literal bounds and bounds with no identifier** (`s[:3]`), which the `literal` operator owns and where a constant shift can fail to compile (`s[:0 - 1]`); and bounds naming a constant declared in the same file, for the same reason. A constant declared in another file is not detected and may produce an `INVALID` mutant.
+- **`go` statements** (a panic on another goroutine takes down the whole test binary, with no test to attribute it to), **functions containing `goto`**, and **loops a shifted bound could stop ending**: `for len(s) < n { s = s[:len(s)+1] }` never ends once the bound is lowered. A loop with no condition or post clause excludes every slice expression in its body; in a counted loop only one mentioning a loop-header name; `range` loops are bounded by their operand and are not excluded.
+
+A shift can still panic (`s[k + 1:]` on a one-element slice). That is a kill by crash: the result carries `responsible_panics`, so it is visibly different from a kill by a failed assertion.
+
 ## Conservative equivalent-mutant suppression
 
 Three locally provable equivalent-mutant shapes are recognized. The first, for the boundary operator, was first documented as a real finding rather than a hypothetical one in `docs/evaluation.md`'s "Guarded sort comparisons" (this project's own self-hosting evaluation) and confirmed again, unprompted, when this suppression was implemented -- see below:

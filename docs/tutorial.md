@@ -879,4 +879,94 @@ The example runner builds a temporary executable and exercises all examples that
 ./examples/run-all.sh
 ```
 
-See [examples/README.md](../examples/README.md) for the example matrix and focused commands.
+See [examples/README.md](../examples/README.md) for the example matrix and focused commands. Section 21 walks through the six newest.
+
+## 21. Walkthrough: the opt-in operators that find unasserted behavior
+
+Sections 3 to 6 used operators that change a value or a comparison. A second family answers a different question: *does any test notice that this line did something?* These are all opt-in (add them with `--operators`), and each skips the shapes that would just hang the run or fail to compile; `docs/semantics.md` lists the exclusions for each.
+
+> **Status note.** The expected results below were derived by hand from the code and the example sources. Run `./scripts/verify-new-work.sh` to confirm them on your machine before relying on them. Lines are shown abbreviated (`...` stands for the mutant ID and path), and your suggested-test wording may differ slightly.
+
+### Covered is not asserted: statement deletion
+
+`Scan` in `examples/statement` sets two fields. Its test runs every line and checks the error and `Value`, but never reads `Valid`:
+
+```go
+func (f *Field) Scan(src string) error {
+	if src == "" {
+		return errors.New("empty source")
+	}
+	f.Value = src
+	f.Valid = true
+	return nil
+}
+```
+
+```bash
+./bin/mutation-judge --no-cache --operators statement ./examples/statement
+```
+
+```text
+KILLED ... delete assignment f.Value = src
+  killed by: TestScan
+  assertion: TestScan: field_test.go:N: Value = "", want abc
+SURVIVED ... delete assignment f.Valid = true
+  coverage: covered
+```
+
+Both lines are covered. Line coverage would call `Scan` fully tested; the survivor shows it is not. The `assertion:` line on the killed mutant is the `t.Errorf` text that fired, the evidence of *which check* noticed, where a test name alone only says which function ran. The survivor has no assertion line because nothing failed. To kill it, assert `f.Valid`.
+
+### Branch never distinguished: condition negation
+
+```bash
+./bin/mutation-judge --no-cache --operators condition ./examples/condition
+```
+
+`n < 0` in `Abs` becomes `!(n < 0)` and is killed. `trace != nil` in `Open` becomes `!(trace != nil)` and survives: the test passes a listener that does nothing, so skipping the call is invisible. The fix is a test whose listener records the call.
+
+### Called but never read: return-value replacement
+
+```bash
+./bin/mutation-judge --no-cache --operators returnvalue ./examples/returnvalue
+```
+
+`Scale`'s `n * 2` is replaced by `0` and killed; `Count`'s `len(xs)` is replaced by `0` and survives, because `TestCountRuns` calls `Count` and throws the answer away.
+
+### One operand at a time: connective swap
+
+```bash
+./bin/mutation-judge --no-cache --operators connective ./examples/connective
+```
+
+`InRange`'s `&&` becomes `||` and is killed by the out-of-range cases. `Eligible`'s swap survives because the test only uses inputs where both operands agree. A case with exactly one operand true kills it.
+
+### Off by one: slice bounds
+
+```bash
+./bin/mutation-judge --no-cache --operators bounds ./examples/bounds
+```
+
+`Head`'s upper bound shrinks and the length assertion fails. `Tail`'s lower bound advances and nothing notices. If a shift makes the code panic, the kill is reported with a `crashed:` line:
+
+```text
+KILLED ... advance slice lower bound k by one
+  killed by: TestSomething
+  crashed: TestSomething: panic: runtime error: slice bounds out of range [2:1]
+```
+
+A crash kill means the tests noticed the program fell over, not that they checked its answer, so it deserves less trust than an `assertion:` line. A crash `go test` cannot attribute to a test shows neither line; the result stays "test only" rather than guessing.
+
+### A mutant that cannot matter: discarded results
+
+```bash
+./bin/mutation-judge --no-cache --operators returnvalue ./examples/discarded
+```
+
+```text
+EQUIVALENT ... replace returned n * 2 with its zero value 0
+  proof: result 1 of unexported oom is discarded at all 1 of its call sites in package discarded ...
+KILLED ... replace returned n + 1 with its zero value 0
+  killed by: TestLevel
+```
+
+`oom` is unexported and its only caller, `Level`, discards the first result (`_, m := oom(n)`), so no one can observe that mutation. It is proved unobservable, never executed, and kept out of the score, like the guarded comparison in section 17. Like that case, the proof is deliberately narrow; `docs/semantics.md` ("Discarded result") lists every condition, and any other mention of the function's name blocks the claim.

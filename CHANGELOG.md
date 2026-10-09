@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New opt-in `bounds` operator (`MJ-SLICE-HIGH`, `MJ-SLICE-LOW`): shortens a slice expression's upper bound by one and advances its lower bound by one. Slice expressions only; skips literal and constant bounds, `go` statements, `goto` functions, and loops a shifted bound could stop ending. Bumped `SemanticsVersion` to `v15`.
+
 - Crash evidence on `KILLED` results: `responsible_panics` carries the first `panic: ` / `fatal error: ` line the `go test -json` stream attributed to a failed test, kept only when the same test's output also has the runtime's `goroutine N [...]:` trace header (so a test that merely prints `panic: ...` is not mistaken for a crash), matched package-qualified like assertions. It makes a kill by crash distinguishable from a kill by a failed assertion. Shown as `crashed:` in the text report and a `Crashed:` block in HTML. Bumped `SemanticsVersion` to `v14` so cached `KILLED` entries are re-run and pick it up.
 
 - Third locally provable equivalent shape, a discarded result: a `returnvalue` mutant (`MJ-RET-ZERO`) is marked `EQUIVALENT` and never executed when result i of an unexported, non-generic, unnamed-result function is thrown away (`_`, or a bare call) at every call site in its package, with at least one call site, and the replaced expression has no side effects and cannot panic. Every same-package `.go` file is scanned (tests and build-constrained files included); any other mention of the name, a parse failure, cgo, `//export`, assembly, or a module-wide `//go:linkname` naming it blocks the claim. Bumped `SemanticsVersion` to `v13`.

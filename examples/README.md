@@ -21,6 +21,12 @@ Or execute all non-Git examples:
 | `boundary_fixed` | The same mutant killed after adding the exact boundary case | `./bin/mutation-judge --no-cache --operators boundary ./examples/boundary_fixed` | 1 killed |
 | `equivalent` | A guarded comparison proved equivalent and never executed, alongside an ordinary killed one | `./bin/mutation-judge --no-cache --operators boundary ./examples/equivalent` | 1 killed, 1 equivalent |
 | `deadstore` | A dead-store boolean initializer proved equivalent and never executed, alongside two killed branch mutants | `./bin/mutation-judge --no-cache --operators boolean ./examples/deadstore` | 2 killed, 1 equivalent |
+| `statement` | Deleting a field assignment that a covering test never asserts on (the google/uuid `.Valid` shape) | `./bin/mutation-judge --no-cache --operators statement ./examples/statement` | 1 killed, 1 survived |
+| `condition` | Negating an `if` condition: a sign check killed, an unasserted listener guard surviving | `./bin/mutation-judge --no-cache --operators condition ./examples/condition` | 1 killed, 1 survived |
+| `returnvalue` | Zeroing a returned value: one asserted, one called but never read | `./bin/mutation-judge --no-cache --operators returnvalue ./examples/returnvalue` | 1 killed, 1 survived |
+| `discarded` | A result thrown away by every caller of an unexported function proved equivalent and never executed | `./bin/mutation-judge --no-cache --operators returnvalue ./examples/discarded` | 1 killed, 1 equivalent |
+| `connective` | Swapping `&&` and the other connective: a range check killed, a both-true-or-both-false test surviving | `./bin/mutation-judge --no-cache --operators connective ./examples/connective` | 1 killed, 1 survived |
+| `bounds` | Shifting slice bounds by one: one asserted, one only checked for not panicking | `./bin/mutation-judge --no-cache --operators bounds ./examples/bounds` | 1 killed, 1 survived |
 | `boolean` | Deleting either side of `&&` and attributing each kill | `./bin/mutation-judge --no-cache --operators boolean ./examples/boolean` | 2 killed |
 | `test_selection` | The verdict depends on the selected test command | `./bin/mutation-judge --no-cache --operators boolean --test-run '^TestVIPDiscount$' ./examples/test_selection` | 1 killed, 1 survived |
 | `arithmetic` | Numeric kills and a compile-invalid string mutation | `./bin/mutation-judge --no-cache --operators arithmetic ./examples/arithmetic` | 2 killed, 1 invalid |
@@ -33,6 +39,8 @@ Or execute all non-Git examples:
 | `assignment` | Compound assignment (`+=`/`-=`/`*=`/`/=`) and increment/decrement (`++`/`--`) mutation, one killed and two untested survivors | `./bin/mutation-judge --no-cache --operators assignment ./examples/assignment` | 1 killed, 2 survived |
 | `relational` | Equality/inequality (`==`/`!=`) mutation, one killed and one untested survivor | `./bin/mutation-judge --no-cache --operators relational ./examples/relational` | 1 killed, 1 survived |
 | `literal` | Integer literal mutation (each site gets a +1 and a -1 mutant) plus non-empty string emptying, several killed via a loop-count or prefix effect and several left untested | `./bin/mutation-judge --no-cache --operators literal ./examples/literal` | 5 killed, 3 survived |
+
+Expected results for the operators added most recently (`statement`, `condition`, `returnvalue`, `discarded`, `connective`, `bounds`) were derived by hand from the code and have not yet been confirmed by a run; `scripts/verify-new-work.sh` runs them.
 
 The examples are intentionally small enough that each mutant can be reasoned about manually. The exact timing fields vary by machine; mutant IDs remain stable only for the same path, source offset, original text, and replacement.
 

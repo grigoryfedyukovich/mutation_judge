@@ -1254,6 +1254,47 @@ func TestDiscardedResultEndToEnd(t *testing.T) {
 	}
 }
 
+// TestBoundsEndToEnd runs the bounds operator through the real binary:
+// shortening Head's upper bound changes the returned length and is KILLED
+// by an assertion; advancing Tail's lower bound is covered but never
+// observed and SURVIVES.
+func TestBoundsEndToEnd(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "bounds", "--format", "json", "./tests/integration/testdata/bounds")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Results []struct {
+			Mutation struct {
+				RuleID      string `json:"rule_id"`
+				Original    string `json:"original"`
+				Replacement string `json:"replacement"`
+			} `json:"mutation"`
+			Verdict string `json:"verdict"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, out)
+	}
+	want := map[string][2]string{
+		"n": {"MJ-SLICE-HIGH", "KILLED"},
+		"k": {"MJ-SLICE-LOW", "SURVIVED"},
+	}
+	if len(report.Results) != len(want) {
+		t.Fatalf("want %d mutants, got %d:\n%s", len(want), len(report.Results), out)
+	}
+	for _, r := range report.Results {
+		w, ok := want[r.Mutation.Original]
+		if !ok || w[0] != r.Mutation.RuleID || w[1] != r.Verdict {
+			t.Fatalf("unexpected result %#v (want %v):\n%s", r, w, out)
+		}
+	}
+}
+
 func projectRoot() string {
 	_, here, _, _ := runtime.Caller(0)
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))

@@ -18,6 +18,12 @@ run "boundary survivor" --operators boundary ./examples/boundary
 run "boundary fixed" --operators boundary ./examples/boundary_fixed
 run "boundary equivalent suppression" --operators boundary ./examples/equivalent
 run "boolean dead-store equivalence" --operators boolean ./examples/deadstore
+run "statement deletion survivor" --operators statement ./examples/statement
+run "condition negation" --operators condition ./examples/condition
+run "return value survivor" --operators returnvalue ./examples/returnvalue
+run "discarded result equivalence" --operators returnvalue ./examples/discarded
+run "connective swap" --operators connective ./examples/connective
+run "slice bounds" --operators bounds ./examples/bounds
 run "boolean attribution" --operators boolean ./examples/boolean
 run "full selected tests" --operators boolean ./examples/test_selection
 run "filtered selected tests" --operators boolean --test-run '^TestVIPDiscount$' ./examples/test_selection

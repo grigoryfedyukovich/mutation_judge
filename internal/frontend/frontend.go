@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v14"
+const SemanticsVersion = "mutation-judge-operators/v15"
 
 type Options struct {
 	Operators        map[string]bool
@@ -167,6 +167,10 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	// condNoNegate, but covering connectives anywhere (a return, an
 	// assignment), not just in an if condition.
 	connNoSwap := map[*ast.BinaryExpr]bool{}
+	// sliceNoShift marks slice expressions the bounds operator must
+	// not touch: inside a go statement, a goto function, or a loop whose
+	// termination a shifted bound could affect (see markLoopSlices).
+	sliceNoShift := map[*ast.SliceExpr]bool{}
 	// uses is only built when the statement operator is enabled.
 	var uses *useIndex
 	if opts.Operators["statement"] || opts.Operators["returnvalue"] {
@@ -272,11 +276,15 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 				markIfsUnder(x.Body, condNoNegate)
 				markConnectives(x.Body, connNoSwap)
 			}
+			if x.Body != nil && containsGoto(x.Body) {
+				markSlices(x.Body, sliceNoShift)
+			}
 		case *ast.FuncLit:
 			mapReturns(x.Body, x.Type, retSig)
 			if containsGoto(x.Body) {
 				markIfsUnder(x.Body, condNoNegate)
 				markConnectives(x.Body, connNoSwap)
+				markSlices(x.Body, sliceNoShift)
 			}
 		case *ast.ReturnStmt:
 			if !opts.Operators["returnvalue"] {
@@ -355,6 +363,23 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			// runs on another goroutine may be what unblocks a waiter,
 			// so deleting any of it risks an uninformative TIMEOUT.
 			markAllStatements(x.Call, stmtNoDelete)
+			markSlices(x.Call, sliceNoShift)
+		case *ast.SliceExpr:
+			if !opts.Operators["bounds"] || sliceNoShift[x] {
+				break
+			}
+			if x.High != nil && shiftableBound(x.High) {
+				text := source(src, fset, x.High.Pos(), x.High.End())
+				add("bounds", "MJ-SLICE-HIGH", x.High.Pos(), x.High.End(), parenIfNeeded(x.High, text)+" - 1",
+					fmt.Sprintf("shorten slice upper bound %s by one", clipStatement(text)),
+					"add a test that checks the exact length and contents of the slice at its upper boundary", "")
+			}
+			if x.Low != nil && shiftableBound(x.Low) {
+				text := source(src, fset, x.Low.Pos(), x.Low.End())
+				add("bounds", "MJ-SLICE-LOW", x.Low.Pos(), x.Low.End(), parenIfNeeded(x.Low, text)+" + 1",
+					fmt.Sprintf("advance slice lower bound %s by one", clipStatement(text)),
+					"add a test that checks the first element of the slice at its lower boundary", "")
+			}
 		case *ast.CaseClause:
 			deleteStatements(x.Body)
 			if opts.Operators["switch"] && len(x.Body) > 0 {
@@ -370,6 +395,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			markLoopStatements(x, stmtNoDelete)
 			markLoopIfs(x, condNoNegate)
 			markLoopConnectives(x, connNoSwap)
+			markLoopSlices(x, sliceNoShift)
 			if x.Post != nil {
 				// Recorded unconditionally, regardless of whether the
 				// loop operator itself is enabled: this is the
@@ -1472,6 +1498,100 @@ func loopHeaderNames(loop *ast.ForStmt) map[string]bool {
 		})
 	}
 	return header
+}
+
+// The bounds operator shifts one bound of a slice expression by one:
+// the upper bound down (`s[:n]` -> `s[:n - 1]`) and the lower bound up
+// (`s[k:]` -> `s[k + 1:]`). It is the off-by-one check for slicing: a
+// test that never inspects the exact extent of a returned slice lets
+// either survive. Only slice expressions are mutated, never `a[i]`:
+// slice bounds are always integers, but an index may be a map key of
+// any type, and `m[k + 1]` on a string-keyed map would not compile.
+// Each shift only ever makes the result shorter or the start later, so
+// the mutated expression is never longer than the original, but it can
+// still panic (`s[k + 1:]` on a one-element slice); that is a kill by
+// crash, reported with crash evidence rather than as an assertion.
+//
+// Left alone, each for a stated reason:
+//
+//   - bounds that are literals or contain no identifier (`s[:3]`): the
+//     literal operator owns them, and a constant shift can fail to
+//     compile (`s[:0 - 1]`);
+//   - bounds naming a constant declared in the same file, for the same
+//     compile reason;
+//   - slice expressions inside a `go` statement (a panic there takes
+//     down the whole test binary, with no test to attribute it to),
+//     inside a function containing `goto`, and inside a for loop that
+//     could stop ending because of the shift (a loop that grows a slice
+//     toward a length: `for len(s) < n { s = s[:len(s)+1] }` never ends
+//     once the bound is lowered). A loop with no condition or no post
+//     clause excludes every slice expression in its body; in a counted
+//     loop only one mentioning a name from the loop header; range loops
+//     are bounded by their operand and are not excluded.
+func shiftableBound(e ast.Expr) bool {
+	hasIdent := false
+	constant := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			hasIdent = true
+			if id.Obj != nil && id.Obj.Kind == ast.Con {
+				constant = true
+			}
+		}
+		return true
+	})
+	if !hasIdent || constant {
+		return false
+	}
+	if _, lit := unwrapParen(e).(*ast.BasicLit); lit {
+		return false
+	}
+	return true
+}
+
+// parenIfNeeded wraps text in parentheses unless e is already a primary
+// expression, so the appended `- 1` or `+ 1` applies to the whole bound:
+// `a | b` becomes `(a | b) - 1`, not `a | b - 1`.
+func parenIfNeeded(e ast.Expr, text string) string {
+	switch unwrapParen(e).(type) {
+	case *ast.Ident, *ast.BasicLit, *ast.CallExpr, *ast.SelectorExpr, *ast.IndexExpr:
+		return text
+	}
+	return "(" + text + ")"
+}
+
+func markSlices(n ast.Node, out map[*ast.SliceExpr]bool) {
+	ast.Inspect(n, func(c ast.Node) bool {
+		if s, ok := c.(*ast.SliceExpr); ok {
+			out[s] = true
+		}
+		return true
+	})
+}
+
+func markLoopSlices(loop *ast.ForStmt, out map[*ast.SliceExpr]bool) {
+	if loop.Cond == nil || loop.Post == nil {
+		markSlices(loop.Body, out)
+		return
+	}
+	header := loopHeaderNames(loop)
+	ast.Inspect(loop.Body, func(c ast.Node) bool {
+		s, ok := c.(*ast.SliceExpr)
+		if !ok {
+			return true
+		}
+		mentions := false
+		ast.Inspect(s, func(x ast.Node) bool {
+			if id, ok := x.(*ast.Ident); ok && header[id.Name] {
+				mentions = true
+			}
+			return !mentions
+		})
+		if mentions {
+			out[s] = true
+		}
+		return true
+	})
 }
 
 func arithmeticReplacement(op token.Token) (string, bool) {

@@ -1733,9 +1733,9 @@ func TestDiscardedResultRefusesAnyOtherMention(t *testing.T) {
 func TestDiscardedResultRefusesIneligibleFunctions(t *testing.T) {
 	use := "package p\n\nfunc Run() {\n\tOom(1)\n\toom(1)\n}\n"
 	for name, a := range map[string]string{
-		"exported":        "package p\n\nfunc Oom(n int) (int, int) { return n * 2, n + 1 }\n\nfunc oom(n int) (int, int) { return Oom(n) }\n",
-		"named results":   "package p\n\nfunc oom(n int) (a, b int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
-		"generic":         "package p\n\nfunc oom[T any](n int) (int, int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
+		"exported":         "package p\n\nfunc Oom(n int) (int, int) { return n * 2, n + 1 }\n\nfunc oom(n int) (int, int) { return Oom(n) }\n",
+		"named results":    "package p\n\nfunc oom(n int) (a, b int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
+		"generic":          "package p\n\nfunc oom[T any](n int) (int, int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
 		"export directive": "package p\n\n//export oom\nfunc oom(n int) (int, int) { return n * 2, n + 1 }\n\nfunc Oom(n int) {}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1781,6 +1781,132 @@ func TestDiscardedResultRefusesWhenASiblingDoesNotParse(t *testing.T) {
 		"b.go": "package p\n\nfunc Run() {\n\toom(1)\n}\n",
 		"c.go": "package p\n\nfunc broken( {\n",
 	}, map[string]bool{"n * 2": false, "n + 1": false})
+}
+
+// discoverBounds returns "original -> replacement" for every bounds
+// mutant in src.
+func discoverBounds(t *testing.T, src string) []string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"p.go"}, Options{Operators: map[string]bool{"bounds": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range ms {
+		if m.Operator != "bounds" || (m.RuleID != "MJ-SLICE-HIGH" && m.RuleID != "MJ-SLICE-LOW") {
+			t.Fatalf("unexpected mutant: %#v", m)
+		}
+		out = append(out, m.Original+" -> "+m.Replacement)
+	}
+	return out
+}
+
+func wantBounds(t *testing.T, src string, want ...string) {
+	t.Helper()
+	got := discoverBounds(t, src)
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestBoundsShiftsLowUpAndHighDown(t *testing.T) {
+	wantBounds(t, `package p
+
+func f(s []int, a, b int) []int { return s[a:b] }
+`, "a -> a + 1", "b -> b - 1")
+	wantBounds(t, `package p
+
+func f(s []int, n int) []int { return s[:n] }
+
+func g(s string, k int) string { return s[k:] }
+`, "n -> n - 1", "k -> k + 1")
+}
+
+func TestBoundsParenthesizesCompoundBounds(t *testing.T) {
+	wantBounds(t, `package p
+
+func f(s []int) []int { return s[:len(s)-1] }
+`, "len(s)-1 -> (len(s)-1) - 1")
+	wantBounds(t, `package p
+
+func g(s []int, a, b int) []int { return s[a|b:] }
+`, "a|b -> (a|b) + 1")
+}
+
+func TestBoundsSkipsLiteralAndConstantBounds(t *testing.T) {
+	wantBounds(t, `package p
+
+const n = 2
+
+func f(s []int) []int { return s[1:3] }
+
+func g(s []int) []int { return s[:0] }
+
+func h(s []int) []int { return s[:n] }
+`)
+}
+
+func TestBoundsSkipsLoopsAndGoroutinesAndGoto(t *testing.T) {
+	wantBounds(t, `package p
+
+func grow(s []int, n int) []int {
+	for len(s) < n {
+		s = s[:len(s)+1]
+	}
+	return s
+}
+
+func spawn(s []int, k int) {
+	go func() {
+		_ = s[k:]
+	}()
+}
+
+func jump(s []int, k int) []int {
+retry:
+	if k < 0 {
+		k++
+		goto retry
+	}
+	return s[k:]
+}
+`)
+}
+
+func TestBoundsCountedLoopOnlySkipsHeaderNames(t *testing.T) {
+	wantBounds(t, `package p
+
+func f(s []int, k, n int) int {
+	t := 0
+	for i := 0; i < n; i++ {
+		t += len(s[i:])
+		t += len(s[k:])
+	}
+	return t
+}
+`, "k -> k + 1")
+}
+
+func TestBoundsRangeLoopsAreAllowed(t *testing.T) {
+	wantBounds(t, `package p
+
+func f(s []int, n int) int {
+	t := 0
+	for range s {
+		t += len(s[:n])
+	}
+	return t
+}
+`, "n -> n - 1")
 }
 
 func TestDiscoverAssignmentSwapsCompoundOperators(t *testing.T) {
