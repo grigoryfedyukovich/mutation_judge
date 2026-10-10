@@ -216,20 +216,15 @@ What this does *not* try to detect: a test that would cover a line only when run
 
 ## Parallel isolated workers (`--workers`)
 
-Opt-in (`--workers N`, default `1` — sequential, byte-for-byte the same
-code path as every earlier version) concurrent mutant execution. Each
-worker gets its own fully independent sandbox (the same `CopyModule`
-used for the single sequential sandbox, just called once per worker
-instead of once per whole analysis — cheaply, where copy-on-write
-cloning applies; see above), which is what makes concurrent execution
-safe at all: nothing in the workspace, runner, or cache packages holds
-shared mutable state, so two workers applying, running, and restoring
-mutations on two *different* sandbox directories can never conflict.
-That was established by reviewing `cache.Store` (stateless, one file per
-key, atomic rename), `workspace.Apply`/`CopyModule` (no package-level
-mutable state), and `coverage.Map.Covered` (read-only after the
-sequential prepare phase completes, safe for concurrent reads) before
-any concurrent code was written, not assumed afterward.
+Opt-in (`--workers N`, default `1`) concurrent mutant execution. All
+executions, sequential and parallel, use the same single prepared snapshot
+as the input to a new independent writable sandbox **for every mutant**.
+Workers no longer reuse directories between mutants; baseline tests, test
+listing, and per-test profiling also operate on disposable fresh copies.
+This prevents false kills and missing kills when tests mutate fixtures or
+create files as side effects. Only read-only snapshot content and the
+content-addressed cache are shared. The cost is one copy per execution,
+not one per worker; reflink support can substantially reduce that cost.
 
 **This is the one item in this document where the environment's single
 vCPU genuinely limits what can be verified — but not in the way it might
@@ -271,7 +266,7 @@ Verified:
   confirms a mid-run cancellation still yields a correct, non-hanging
   partial report (`Complete: false`, containing whatever did finish).
 - **Hard-error propagation**: `TestParallelExecutionHardErrorStopsAllWorkers`
-  confirms an `Apply`/restore failure in one worker (as opposed to an
+  confirms an `Apply`/sandbox preparation failure in one worker (as opposed to an
   ordinary verdict) stops every worker promptly via an inner context
   derived from the run's own context — reusing the exact mechanism that
   already stops in-flight `go test` processes on SIGINT/SIGTERM, rather
@@ -294,11 +289,11 @@ elsewhere in the key). `TestCacheKeyIsInsensitiveToWorkerCount` locks
 this in permanently, and was confirmed to fail against the reverted
 code before being kept.
 
-**Cost**: W workers means W independent sandboxes, multiplying the
-`CopyModule` cost measured earlier by W — directly why the reflink work
-above matters more with this feature enabled than without it, since it
-turns that multiplication into a near-free one on filesystems that
-support it.
+**Cost**: Each mutant now requires a separate full sandbox copy, regardless
+of `--workers`. Up to W copies are live simultaneously, and copy overhead
+is proportional to the number of actual mutant executions plus baseline
+and profiling. This favors correctness over reuse; reflinks can make the
+copying significantly cheaper on supported filesystems.
 
 The second performance item this measurement motivated: copy-on-write /
 reflink sandbox creation.

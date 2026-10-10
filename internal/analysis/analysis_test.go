@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -909,5 +910,119 @@ func Less(a, b Item) bool {
 	// INVALID/TIMEOUT/UNKNOWN/UNSUPPORTED: 1 killed, 0 survived -> 100%.
 	if r.Summary.Score != 100 {
 		t.Fatalf("expected a 100%% score (1 killed / (1 killed + 0 survived), equivalent excluded), got %v", r.Summary.Score)
+	}
+}
+
+// A test that modifies its working tree must not poison baseline profiling,
+// later mutants, or the next task handled by a parallel worker. Each mutant
+// is deliberately unobservable to the test, so every verdict must survive.
+func TestFreshSandboxForEveryExecution(t *testing.T) {
+	const source = `package p
+func A(x int) bool { return x > 0 }
+func B(x int) bool { return x > 1 }
+func C(x int) bool { return x > 2 }
+func D(x int) bool { return x > 3 }
+`
+	const testSource = `package p
+import (
+    "os"
+    "testing"
+)
+func TestWeak(t *testing.T) {
+    if _, err := os.Stat("sentinel"); err == nil { t.Fatal("test observed a previous execution") } else if !os.IsNotExist(err) { t.Fatal(err) }
+    b, err := os.ReadFile("testdata/fixture")
+    if err != nil || string(b) != "pristine" { t.Fatalf("fixture contaminated: %q, %v", b, err) }
+    if _, err := os.Stat("testdata/must-exist"); err != nil { t.Fatalf("fixture deleted by previous run: %v", err) }
+    if err := os.WriteFile("sentinel", []byte("written"), 0600); err != nil { t.Fatal(err) }
+    if err := os.WriteFile("testdata/fixture", []byte("dirty"), 0600); err != nil { t.Fatal(err) }
+    if err := os.Remove("testdata/must-exist"); err != nil { t.Fatal(err) }
+    if !A(5) || !B(5) || !C(5) || !D(5) { t.Fatal("unexpected value") }
+}
+`
+	for _, workers := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("workers-%d", workers), func(t *testing.T) {
+			dir := testProject(t, source)
+			if err := os.WriteFile(filepath.Join(dir, "p_test.go"), []byte(testSource), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "testdata"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "testdata", "fixture"), []byte("pristine"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "testdata", "must-exist"), []byte("fixture"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Default()
+			cfg.Cache = false
+			cfg.Operators = []string{"boundary"}
+			cfg.Workers = workers
+			// The profiling runs must also start from pristine state after
+			// the baseline and after each other.
+			cfg.CoverageTestSelection = true
+			report, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), Request{
+				CWD: dir, Patterns: []string{"."}, Config: cfg,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Complete || len(report.Results) != 4 {
+				t.Fatalf("incomplete or unexpected result count: %+v", report.Summary)
+			}
+			if len(report.Warnings) != 0 {
+				t.Fatalf("unexpected warnings (profiling may have fallen back): %v", report.Warnings)
+			}
+			for _, result := range report.Results {
+				if result.Verdict != model.VerdictSurvived {
+					t.Fatalf("%s: got %s, want SURVIVED", result.Mutation.ID, result.Verdict)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(dir, "sentinel")); !os.IsNotExist(err) {
+				t.Fatalf("host checkout contaminated: %v", err)
+			}
+			b, err := os.ReadFile(filepath.Join(dir, "testdata", "fixture"))
+			if err != nil || string(b) != "pristine" {
+				t.Fatalf("host fixture contaminated: %q: %v", b, err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "testdata", "must-exist")); err != nil {
+				t.Fatalf("host fixture was deleted: %v", err)
+			}
+		})
+	}
+}
+
+// A host edit that happens after discovery must not affect the content
+// executed by later mutants (parallel workers always clone the snapshot).
+func TestPreparedSnapshotNotLiveHostTree(t *testing.T) {
+	dir, verdicts := fourMutantFixture(t)
+	cfg := config.Default()
+	cfg.Cache = false
+	cfg.Operators = []string{"boundary"}
+	cfg.Workers = 2
+	engine := Engine{Version: "test", Backend: &contentAwareFakeBackend{relPath: "p.go", verdicts: verdicts}}
+	var once sync.Once
+	engine.Progress = func(Progress) {
+		once.Do(func() {
+			if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte("package p\n"), 0o644); err != nil {
+				t.Errorf("edit host checkout: %v", err)
+			}
+		})
+	}
+	report, err := engine.Analyze(context.Background(), Request{CWD: dir, Patterns: []string{"."}, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Results) != 4 || !report.Complete {
+		t.Fatalf("expected four complete results: %+v", report.Summary)
+	}
+	for i, result := range report.Results {
+		want := model.VerdictSurvived
+		if i == 1 || i == 3 {
+			want = model.VerdictKilled
+		}
+		if result.Verdict != want {
+			t.Errorf("mutant %d: got %s, want %s", i, result.Verdict, want)
+		}
 	}
 }

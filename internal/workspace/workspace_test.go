@@ -757,3 +757,27 @@ func TestSingleModuleWorkspaceWithoutReplaceIsAllowed(t *testing.T) {
 		t.Fatalf("root=%s want %s", root, mod)
 	}
 }
+
+func TestApplyCheckedRejectsStaleOriginalWithoutWriting(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "p.go")
+	const source = "package p\nvar N = 1\n"
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	at := strings.Index(source, "1")
+	if _, err := ApplyChecked(root, "p.go", at, at+1, "0", "2"); err == nil {
+		t.Fatal("accepted stale original")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != source {
+		t.Fatalf("failed application changed source: %q: %v", got, err)
+	}
+	if _, err := ApplyChecked(root, "p.go", at, at+1, "1", "2"); err != nil {
+		t.Fatalf("rejected correct original: %v", err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil || string(got) != strings.Replace(source, "1", "2", 1) {
+		t.Fatalf("replacement missing: %q: %v", got, err)
+	}
+}

@@ -572,6 +572,16 @@ func CopyModule(root, cacheDir string) (string, func(), error) {
 }
 
 func Apply(root string, rel string, start, end int, replacement string) (func() error, error) {
+	return apply(root, rel, start, end, "", replacement, false)
+}
+
+// ApplyChecked refuses stale or mismatched mutation spans. The expected
+// original bytes come from discovery against the immutable snapshot.
+func ApplyChecked(root, rel string, start, end int, expected, replacement string) (func() error, error) {
+	return apply(root, rel, start, end, expected, replacement, true)
+}
+
+func apply(root, rel string, start, end int, expected, replacement string, checkOriginal bool) (func() error, error) {
 	path, err := secureExistingPath(root, rel)
 	if err != nil {
 		return nil, err
@@ -589,6 +599,9 @@ func Apply(root string, rel string, start, end int, replacement string) (func() 
 	}
 	if start < 0 || end <= start || end > len(original) {
 		return nil, fmt.Errorf("invalid mutation span %d:%d for %s (%d bytes)", start, end, rel, len(original))
+	}
+	if checkOriginal && string(original[start:end]) != expected {
+		return nil, fmt.Errorf("mutation span %d:%d in %s differs from discovered original %q (got %q)", start, end, rel, expected, string(original[start:end]))
 	}
 	mutated := make([]byte, 0, len(original)-(end-start)+len(replacement))
 	mutated = append(mutated, original[:start]...)

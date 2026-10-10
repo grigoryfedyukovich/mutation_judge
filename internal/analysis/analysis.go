@@ -48,7 +48,6 @@ type preparedAnalysis struct {
 	discovered      int
 	parsingMS       int64
 	sourceDigest    string
-	coveragePath    string
 	backendName     string
 	backendVersion  string
 	toolchain       runner.ToolchainInfo
@@ -210,6 +209,20 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 		}
 	}
 
+	// All discovery and verdicts must observe one immutable input tree.
+	// The host may be edited during a long analysis, but it is never
+	// consulted again for mutant execution or cache identity.
+	snapshot, cleanup, err := workspace.CopyModule(root, req.Config.CacheDir)
+	if err != nil {
+		return preparedAnalysis{}, err
+	}
+	preparedOK := false
+	defer func() {
+		if !preparedOK {
+			cleanup()
+		}
+	}()
+
 	parseStart := time.Now()
 	var changed map[string]map[int]bool
 	if req.Config.ChangedBase != "" {
@@ -222,7 +235,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	for _, op := range req.Config.Operators {
 		opset[op] = true
 	}
-	mutants, err := frontend.Discover(root, files, frontend.Options{
+	mutants, err := frontend.Discover(snapshot, files, frontend.Options{
 		Operators:        opset,
 		IncludeGenerated: req.Config.IncludeGenerated,
 		ChangedLines:     changed,
@@ -236,24 +249,18 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	}
 	parsingMS := time.Since(parseStart).Milliseconds()
 
-	sourceDigest, err := workspace.Digest(root, req.Config.CacheDir)
+	sourceDigest, err := workspace.Digest(snapshot, req.Config.CacheDir)
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
-	sandbox, cleanup, err := workspace.CopyModule(root, req.Config.CacheDir)
-	if err != nil {
-		return preparedAnalysis{}, err
-	}
-	coveragePath := filepath.Join(sandbox, ".mutation-judge", "coverage.out")
-	if err := os.MkdirAll(filepath.Dir(coveragePath), 0o755); err != nil {
-		cleanup()
-		return preparedAnalysis{}, err
-	}
+	// The snapshot is a template, never a runnable workspace. A test may
+	// write anywhere in its sandbox, so no sandbox is reused.
 	backendName, backendVersion := backendIdentity(e.Backend)
+	preparedOK = true
 	return preparedAnalysis{
-		root: root, workRel: filepath.ToSlash(workRel), sandbox: sandbox, cleanup: cleanup,
+		root: root, workRel: filepath.ToSlash(workRel), sandbox: snapshot, cleanup: cleanup,
 		mutants: mutants, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
-		coveragePath: coveragePath, backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
+		backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
 		filePackage: filePackage, testScopes: testScopes, pkgs: pkgs,
 	}, nil
 }
@@ -284,16 +291,25 @@ func fileOwningPackages(root string, pkgs []workspace.Package) (map[string]strin
 
 func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis) (covermap.Map, bool, int64, error) {
 	started := time.Now()
+	sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+	if err != nil {
+		return covermap.Map{}, false, time.Since(started).Milliseconds(), fmt.Errorf("create clean baseline sandbox: %w", err)
+	}
+	defer cleanup()
+	coveragePath := filepath.Join(sandbox, ".mutation-judge", "coverage.out")
+	if err := os.MkdirAll(filepath.Dir(coveragePath), 0o755); err != nil {
+		return covermap.Map{}, false, time.Since(started).Milliseconds(), err
+	}
 	baseline := e.Backend.Run(ctx, runner.Request{
-		Root: p.sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
-		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, CoverageOut: p.coveragePath,
+		Root: sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
+		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, CoverageOut: coveragePath,
 		GoVersion: p.toolchain.GoVersion,
 	})
 	elapsed := time.Since(started).Milliseconds()
 	if baseline.Verdict != model.VerdictSurvived {
 		return covermap.Map{}, false, elapsed, fmt.Errorf("baseline tests must pass before mutation analysis (verdict %s):\n%s", baseline.Verdict, baseline.Output)
 	}
-	coverage, err := covermap.Parse(p.coveragePath, p.sandbox)
+	coverage, err := covermap.Parse(coveragePath, sandbox)
 	return coverage, err == nil, elapsed, nil
 }
 
@@ -322,25 +338,45 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 // test scope, never a source of correctness risk on its own.
 func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p preparedAnalysis) (covermap.PerTest, error) {
 	var per covermap.PerTest
-	profilePath := filepath.Join(p.sandbox, ".mutation-judge", "pertest-coverage.out")
 	for _, pkg := range p.pkgs {
 		if pkg.Error != nil && pkg.Error.Err != "" || !pkg.HasOwnTests() {
 			continue
 		}
-		names, err := runner.ListTests(ctx, p.sandbox, p.workRel, pkg.ImportPath, req.Config.Timeout)
+		// Test initialization during enumeration may also write fixtures.
+		// Never let that change the inputs of an individual test.
+		listing, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+		if err != nil {
+			return covermap.PerTest{}, fmt.Errorf("create listing sandbox for %s: %w", pkg.ImportPath, err)
+		}
+		names, err := runner.ListTests(ctx, listing, p.workRel, pkg.ImportPath, req.Config.Timeout)
+		cleanup()
 		if err != nil {
 			return covermap.PerTest{}, fmt.Errorf("listing tests in %s: %w", pkg.ImportPath, err)
 		}
 		for _, name := range names {
+			if err := ctx.Err(); err != nil {
+				return covermap.PerTest{}, err
+			}
+			sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+			if err != nil {
+				return covermap.PerTest{}, fmt.Errorf("create profiling sandbox for %s: %w", name, err)
+			}
+			profilePath := filepath.Join(sandbox, ".mutation-judge", "pertest-coverage.out")
+			if err := os.MkdirAll(filepath.Dir(profilePath), 0o755); err != nil {
+				cleanup()
+				return covermap.PerTest{}, err
+			}
 			result := e.Backend.Run(ctx, runner.Request{
-				Root: p.sandbox, WorkRel: p.workRel, Patterns: []string{pkg.ImportPath},
+				Root: sandbox, WorkRel: p.workRel, Patterns: []string{pkg.ImportPath},
 				TestRun: "^" + regexp.QuoteMeta(name) + "$", Timeout: req.Config.Timeout, CoverageOut: profilePath,
 				GoVersion: p.toolchain.GoVersion,
 			})
 			if result.Verdict != model.VerdictSurvived {
+				cleanup()
 				return covermap.PerTest{}, fmt.Errorf("%s (in %s) must pass when run in isolation (verdict %s):\n%s", name, pkg.ImportPath, result.Verdict, result.Output)
 			}
-			m, err := covermap.Parse(profilePath, p.sandbox)
+			m, err := covermap.Parse(profilePath, sandbox)
+			cleanup()
 			if err != nil {
 				return covermap.PerTest{}, fmt.Errorf("parsing coverage profile for %s: %w", name, err)
 			}
@@ -350,12 +386,8 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 	return per, nil
 }
 
-// runOneMutant executes a single mutant against a given sandbox and is
-// shared, unmodified, by both the sequential and parallel execution
-// paths below -- extracted specifically so there is one place that
-// decides cache keys, applies/restores the mutation, and classifies the
-// result, rather than two independently-maintained copies that could
-// drift out of sync with each other over time.
+// runOneMutant clones a fresh writable sandbox for every cache miss; all
+// workers share only the read-only snapshot and the cache store.
 // cacheRelevantConfig is the subset of configuration whose value could
 // actually affect an individual mutant's own test outcome, used for the
 // cache key instead of the full Config.AsMap(). Fields that only affect
@@ -388,7 +420,7 @@ func cacheRelevantConfig(c config.Config) map[string]any {
 	}
 }
 
-func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysis, store cache.Store, cfgJSON []byte, sandbox string, mut model.Mutation, coverage covermap.Map, coverageKnown bool) (result model.Result, executed bool, cachePutErr error, hardErr error) {
+func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysis, store cache.Store, cfgJSON []byte, mut model.Mutation, coverage covermap.Map, coverageKnown bool) (result model.Result, executed bool, cachePutErr error, hardErr error) {
 	covered, known := false, false
 	if coverageKnown {
 		covered, known = coverage.Covered(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine)
@@ -420,7 +452,14 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 	)
 	backendResult, hit := store.Get(key)
 	if !hit {
-		restore, err := workspace.Apply(sandbox, mut.Span.File, mut.Span.StartByte, mut.Span.EndByte, mut.Replacement)
+		// Every mutant starts from the same pristine snapshot, including
+		// when multiple jobs pass through the same worker goroutine.
+		sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+		if err != nil {
+			return model.Result{}, false, nil, fmt.Errorf("create clean sandbox for %s: %w", mut.ID, err)
+		}
+		defer cleanup()
+		_, err = workspace.ApplyChecked(sandbox, mut.Span.File, mut.Span.StartByte, mut.Span.EndByte, mut.Original, mut.Replacement)
 		if err != nil {
 			return model.Result{}, false, nil, err
 		}
@@ -429,14 +468,9 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 			TestRun: testRun, Timeout: req.Config.Timeout,
 			GoVersion: p.toolchain.GoVersion,
 		})
-		if restoreErr := restore(); restoreErr != nil {
-			return model.Result{}, false, nil, fmt.Errorf("restore %s after %s: %w", mut.Span.File, mut.ID, restoreErr)
-		}
 		executed = true
-		// A cache write failure does not invalidate this mutant's
-		// result -- it was still correctly executed and classified --
-		// so it stays non-fatal; the caller aggregates these into the
-		// report's Warnings evidence field instead of failing outright.
+		// Only the disposable sandbox is mutated; no restoration is
+		// needed, and arbitrary fixture changes cannot reach later tests.
 		if putErr := store.Put(key, backendResult); putErr != nil {
 			cachePutErr = putErr
 		}
@@ -476,7 +510,7 @@ func (e Engine) executeMutantsSequential(ctx context.Context, req Request, p pre
 		if e.Progress != nil {
 			e.Progress(Progress{Index: i + 1, Total: len(p.mutants), Mutation: mut})
 		}
-		result, executed, cachePutErr, hardErr := e.runOneMutant(ctx, req, p, store, cfgJSON, p.sandbox, mut, coverage, coverageKnown)
+		result, executed, cachePutErr, hardErr := e.runOneMutant(ctx, req, p, store, cfgJSON, mut, coverage, coverageKnown)
 		if hardErr != nil {
 			return nil, false, 0, nil, hardErr
 		}
@@ -505,33 +539,10 @@ func (e Engine) executeMutantsSequential(ctx context.Context, req Request, p pre
 	return results, complete, time.Since(started).Milliseconds(), warnings, nil
 }
 
-// executeMutantsParallel is the opt-in (config.Workers > 1) counterpart
-// to executeMutantsSequential above, sharing the exact same per-mutant
-// logic via runOneMutant. Each worker gets its own fully independent
-// sandbox (created the same way the single sequential sandbox is,
-// cheaply where the platform supports copy-on-write cloning -- see
-// docs/performance.md), which is what makes concurrent execution safe:
-// nothing in the workspace/runner/cache packages holds shared mutable
-// state, so two workers applying/running/restoring mutations on two
-// DIFFERENT sandbox directories can never conflict with each other. That
-// was verified by review before this was written, not assumed -- see
-// docs/performance.md for the specific things checked.
-//
-// Output ordering is deterministic despite parallel, out-of-order
-// completion: results are written into a slice pre-sized and indexed by
-// each mutant's position in the (already deterministically ordered)
-// discovery order, then collected back into a plain slice in that same
-// order at the end -- never in whichever order workers happened to
-// finish. Running the same analysis twice with the same worker count
-// produces results in the same order every time (see
-// TestParallelExecutionIsDeterministic).
-//
-// A hard error from any one worker (an Apply or restore failure, as
-// opposed to an ordinary mutant verdict) cancels an inner context
-// derived from ctx, which every worker and the work-dispatching
-// goroutine observe on their next iteration -- reusing the same
-// cancellation mechanism that already stops in-flight `go test`
-// processes on SIGINT/SIGTERM, rather than inventing a second one.
+// executeMutantsParallel dispatches independent mutations to bounded workers.
+// Each uncached mutation clones the same immutable prepared snapshot; worker
+// goroutines do not own or reuse writable trees. Completion order never
+// changes the deterministic ordering of the report's results.
 func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, []string, error) {
 	started := time.Now()
 	if len(p.mutants) == 0 {
@@ -552,22 +563,6 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 		workers = len(p.mutants) // no point creating more sandboxes than there are mutants to run
 	}
 
-	sandboxes := make([]string, 0, workers)
-	var sandboxCleanups []func()
-	defer func() {
-		for _, c := range sandboxCleanups {
-			c()
-		}
-	}()
-	for i := 0; i < workers; i++ {
-		sandbox, cleanup, err := workspace.CopyModule(p.root, req.Config.CacheDir)
-		if err != nil {
-			return nil, false, 0, nil, fmt.Errorf("create sandbox for worker %d: %w", i, err)
-		}
-		sandboxes = append(sandboxes, sandbox)
-		sandboxCleanups = append(sandboxCleanups, cleanup)
-	}
-
 	innerCtx, cancelInner := context.WithCancel(ctx)
 	defer cancelInner()
 
@@ -581,9 +576,9 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 
 	work := make(chan int)
 	var wg sync.WaitGroup
-	for _, sandbox := range sandboxes {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func(sandbox string) {
+		go func() {
 			defer wg.Done()
 			for idx := range work {
 				if innerCtx.Err() != nil {
@@ -595,7 +590,7 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 					e.Progress(Progress{Index: idx + 1, Total: len(p.mutants), Mutation: mut})
 					progressMu.Unlock()
 				}
-				result, executed, cachePutErr, err := e.runOneMutant(innerCtx, req, p, store, cfgJSON, sandbox, mut, coverage, coverageKnown)
+				result, executed, cachePutErr, err := e.runOneMutant(innerCtx, req, p, store, cfgJSON, mut, coverage, coverageKnown)
 				if err != nil {
 					mu.Lock()
 					if hardErr == nil {
@@ -618,7 +613,7 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 				}
 				mu.Unlock()
 			}
-		}(sandbox)
+		}()
 	}
 
 	go func() {

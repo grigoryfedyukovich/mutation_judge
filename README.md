@@ -93,7 +93,7 @@ Important flags:
 | `--progress=false` | Suppress per-mutant progress lines on stderr |
 | `--narrow-test-scope` | Run each mutant only against tests that can observe it, computed from the module's dependency graph, instead of the full pattern set every time; opt-in, see `docs/performance.md` |
 | `--coverage-test-selection` | Run each mutant only against the specific tests whose baseline coverage reaches its span, on top of any `--narrow-test-scope` package narrowing; opt-in and expensive (profiles every top-level test individually up front), see `docs/performance.md` |
-| `--workers N` | Run N mutants concurrently, each in its own sandbox; default 1 (sequential, unchanged from earlier versions), see `docs/performance.md` |
+| `--workers N` | Run up to N mutants concurrently; every mutant gets a fresh sandbox copied from the same input snapshot; default 1, see `docs/performance.md` |
 
 A successful analysis returns `0` regardless of survivors. Invalid input and baseline failures return `2`; internal failures return `3`; an enabled CI score policy uses its configured code.
 
@@ -201,9 +201,9 @@ progress = true
 
 1. Resolve package patterns with `go list`.
 2. Parse production `.go` files and lower mutation candidates to language-neutral source spans plus replacements.
-3. Copy the module to a temporary sandbox; the working tree is never mutated.
+3. Copy the module into a single stable snapshot; the working tree is never mutated.
 4. Run a clean baseline `go test -count=1` with coverage. Analysis stops if the baseline does not pass.
-5. Apply exactly one mutant with an atomic same-directory replacement, run the same selected tests (or, with `--narrow-test-scope`, only the subset of tests that can actually observe that mutant's package — see `docs/performance.md`), classify the result, and atomically restore the original file and mode.
+5. For each mutant, create a fresh sandbox from the snapshot, verify the original source span, apply one atomic replacement, run the selected tests (or a narrower scope if configured), classify the result, and discard the sandbox. The baseline and profiling runs are also isolated.
 6. Render diagnostics and cache compatible backend results.
 
 Cache keys include the tool version, independently versioned operator semantics, all Go/test source content, module files, effective configuration, backend name/version, and mutant identity. Cache entries use a versioned schema.
