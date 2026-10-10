@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -42,32 +44,45 @@ import (
 //     compile could still exist on another platform. If any of them
 //     fails to parse, imports "C", or mentions the name in a
 //     //export directive, or if any assembly file mentions the name,
-//     nothing is claimed. A //go:linkname directive naming the function
-//     anywhere in the module also blocks the claim, because another
-//     package could use one to call an unexported function; the whole
-//     module is read once, lazily, for that.
+//     nothing is claimed. A real //go:linkname directive naming this
+//     exact package-qualified symbol anywhere in the module also blocks
+//     the claim, because another package could use it to call an
+//     unexported function; the whole module is scanned once, lazily.
 //   - The replaced expression itself must have no side effects and
 //     cannot panic (pureResultExpr): replacing it would otherwise
 //     remove a call or a nil dereference the caller can observe even
 //     though it never sees the value.
 
 type pkgCache struct {
-	root         string
-	byDir        map[string]*pkgInfo
-	linknameText *string
+	root             string
+	byDir            map[string]*pkgInfo
+	linknameScanned  bool
+	linknameComplete bool
+	linknameDecls    []linknameDecl
 }
 
 func newPkgCache(root string) *pkgCache {
 	return &pkgCache{root: root, byDir: map[string]*pkgInfo{}}
 }
 
-// linknames returns every //go:linkname line in the module's Go files,
-// and false if the module could not be read completely.
-func (c *pkgCache) linknames() (string, bool) {
-	if c.linknameText != nil {
-		return *c.linknameText, true
+// linknameDecl identifies a real line-comment compiler directive. The local
+// symbol is resolved relative to the declaring directory; the remote symbol
+// (when supplied) is an import-path-qualified symbol.
+type linknameDecl struct {
+	dir    string
+	local  string
+	remote string
+}
+
+// linknames scans Go lexical comments rather than source lines: text resembling
+// a directive inside a string, raw string or ordinary comment is not a directive.
+// Lexical errors or unreadable files invalidate the whole scan, so equivalence
+// remains unproved if we cannot account for the module's source.
+func (c *pkgCache) linknames() ([]linknameDecl, bool) {
+	if c.linknameScanned {
+		return c.linknameDecls, c.linknameComplete
 	}
-	var b strings.Builder
+	c.linknameScanned = true
 	complete := true
 	_ = filepath.WalkDir(c.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -88,20 +103,119 @@ func (c *pkgCache) linknames() (string, bool) {
 			complete = false
 			return nil
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.Contains(line, "go:linkname") {
-				b.WriteString(line)
-				b.WriteByte('\n')
+		fset := token.NewFileSet()
+		file := fset.AddFile(path, -1, len(data))
+		var lexErrors int
+		var scan scanner.Scanner
+		scan.Init(file, data, func(token.Position, string) { lexErrors++ }, scanner.ScanComments)
+		for {
+			_, tok, literal := scan.Scan()
+			if tok == token.EOF {
+				break
 			}
+			const prefix = "//go:linkname"
+			if tok != token.COMMENT || !strings.HasPrefix(literal, prefix) {
+				continue
+			}
+			rest := strings.TrimPrefix(literal, prefix)
+			if len(rest) == 0 || (rest[0] != ' ' && rest[0] != '\t') {
+				continue // e.g. //go:linknamed is not a directive
+			}
+			fields := strings.Fields(rest)
+			if len(fields) < 1 || len(fields) > 2 {
+				complete = false // an unrecognized directive cannot prove safety
+				continue
+			}
+			decl := linknameDecl{dir: filepath.Clean(filepath.Dir(path)), local: fields[0]}
+			if len(fields) == 2 {
+				decl.remote = fields[1]
+			}
+			c.linknameDecls = append(c.linknameDecls, decl)
+		}
+		if lexErrors > 0 {
+			complete = false
 		}
 		return nil
 	})
-	if !complete {
+	c.linknameComplete = complete
+	return c.linknameDecls, complete
+}
+
+// importPath resolves the package's symbol namespace using its nearest go.mod.
+// Without a module declaration, an ambiguous same-named remote symbol must be
+// treated as possibly referring to the candidate rather than assumed unrelated.
+func (c *pkgCache) importPath(dir string) (string, bool) {
+	root, err := filepath.Abs(c.root)
+	if err != nil {
 		return "", false
 	}
-	text := b.String()
-	c.linknameText = &text
-	return text, true
+	current, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false
+	}
+	for {
+		rel, err := filepath.Rel(root, current)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		data, err := os.ReadFile(filepath.Join(current, "go.mod"))
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 2 || fields[0] != "module" {
+					continue
+				}
+				path := fields[1]
+				if strings.HasPrefix(path, "\"") || strings.HasPrefix(path, "`") {
+					path, err = strconv.Unquote(path)
+					if err != nil {
+						return "", false
+					}
+				}
+				subdir, err := filepath.Rel(current, dir)
+				if err != nil {
+					return "", false
+				}
+				if subdir != "." {
+					path += "/" + filepath.ToSlash(subdir)
+				}
+				return path, true
+			}
+			return "", false
+		}
+		if !os.IsNotExist(err) || current == root {
+			return "", false
+		}
+		current = filepath.Dir(current)
+	}
+}
+
+func (c *pkgCache) mayBeLinked(dir, name string) bool {
+	decls, complete := c.linknames()
+	if !complete {
+		return true
+	}
+	qualified, known := c.importPath(dir)
+	if known {
+		qualified += "." + name
+	}
+	for _, decl := range decls {
+		// A local directive can export or redirect the target's own symbol.
+		if decl.dir == filepath.Clean(dir) && decl.local == name {
+			return true
+		}
+		if decl.remote == "" {
+			continue
+		}
+		if known {
+			if decl.remote == qualified {
+				return true
+			}
+		} else if i := strings.LastIndexByte(decl.remote, '.'); i >= 0 && decl.remote[i+1:] == name {
+			return true // no module identity: fail closed on an ambiguous target
+		}
+	}
+	return false
 }
 
 // pkgInfo is every parsed same-package file in one directory.
@@ -194,7 +308,7 @@ func (info *pkgInfo) resultDiscarded(name string, n, idx int) (sites int, ok boo
 	for _, f := range info.files {
 		for _, cg := range f.Comments {
 			for _, c := range cg.List {
-				if (strings.HasPrefix(c.Text, "//export") || strings.HasPrefix(c.Text, "//go:linkname")) && strings.Contains(c.Text, name) {
+				if strings.HasPrefix(c.Text, "//export") && strings.Contains(c.Text, name) {
 					return 0, false
 				}
 			}
@@ -298,8 +412,7 @@ func (c *pkgCache) discardReason(dir, pkgName string, decl *ast.FuncDecl, idx, n
 		return ""
 	}
 	name := decl.Name.Name
-	links, ok := c.linknames()
-	if !ok || strings.Contains(links, name) {
+	if c.mayBeLinked(dir, name) {
 		return ""
 	}
 	sites, ok := c.load(dir, pkgName).resultDiscarded(name, n, idx)

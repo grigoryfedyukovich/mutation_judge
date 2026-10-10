@@ -117,7 +117,7 @@ func DetectToolchain(ctx context.Context) (ToolchainInfo, error) {
 	if err != nil {
 		return ToolchainInfo{}, fmt.Errorf("detect go toolchain (go env %s): %w", strings.Join(goEnvVars, " "), err)
 	}
-info, err := parseGoEnv(out)
+	info, err := parseGoEnv(out)
 	if err != nil {
 		return ToolchainInfo{}, err
 	}

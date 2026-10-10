@@ -1775,6 +1775,48 @@ func TestDiscardedResultRefusesWhenAnotherPackageLinknamesIt(t *testing.T) {
 	}, map[string]bool{"n * 2": false, "n + 1": false})
 }
 
+// Only compiler directives in lexical line comments can expose an
+// unexported function. Source-text substring searches also match Go strings
+// containing fixtures, unrelated package names, and longer symbol names.
+func TestDiscardedResultLinknameMatchesRealQualifiedSymbols(t *testing.T) {
+	const use = "package p\n\nfunc Run() { oom(1) }\n"
+	const mod = "module example.test/p\n\ngo 1.22\n"
+	for _, tc := range []struct {
+		name  string
+		other string
+		allow bool
+	}{
+		{"actual foreign reference", "package other\n//go:linkname pull example.test/p.oom\nfunc pull(int)(int,int)\n", false},
+		{"raw string", "package other\nvar s = `//go:linkname pull example.test/p.oom`\n", true},
+		{"quoted string", "package other\nvar s = \"//go:linkname pull example.test/p.oom\"\n", true},
+		{"ordinary comment", "package other\n// Discuss //go:linkname pull example.test/p.oom\n", true},
+		{"block comment", "package other\n/* //go:linkname pull example.test/p.oom */\n", true},
+		{"different qualified package", "package other\n//go:linkname pull example.test/q.oom\nfunc pull(int)(int,int)\n", true},
+		{"same local name in another directory", "package other\n//go:linkname oom example.test/q.other\nfunc oom(int)(int,int)\n", true},
+		{"longer qualified symbol", "package other\n//go:linkname pull example.test/p.oomExtra\nfunc pull(int)(int,int)\n", true},
+		{"longer directive prefix", "package other\n//go:linknamed pull example.test/p.oom\n", true},
+		{"scanner failure fails closed", "package other\nvar x = \"unterminated\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantDiscarded(t, map[string]string{
+				"go.mod":     mod,
+				"a.go":       oomSrc,
+				"b.go":       use,
+				"other/x.go": tc.other,
+			}, map[string]bool{"n * 2": tc.allow, "n + 1": tc.allow})
+		})
+	}
+}
+
+// The single-operand form allows external packages to alias a local symbol.
+func TestDiscardedResultLinknameLocalDirective(t *testing.T) {
+	wantDiscarded(t, map[string]string{
+		"go.mod": "module example.test/p\n",
+		"a.go":   "package p\n\n//go:linkname oom\nfunc oom(n int) (int, int) { return n * 2, n + 1 }\n",
+		"b.go":   "package p\nfunc Run() { oom(1) }\n",
+	}, map[string]bool{"n * 2": false, "n + 1": false})
+}
+
 func TestDiscardedResultRefusesWhenASiblingDoesNotParse(t *testing.T) {
 	wantDiscarded(t, map[string]string{
 		"a.go": oomSrc,

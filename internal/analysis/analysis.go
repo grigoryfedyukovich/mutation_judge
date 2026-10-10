@@ -40,22 +40,22 @@ type Request struct {
 }
 
 type preparedAnalysis struct {
-	root           string
-	workRel        string
-	sandbox        string
-	cleanup        func()
-	mutants        []model.Mutation
-	discovered     int
-	parsingMS      int64
-	sourceDigest   string
-	coveragePath   string
-	backendName    string
-	backendVersion string
-	toolchain      runner.ToolchainInfo
-	filePackage    map[string]string   // relative file path -> owning package import path
-	testScopes     map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
-	pkgs           []workspace.Package // for buildPerTestCoverage; nil unless CoverageTestSelection is on
-	perTestCoverage covermap.PerTest   // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
+	root            string
+	workRel         string
+	sandbox         string
+	cleanup         func()
+	mutants         []model.Mutation
+	discovered      int
+	parsingMS       int64
+	sourceDigest    string
+	coveragePath    string
+	backendName     string
+	backendVersion  string
+	toolchain       runner.ToolchainInfo
+	filePackage     map[string]string   // relative file path -> owning package import path
+	testScopes      map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
+	pkgs            []workspace.Package // for buildPerTestCoverage; nil unless CoverageTestSelection is on
+	perTestCoverage covermap.PerTest    // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
 }
 
 func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) {

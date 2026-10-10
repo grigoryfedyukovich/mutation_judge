@@ -26,13 +26,13 @@ func TestCompareClassifiesAllSixBuckets(t *testing.T) {
 		Results: []model.Result{
 			mutantResult("M-still-killed", model.VerdictKilled, "a.go", 1),
 			mutantResult("M-still-survived", model.VerdictSurvived, "b.go", 2),
-			mutantResult("M-regressed", model.VerdictKilled, "c.go", 3),          // killed -> survived: NEW survivor
-			mutantResult("M-fixed", model.VerdictSurvived, "d.go", 4),            // survived -> killed, still present: FIXED
-			mutantResult("M-removed-survivor", model.VerdictSurvived, "e.go", 5), // gone entirely: REMOVED
-			mutantResult("M-removed-killed", model.VerdictKilled, "g.go", 7),     // also gone entirely: REMOVED, not unchanged
-			mutantResult("M-confirmed", model.VerdictTimeout, "h.go", 8),         // timeout -> survived: NEW survivor (confirmed gap)
+			mutantResult("M-regressed", model.VerdictKilled, "c.go", 3),                // killed -> survived: NEW survivor
+			mutantResult("M-fixed", model.VerdictSurvived, "d.go", 4),                  // survived -> killed, still present: FIXED
+			mutantResult("M-removed-survivor", model.VerdictSurvived, "e.go", 5),       // gone entirely: REMOVED
+			mutantResult("M-removed-killed", model.VerdictKilled, "g.go", 7),           // also gone entirely: REMOVED, not unchanged
+			mutantResult("M-confirmed", model.VerdictTimeout, "h.go", 8),               // timeout -> survived: NEW survivor (confirmed gap)
 			mutantResult("M-regressed-inconclusive", model.VerdictSurvived, "i.go", 9), // survived -> timeout: STILL OPEN, not unchanged
-			mutantResult("M-reclassified", model.VerdictSurvived, "j.go", 10),    // survived -> invalid: RECLASSIFIED, not fixed
+			mutantResult("M-reclassified", model.VerdictSurvived, "j.go", 10),          // survived -> invalid: RECLASSIFIED, not fixed
 		},
 	}
 	current := model.Report{
