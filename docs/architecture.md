@@ -83,6 +83,8 @@ The F03 cache identity revision (`mutation-judge-execution/v3`) binds verdicts t
 
 The stored JSON also has an independent schema marker. This prevents old result layouts from being silently accepted.
 
+The F04 cache-store schema (`mutation-judge-cache/v2`) also validates the **verdict** on both reads and writes. Only completed `KILLED`, `SURVIVED`, and `INVALID` backend conclusions are reusable. `UNKNOWN`, `TIMEOUT`, `UNSUPPORTED`, and `EQUIVALENT` cannot be written or read back as execution evidence; in particular `UNKNOWN` after cancellation or process-start failure must be retried. `TIMEOUT` is intentionally transient even with a fixed per-mutant time limit because machine load can change the outcome. Before committing any otherwise cacheable result, the store checks the execution context for cancellation (including once immediately before atomic rename). Interrupted runs retain their partial report and mark `complete=false`, even when the final in-flight mutant returned after cancellation. Legacy v1 entries are ignored, including seemingly successful ones. This policy does not turn input-untracked tests into safe cache candidates: the F03 limitations still apply.
+
 ## Orchestration phases
 
 `analysis.Engine` separates four phases: workspace/candidate preparation, baseline execution, serial mutant execution, and report construction. A cancellation after at least one completed mutant produces a report with `complete=false`; it is never mislabeled as a complete run.

@@ -507,7 +507,7 @@ On the second run, reusable mutant results are marked:
 [cached]
 ```
 
-The clean baseline is still executed before cached mutant verdicts are accepted. Disable cache reuse while debugging:
+The clean baseline is still executed before cached mutant verdicts are accepted. Only successful final `KILLED` and `SURVIVED` verdicts and completed `INVALID` (build/type-check failure) verdicts are reused. Interrupted runs never cache their in-flight mutant, and `UNKNOWN` or `TIMEOUT` verdicts are retried on the next run. Cache entries using the old v1 store format are ignored. Disable cache reuse while debugging:
 
 ```bash
 ./bin/mutation-judge --no-cache ./pkg/...

@@ -568,7 +568,10 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 		executed = true
 		// Only the disposable sandbox is mutated; no restoration is
 		// needed, and arbitrary fixture changes cannot reach later tests.
-		if putErr := store.Put(key, backendResult); putErr != nil {
+		// Cancellation may arrive while the backend is shutting down. Never
+		// save even a seemingly definitive result from an interrupted run.
+		// Transient UNKNOWN/TIMEOUT verdicts are also ineligible for reuse.
+		if putErr := store.PutContext(ctx, key, backendResult); putErr != nil {
 			cachePutErr = putErr
 		}
 	}
@@ -736,7 +739,9 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 	}
 
 	final := make([]model.Result, 0, len(p.mutants))
-	complete := true
+	// An interruption during the final in-flight mutation is still an
+	// incomplete experiment even if every dispatched result arrived.
+	complete := ctx.Err() == nil
 	for _, r := range results {
 		if r == nil {
 			complete = false

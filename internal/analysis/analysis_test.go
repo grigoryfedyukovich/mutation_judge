@@ -1334,3 +1334,145 @@ func TestF03UntrackedGoFlagsDisableCache(t *testing.T) {
 		}
 	}
 }
+
+// f04Backend returns a configurable mutant verdict while all pristine
+// baseline runs succeed. An optional cancellation simulates SIGINT arriving
+// before the mutant result has been committed to the cache. Its identity is
+// unchanged between interrupted and healthy runs to exercise the same key.
+type f04Backend struct {
+	cancel        context.CancelFunc
+	mutantVerdict model.Verdict
+	mutantRuns    int
+}
+
+func (b *f04Backend) Run(_ context.Context, req runner.Request) runner.Result {
+	data, err := os.ReadFile(filepath.Join(req.Root, "p.go"))
+	if err != nil {
+		return runner.Result{Verdict: model.VerdictUnknown}
+	}
+	if !strings.Contains(string(data), ">= 0") {
+		return runner.Result{Verdict: model.VerdictSurvived}
+	}
+	b.mutantRuns++
+	if b.cancel != nil {
+		b.cancel()
+	}
+	return runner.Result{Verdict: b.mutantVerdict}
+}
+func (*f04Backend) Name() string    { return "f04-cache-backend" }
+func (*f04Backend) Version() string { return "v1" }
+
+func TestF04InterruptedAndTransientMutantsAreNeverCached(t *testing.T) {
+	cases := []struct {
+		name           string
+		initialVerdict model.Verdict
+		cancel         bool
+	}{
+		{"canceled_unknown", model.VerdictUnknown, true},
+		{"canceled_killed", model.VerdictKilled, true}, // ctx gates even decisive verdicts
+		{"transient_unknown", model.VerdictUnknown, false},
+		{"transient_timeout", model.VerdictTimeout, false},
+	}
+	for _, workers := range []int{1, 2} {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s_workers%d", tc.name, workers), func(t *testing.T) {
+				dir := testProject(t, "package p\nfunc F(x int) bool { return x > 0 }\n")
+				cfg := config.Default()
+				cfg.Operators = []string{"boundary"}
+				cfg.Workers = workers
+				cfg.CacheDir = filepath.Join(dir, ".mutation-judge", "cache")
+				req := Request{CWD: dir, Patterns: []string{"."}, Config: cfg}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				firstBackend := &f04Backend{mutantVerdict: tc.initialVerdict}
+				if tc.cancel {
+					firstBackend.cancel = cancel
+				}
+				first, err := (Engine{Version: "test", Backend: firstBackend}).Analyze(ctx, req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(first.Results) != 1 || first.Results[0].Cached || first.Results[0].Verdict != tc.initialVerdict || firstBackend.mutantRuns != 1 {
+					t.Fatalf("unexpected interrupted/transient result: %+v, mutant runs=%d", first.Results, firstBackend.mutantRuns)
+				}
+				if first.Complete == tc.cancel {
+					t.Fatalf("completion=%v; canceled=%v", first.Complete, tc.cancel)
+				}
+				// A healthy rerun must execute instead of reusing a previous
+				// UNKNOWN/TIMEOUT, or a KILLED returned during cancellation.
+				healthy := &f04Backend{mutantVerdict: model.VerdictSurvived}
+				second, err := (Engine{Version: "test", Backend: healthy}).Analyze(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(second.Results) != 1 || second.Results[0].Cached || second.Results[0].Verdict != model.VerdictSurvived || healthy.mutantRuns != 1 {
+					t.Fatalf("healthy rerun must execute, got %+v, mutant runs=%d", second.Results, healthy.mutantRuns)
+				}
+				thirdBackend := &f04Backend{mutantVerdict: model.VerdictKilled}
+				third, err := (Engine{Version: "test", Backend: thirdBackend}).Analyze(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(third.Results) != 1 || !third.Results[0].Cached || third.Results[0].Verdict != model.VerdictSurvived || thirdBackend.mutantRuns != 0 {
+					t.Fatalf("successful rerun should populate cache, got %+v, mutant runs=%d", third.Results, thirdBackend.mutantRuns)
+				}
+			})
+		}
+	}
+}
+
+// A real go test child must not poison the cache after parent cancellation.
+// Unlike the fake-backend regressions, this exercises subprocess shutdown and
+// the ordinary GoTest UNKNOWN classification using an on-disk Go fixture.
+func TestF04CanceledGoTestIsRetried(t *testing.T) {
+	dir := testProject(t, "package p\nfunc F(x int) bool { return x > 0 }\n")
+	source := `package p
+import (
+    "testing"
+    "time"
+)
+func TestBoundary(t *testing.T) {
+    if F(0) { time.Sleep(800 * time.Millisecond) }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "p_test.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	cfg.Timeout = 20 * time.Second
+	cfg.CacheDir = filepath.Join(dir, ".mutation-judge", "cache")
+	req := Request{CWD: dir, Patterns: []string{"."}, Config: cfg}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var timer *time.Timer
+	engine := Engine{Version: "test", Progress: func(Progress) {
+		// Progress is emitted just before starting the mutated child.
+		timer = time.AfterFunc(150*time.Millisecond, cancel)
+	}}
+	first, err := engine.Analyze(ctx, req)
+	if timer != nil {
+		timer.Stop()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Complete || len(first.Results) != 1 || first.Results[0].Cached || first.Results[0].Verdict != model.VerdictUnknown {
+		t.Fatalf("cancellation should produce uncached UNKNOWN in partial report: complete=%v results=%+v", first.Complete, first.Results)
+	}
+	second, err := (Engine{Version: "test"}).Analyze(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Results) != 1 || second.Results[0].Verdict != model.VerdictSurvived || second.Results[0].Cached {
+		t.Fatalf("healthy run must retry canceled child: %+v", second.Results)
+	}
+	third, err := (Engine{Version: "test"}).Analyze(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Results) != 1 || third.Results[0].Verdict != model.VerdictSurvived || !third.Results[0].Cached {
+		t.Fatalf("completed child should be reusable: %+v", third.Results)
+	}
+}
