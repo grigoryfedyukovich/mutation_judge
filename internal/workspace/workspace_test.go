@@ -781,3 +781,62 @@ func TestApplyCheckedRejectsStaleOriginalWithoutWriting(t *testing.T) {
 		t.Fatalf("replacement missing: %q: %v", got, err)
 	}
 }
+
+func TestF03DigestTracksModesTypesAndEmptyDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable-bit semantics")
+	}
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.test/p\n\ngo 1.22\n", 0o644)
+	path := filepath.Join(root, "probe.sh")
+	mustWrite(t, path, "#!/bin/sh\nexit 0\n", 0o755)
+	a, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("changing only executable mode must invalidate digest")
+	}
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Digest(root, ".mutation-judge/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == c {
+		t.Fatal("adding an empty directory must invalidate digest")
+	}
+}
+
+func TestF03GoModLocalReplacementDetection(t *testing.T) {
+	root := t.TempDir()
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("module example.test/p\n\ngo 1.22\n")
+	present, err := HasLocalReplacements(root)
+	if err != nil || present {
+		t.Fatalf("no replacement: got %v, %v", present, err)
+	}
+	write("module example.test/p\n\ngo 1.22\n\nreplace example.test/dep => example.test/dep v1.0.0\n")
+	present, err = HasLocalReplacements(root)
+	if err != nil || present {
+		t.Fatalf("versioned replacement: got %v, %v", present, err)
+	}
+	write("module example.test/p\n\ngo 1.22\n\nreplace (\n example.test/dep => ../local\n)\n")
+	present, err = HasLocalReplacements(root)
+	if err != nil || !present {
+		t.Fatalf("local replacement: got %v, %v", present, err)
+	}
+}

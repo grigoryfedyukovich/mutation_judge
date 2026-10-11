@@ -2,11 +2,14 @@ package analysis
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,12 +51,16 @@ type preparedAnalysis struct {
 	discovered      int
 	parsingMS       int64
 	sourceDigest    string
+	environment     []string // frozen child process environment, excluding ambient GOWORK
+	environmentHash string   // never expose raw environment values in reports
+	cacheSafe       bool     // false for untracked external local replacements / flag files
+	cacheWarning    string
 	backendName     string
 	backendVersion  string
 	toolchain       runner.ToolchainInfo
 	filePackage     map[string]string   // relative file path -> owning package import path
 	testScopes      map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
-	pkgs            []workspace.Package // for buildPerTestCoverage; nil unless CoverageTestSelection is on
+	pkgs            []workspace.Package // resolved go test package universe; also used for per-test coverage and cache identity
 	perTestCoverage covermap.PerTest    // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
 }
 
@@ -113,6 +120,9 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 	}
 	if perTestWarning != "" {
 		warnings = append([]string{perTestWarning}, warnings...)
+	}
+	if prepared.cacheWarning != "" {
+		warnings = append([]string{prepared.cacheWarning}, warnings...)
 	}
 	return buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started), nil
 }
@@ -249,6 +259,24 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	}
 	parsingMS := time.Since(parseStart).Milliseconds()
 
+	// The sandbox is the only copied dependency tree. A main-module local
+	// replacement can reference mutable source outside that snapshot. Until
+	// replacement trees are captured as immutable inputs, do not reuse any
+	// verdict for modules with local replacements (including absolute paths).
+	localReplacement, err := workspace.HasLocalReplacements(snapshot)
+	if err != nil {
+		return preparedAnalysis{}, fmt.Errorf("inspect local replacements: %w", err)
+	}
+	// GOFLAGS -modfile and -overlay can read arbitrary files outside the
+	// sandbox; their paths alone are not a fingerprint of their contents.
+	untrackedFlags := untrackedGoFlagInputs(toolchain.GoFlags)
+	cacheSafe := !localReplacement && !untrackedFlags
+	var cacheWarning string
+	if req.Config.Cache && !cacheSafe {
+		cacheWarning = "mutation result caching disabled: external local replacements or Go flag files are not included in the immutable source snapshot"
+	}
+	environment := runner.EffectiveTestEnvironment(os.Environ())
+	environmentHash := digestEnvironment(environment)
 	sourceDigest, err := workspace.Digest(snapshot, req.Config.CacheDir)
 	if err != nil {
 		return preparedAnalysis{}, err
@@ -260,6 +288,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	return preparedAnalysis{
 		root: root, workRel: filepath.ToSlash(workRel), sandbox: snapshot, cleanup: cleanup,
 		mutants: mutants, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
+		environment: environment, environmentHash: environmentHash, cacheSafe: cacheSafe, cacheWarning: cacheWarning,
 		backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
 		filePackage: filePackage, testScopes: testScopes, pkgs: pkgs,
 	}, nil
@@ -302,7 +331,7 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	}
 	baseline := e.Backend.Run(ctx, runner.Request{
 		Root: sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
-		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, CoverageOut: coveragePath,
+		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, CoverageOut: coveragePath, Environment: p.environment,
 		GoVersion: p.toolchain.GoVersion,
 	})
 	elapsed := time.Since(started).Milliseconds()
@@ -348,7 +377,7 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 		if err != nil {
 			return covermap.PerTest{}, fmt.Errorf("create listing sandbox for %s: %w", pkg.ImportPath, err)
 		}
-		names, err := runner.ListTests(ctx, listing, p.workRel, pkg.ImportPath, req.Config.Timeout)
+		names, err := runner.ListTestsWithEnvironment(ctx, listing, p.workRel, pkg.ImportPath, req.Config.Timeout, p.environment)
 		cleanup()
 		if err != nil {
 			return covermap.PerTest{}, fmt.Errorf("listing tests in %s: %w", pkg.ImportPath, err)
@@ -368,7 +397,7 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 			}
 			result := e.Backend.Run(ctx, runner.Request{
 				Root: sandbox, WorkRel: p.workRel, Patterns: []string{pkg.ImportPath},
-				TestRun: "^" + regexp.QuoteMeta(name) + "$", Timeout: req.Config.Timeout, CoverageOut: profilePath,
+				TestRun: "^" + regexp.QuoteMeta(name) + "$", Timeout: req.Config.Timeout, CoverageOut: profilePath, Environment: p.environment,
 				GoVersion: p.toolchain.GoVersion,
 			})
 			if result.Verdict != model.VerdictSurvived {
@@ -420,6 +449,83 @@ func cacheRelevantConfig(c config.Config) map[string]any {
 	}
 }
 
+// digestEnvironment binds cached verdicts to all actual child-process variables.
+// The serialized cache identity contains only this digest, not passwords or
+// tokens; the environment strings themselves are never written into reports.
+func digestEnvironment(env []string) string {
+	h := sha256.New()
+	for _, entry := range env {
+		_, _ = h.Write([]byte(entry))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Go's -modfile and -overlay flags reference file contents that can change
+// without changing the flag value. Conservatively disable caching instead
+// of pretending that hashing the environment alone tracks those files.
+func untrackedGoFlagInputs(flags string) bool {
+	for _, token := range strings.Fields(flags) {
+		if token == "-modfile" || strings.HasPrefix(token, "-modfile=") ||
+			token == "-overlay" || strings.HasPrefix(token, "-overlay=") ||
+			token == "-toolexec" || strings.HasPrefix(token, "-toolexec=") {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheExecutionSchema changes whenever the serialized execution identity changes.
+// /v3 invalidates older entries that omitted executable bits, environment
+// variables, and local replacement dependency constraints.
+const cacheExecutionSchema = "mutation-judge-execution/v3"
+
+// mutantCacheKey binds a verdict to the *resolved execution*, not just the
+// textual patterns. Go interprets ./... relative to WorkRel: the same source
+// mutation may be KILLED from the module root but SURVIVED from a subfolder.
+// A JSON object preserves field boundaries, pattern boundaries and scope
+// ordering; comma-joining the arguments would allow unrelated inputs to
+// produce the same serialized key. Versioning makes the old unsafe keys cold.
+func mutantCacheKey(version string, p preparedAnalysis, cfgJSON []byte, mut model.Mutation, scope []string, testRun string) (string, error) {
+	targets := make([]string, 0, len(p.pkgs))
+	for _, pkg := range p.pkgs {
+		if pkg.ImportPath != "" {
+			targets = append(targets, pkg.ImportPath)
+		}
+	}
+	sort.Strings(targets)
+	identity := struct {
+		Schema          string          `json:"schema"`
+		ToolVersion     string          `json:"tool_version"`
+		OperatorVersion string          `json:"operator_version"`
+		Toolchain       string          `json:"toolchain"`
+		SourceDigest    string          `json:"source_digest"`
+		EnvironmentHash string          `json:"environment_hash"`
+		Config          json.RawMessage `json:"config"`
+		BackendName     string          `json:"backend_name"`
+		BackendVersion  string          `json:"backend_version"`
+		MutationID      string          `json:"mutation_id"`
+		Replacement     string          `json:"replacement"`
+		WorkingDir      string          `json:"working_directory"`
+		Patterns        []string        `json:"patterns"`
+		ResolvedTargets []string        `json:"resolved_targets"`
+		TestRun         string          `json:"test_run"`
+	}{
+		Schema: cacheExecutionSchema, ToolVersion: version,
+		OperatorVersion: frontend.SemanticsVersion, Toolchain: p.toolchain.Key(),
+		SourceDigest: p.sourceDigest, EnvironmentHash: p.environmentHash, Config: cfgJSON,
+		BackendName: p.backendName, BackendVersion: p.backendVersion,
+		MutationID: mut.ID, Replacement: mut.Replacement,
+		WorkingDir: p.workRel, Patterns: scope, ResolvedTargets: targets,
+		TestRun: testRun,
+	}
+	b, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("marshal mutant execution cache identity: %w", err)
+	}
+	return cache.Key(string(b)), nil
+}
+
 func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysis, store cache.Store, cfgJSON []byte, mut model.Mutation, coverage covermap.Map, coverageKnown bool) (result model.Result, executed bool, cachePutErr error, hardErr error) {
 	covered, known := false, false
 	if coverageKnown {
@@ -437,19 +543,10 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 	}
 	scope := mutantTestScope(req, p, mut)
 	testRun := mutantTestRun(req, p, mut)
-	key := cache.Key(
-		e.Version,
-		frontend.SemanticsVersion,
-		p.toolchain.Key(),
-		p.sourceDigest,
-		string(cfgJSON),
-		p.backendName,
-		p.backendVersion,
-		mut.ID,
-		mut.Replacement,
-		strings.Join(scope, ","),
-		testRun,
-	)
+	key, err := mutantCacheKey(e.Version, p, cfgJSON, mut, scope, testRun)
+	if err != nil {
+		return model.Result{}, false, nil, err
+	}
 	backendResult, hit := store.Get(key)
 	if !hit {
 		// Every mutant starts from the same pristine snapshot, including
@@ -465,7 +562,7 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 		}
 		backendResult = e.Backend.Run(ctx, runner.Request{
 			Root: sandbox, WorkRel: p.workRel, Patterns: scope,
-			TestRun: testRun, Timeout: req.Config.Timeout,
+			TestRun: testRun, Timeout: req.Config.Timeout, Environment: p.environment,
 			GoVersion: p.toolchain.GoVersion,
 		})
 		executed = true
@@ -475,7 +572,12 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 			cachePutErr = putErr
 		}
 	}
-	return makeResult(mut, backendResult, hit, covered, known), executed, cachePutErr, nil
+	result = makeResult(mut, backendResult, hit, covered, known)
+	// Report the actual working directory and command for this verdict,
+	// including narrowed scopes; the top-level command is only user intent.
+	result.Diagnostic.Evidence["test_working_directory"] = p.workRel
+	result.Diagnostic.Evidence["test_command"] = testCommandForRun(req.Config.Timeout, testRun, scope)
+	return result, executed, cachePutErr, nil
 }
 
 func (e Engine) executeMutants(ctx context.Context, req Request, p preparedAnalysis, coverage covermap.Map, coverageKnown bool) ([]model.Result, bool, int64, []string, error) {
@@ -494,7 +596,7 @@ func (e Engine) executeMutantsSequential(ctx context.Context, req Request, p pre
 	if !filepath.IsAbs(cacheDir) {
 		cacheDir = filepath.Join(p.root, cacheDir)
 	}
-	store := cache.Store{Dir: cacheDir, Enabled: req.Config.Cache}
+	store := cache.Store{Dir: cacheDir, Enabled: req.Config.Cache && p.cacheSafe}
 	results := make([]model.Result, 0, len(p.mutants))
 	complete := true
 	started := time.Now()
@@ -556,7 +658,7 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 	if !filepath.IsAbs(cacheDir) {
 		cacheDir = filepath.Join(p.root, cacheDir)
 	}
-	store := cache.Store{Dir: cacheDir, Enabled: req.Config.Cache}
+	store := cache.Store{Dir: cacheDir, Enabled: req.Config.Cache && p.cacheSafe}
 
 	workers := req.Config.Workers
 	if workers > len(p.mutants) {
@@ -672,6 +774,7 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 			"backend_version":         p.backendVersion,
 			"operator_semantics":      frontend.SemanticsVersion,
 			"test_command":            testCommand(req.Config, req.Patterns),
+			"test_working_directory":  p.workRel,
 			"goos":                    p.toolchain.GOOS,
 			"goarch":                  p.toolchain.GOARCH,
 			"cgo_enabled":             p.toolchain.CgoEnabled,
@@ -801,6 +904,17 @@ func testCommand(cfg config.Config, patterns []string) []string {
 	cmd := []string{"go", "test", "-count=1", "-timeout", cfg.Timeout.String()}
 	if cfg.TestRun != "" {
 		cmd = append(cmd, "-run", cfg.TestRun)
+	}
+	return append(cmd, patterns...)
+}
+
+// testCommandForRun records the effective mutant command including the
+// GoTest backend's structured output flag; baseline coverage flags do not
+// apply to mutant executions.
+func testCommandForRun(timeout time.Duration, testRun string, patterns []string) []string {
+	cmd := []string{"go", "test", "-json", "-count=1", "-timeout", timeout.String()}
+	if testRun != "" {
+		cmd = append(cmd, "-run", testRun)
 	}
 	return append(cmd, patterns...)
 }

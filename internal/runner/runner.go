@@ -27,6 +27,7 @@ type Request struct {
 	TestRun     string
 	Timeout     time.Duration
 	CoverageOut string
+	Environment []string // frozen test environment; nil retains legacy os.Environ behavior
 	// GoVersion is the invoked go toolchain's version (ToolchainInfo.GoVersion),
 	// supplied by the caller once per analysis run and recorded verbatim
 	// on the Result -- never re-derived here from runtime.Version(),
@@ -158,7 +159,35 @@ var failRE = regexp.MustCompile(`(?m)^\s*--- FAIL: ([^ (]+)`)
 // nil-error result here, since that line does not start with "Test"
 // and every other non-matching line (the "ok pkg time" summary) is
 // filtered the same way.
+// EffectiveTestEnvironment makes GOWORK=off explicit and sorts effective
+// variables by name so a cache hash does not depend on insertion order.
+// Repeated variable names use the last value, as exec.Cmd.Env does.
+func EffectiveTestEnvironment(inherited []string) []string {
+	values := make(map[string]string, len(inherited)+1)
+	for _, item := range inherited {
+		if at := strings.IndexByte(item, '='); at > 0 {
+			values[item[:at]] = item[at+1:]
+		}
+	}
+	values["GOWORK"] = "off"
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
 func ListTests(ctx context.Context, root, workRel, pattern string, timeout time.Duration) ([]string, error) {
+	return ListTestsWithEnvironment(ctx, root, workRel, pattern, timeout, nil)
+}
+
+func ListTestsWithEnvironment(ctx context.Context, root, workRel, pattern string, timeout time.Duration, environment []string) ([]string, error) {
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "test", "-list", "^Test", pattern)
@@ -167,6 +196,9 @@ func ListTests(ctx context.Context, root, workRel, pattern string, timeout time.
 	// copy of the module alone, never one of a go.work's use-listed
 	// directories, so an inherited host GOWORK must never apply here.
 	cmd.Env = append(os.Environ(), "GOWORK=off")
+	if environment != nil {
+		cmd.Env = append([]string(nil), environment...)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("go test -list failed for %s: %w", pattern, exitErrorWithStderr(err))
@@ -298,6 +330,9 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	// see the os/exec Cmd.Env doc -- so appending is enough to override
 	// any GOWORK already present in os.Environ().)
 	cmd.Env = append(os.Environ(), "GOWORK=off")
+	if req.Environment != nil {
+		cmd.Env = append([]string(nil), req.Environment...)
+	}
 	// Captured separately: jsonOut is decoded as structured events; errOut
 	// is kept only to surface human-readable diagnostics (e.g. the actual
 	// compiler error line) in the report and as fallback evidence.

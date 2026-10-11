@@ -15,7 +15,7 @@ execution and before any mutant runs — they do not scale with mutant
 count. `Digest` and `CopyModule` now walk the module tree via the same
 shared selection logic (`workspace.sandboxEntries`) and skip exactly
 the same paths (`.git`, `.mutation-judge`, and the configured cache
-path): `Digest` SHA-256-hashes every file that walk visits — not just
+path): `Digest` SHA-256-hashes every file that walk visits (including its permission bits, type, and directory entries) — not just
 `.go` / `go.mod` / `go.sum` / `go.work` files, but `//go:embed`
 payloads, cgo sources, `testdata/` fixtures, `go.env`, and anything
 else a test can read by path (previously it hashed only the narrower
@@ -193,7 +193,27 @@ per mutant now also depend on the dependency graph, not just the
 top-level arguments) but is a correctness question independent of it,
 so it's fixed regardless of whether scoping is enabled — the actual
 computed per-mutant scope is now its own explicit component of the
-cache key.
+cache key. A later audit exposed another collision: identical relative patterns
+(e.g. `./...`) select different packages depending on the invocation
+directory, even for the same mutant. Execution cache identity now uses
+structured JSON containing the module-relative execution directory, actual
+per-mutant patterns and `-run` expression, and the resolved package universe;
+this is versioned separately so unsafe older entries never match. The
+per-mutant diagnostic records the effective command and execution directory
+for replay, including cache hits.
+
+## F03 cache-input safeguards
+
+The v3 execution key contains an SHA-256 hash of the frozen effective test
+process environment; this includes user-defined test variables, not only the
+Go toolchain variables. Changing a regular file's executable bits also changes
+`workspace.Digest`, even when its bytes remain identical. Empty directories
+have distinct digest entries. Local module replacements and external Go flag
+files (`-modfile`, `-overlay`, `-toolexec`) are not part of the copied module
+snapshot, so mutation result caching is disabled conservatively when they are
+present. A report warning explains why. Snapshot copying still excludes the
+paths listed above; tests depending on uncaptured external inputs should use
+`--no-cache`.
 
 ## Coverage-attributed per-test selection (`--coverage-test-selection`)
 

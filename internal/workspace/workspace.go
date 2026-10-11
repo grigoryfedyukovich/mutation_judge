@@ -3,6 +3,7 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -562,6 +563,9 @@ func CopyModule(root, cacheDir string) (string, func(), error) {
 		if err != nil {
 			return err
 		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported sandbox entry type %s: %s", info.Mode().Type(), rel)
+		}
 		return copyFile(path, dst, info.Mode())
 	})
 	if err != nil {
@@ -688,18 +692,21 @@ func writeFileAtomicWithRename(path string, data []byte, mode os.FileMode, renam
 // not churn the cache, and retargeting still does. Outbound
 // symlinks are omitted by sandboxEntries on both paths.
 func Digest(root, cacheDir string) (string, error) {
-	type file struct {
-		rel     string
-		symlink bool
-		target  string // set only when symlink is true
+	type entry struct {
+		rel    string
+		kind   string
+		mode   os.FileMode
+		target string
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return "", err
 	}
-	var files []file
+	var entries []entry
 	err = sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
 		if d.IsDir() {
+			// CopyModule materializes all directories with mode 0755.
+			entries = append(entries, entry{rel: rel, kind: "directory"})
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {
@@ -707,33 +714,75 @@ func Digest(root, cacheDir string) (string, error) {
 			if err != nil {
 				return err
 			}
-			files = append(files, file{rel: rel, symlink: true, target: fingerprintSymlinkTarget(rootAbs, target)})
+			entries = append(entries, entry{rel: rel, kind: "symlink", target: fingerprintSymlinkTarget(rootAbs, target)})
 			return nil
 		}
-		files = append(files, file{rel: rel})
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported digest entry type %s: %s", info.Mode().Type(), rel)
+		}
+		entries = append(entries, entry{rel: rel, kind: "file", mode: info.Mode().Perm()})
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
 	h := sha256.New()
-	for _, f := range files {
-		_, _ = io.WriteString(h, f.rel)
+	for _, e := range entries {
+		_, _ = io.WriteString(h, e.rel)
 		_, _ = h.Write([]byte{0})
-		if f.symlink {
-			_, _ = io.WriteString(h, "symlink:"+f.target)
+		_, _ = io.WriteString(h, e.kind)
+		_, _ = h.Write([]byte{0})
+		switch e.kind {
+		case "symlink":
+			_, _ = io.WriteString(h, e.target)
+		case "file":
+			_, _ = io.WriteString(h, fmt.Sprintf("%04o", e.mode))
 			_, _ = h.Write([]byte{0})
-			continue
+			b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(e.rel)))
+			if err != nil {
+				return "", err
+			}
+			_, _ = h.Write(b)
 		}
-		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.rel)))
-		if err != nil {
-			return "", err
-		}
-		_, _ = h.Write(b)
 		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// HasLocalReplacements reads the Go toolchain's parsed go.mod syntax rather
+// than guessing at quoted paths and parenthesized replace blocks. A local
+// replacement, even an absolute path beneath root, is resolved by go test
+// independently of the module snapshot and is not a safe cache input.
+func HasLocalReplacements(root string) (bool, error) {
+	cmd := exec.Command("go", "mod", "edit", "-json")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	b, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("go mod edit -json: %w", err)
+	}
+	var parsed struct {
+		Replace []struct {
+			New struct {
+				Path    string `json:"Path"`
+				Version string `json:"Version"`
+			} `json:"New"`
+		} `json:"Replace"`
+	}
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		return false, fmt.Errorf("parse go mod edit JSON: %w", err)
+	}
+	for _, r := range parsed.Replace {
+		if r.New.Path != "" && r.New.Version == "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // copyFile materializes dst as an independent copy of src with the given

@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	covermap "github.com/example/mutation-judge/internal/coverage"
 	"github.com/example/mutation-judge/internal/model"
 	"github.com/example/mutation-judge/internal/runner"
+	"github.com/example/mutation-judge/internal/workspace"
 )
 
 type sequenceBackend struct{ calls int }
@@ -1023,6 +1025,312 @@ func TestPreparedSnapshotNotLiveHostTree(t *testing.T) {
 		}
 		if result.Verdict != want {
 			t.Errorf("mutant %d: got %s, want %s", i, result.Verdict, want)
+		}
+	}
+}
+
+// TestCacheSeparatesWorkingDirectories reproduces F02 with the actual Go
+// backend. "./..." selects a and b from the root, but selects only a
+// from the a subdirectory. A mutant of a.F(0) is killed only by b's test.
+// Both orders must agree with a clean uncached run, and repeating the
+// identical scope must still produce a useful cache hit.
+func TestCacheSeparatesWorkingDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		producerInSub bool
+	}{
+		{name: "root-then-package"},
+		{name: "package-then-root", producerInSub: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			write := func(path, content string) {
+				t.Helper()
+				full := filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("go.mod", "module example.test/cwdcache\n\ngo 1.22\n")
+			write("a/a.go", "package a\nfunc F(x int) bool { return x > 0 }\n")
+			write("a/a_test.go", `package a
+import "testing"
+func TestWeak(t *testing.T) { if !F(1) { t.Fatal("positive") } }
+`)
+			write("b/b_test.go", `package b
+import (
+    "testing"
+    "example.test/cwdcache/a"
+)
+func TestBoundary(t *testing.T) { if a.F(0) { t.Fatal("zero must be false") } }
+`)
+			cfg := config.Default()
+			cfg.CacheDir = filepath.Join(root, ".mutation-judge", "cache")
+			cfg.Operators = []string{"boundary"}
+			cfg.MaxMutants = 1
+			rootReq := Request{CWD: root, Patterns: []string{"./..."}, Config: cfg}
+			pkgReq := Request{CWD: filepath.Join(root, "a"), Patterns: []string{"./..."}, Config: cfg}
+			producer, consumer := rootReq, pkgReq
+			producerVerdict, consumerVerdict := model.VerdictKilled, model.VerdictSurvived
+			if tc.producerInSub {
+				producer, consumer = pkgReq, rootReq
+				producerVerdict, consumerVerdict = model.VerdictSurvived, model.VerdictKilled
+			}
+			run := func(req Request) model.Report {
+				t.Helper()
+				report, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !report.Complete || len(report.Results) != 1 {
+					t.Fatalf("expected one complete mutant, got %#v", report.Summary)
+				}
+				return report
+			}
+			first := run(producer)
+			if first.Results[0].Cached || first.Results[0].Verdict != producerVerdict {
+				t.Fatalf("unexpected producer verdict: cached=%v verdict=%s, want %s", first.Results[0].Cached, first.Results[0].Verdict, producerVerdict)
+			}
+			second := run(consumer)
+			if second.Results[0].Cached || second.Results[0].Verdict != consumerVerdict {
+				t.Fatalf("working-directory cache collision: cached=%v verdict=%s, want fresh %s", second.Results[0].Cached, second.Results[0].Verdict, consumerVerdict)
+			}
+			if first.Results[0].Mutation.ID != second.Results[0].Mutation.ID {
+				t.Fatalf("fixture must produce the same mutant across scopes: %q != %q", first.Results[0].Mutation.ID, second.Results[0].Mutation.ID)
+			}
+			uncached := consumer
+			uncached.Config.Cache = false
+			control := run(uncached)
+			if control.Results[0].Cached || control.Results[0].Verdict != second.Results[0].Verdict {
+				t.Fatalf("cached execution disagrees with uncached reference: %#v vs %#v", second.Results[0], control.Results[0])
+			}
+			third := run(consumer)
+			if !third.Results[0].Cached || third.Results[0].Verdict != consumerVerdict {
+				t.Fatalf("identical repeated scope must hit cache: cached=%v verdict=%s", third.Results[0].Cached, third.Results[0].Verdict)
+			}
+			for _, r := range []struct {
+				report model.Report
+				req    Request
+			}{{first, producer}, {second, consumer}, {third, consumer}} {
+				wantRel, err := filepath.Rel(root, r.req.CWD)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantRel = filepath.ToSlash(wantRel)
+				if got := r.report.Bounds["test_working_directory"]; got != wantRel {
+					t.Fatalf("report working directory = %v, want %q", got, wantRel)
+				}
+				if got := r.report.Results[0].Diagnostic.Evidence["test_working_directory"]; got != wantRel {
+					t.Fatalf("execution working directory = %v, want %q", got, wantRel)
+				}
+				if got := r.report.Results[0].Diagnostic.Evidence["test_command"]; got == nil {
+					t.Fatalf("missing per-mutant execution command")
+				}
+			}
+		})
+	}
+}
+
+// TestMutantCacheKeyUsesStructuredExecutionIdentity protects against
+// delimiters inside package patterns and against changes to the resolved
+// target universe. Ordering of go list results does not affect the key.
+func TestMutantCacheKeyUsesStructuredExecutionIdentity(t *testing.T) {
+	p := preparedAnalysis{
+		workRel: "a", sourceDigest: "digest", backendName: "go-test", backendVersion: "v1",
+		pkgs: []workspace.Package{{ImportPath: "example.test/b"}, {ImportPath: "example.test/a"}},
+	}
+	m := model.Mutation{ID: "mut-1", Replacement: ">="}
+	key := func(p preparedAnalysis, patterns []string) string {
+		t.Helper()
+		k, err := mutantCacheKey("test", p, json.RawMessage(`{"timeout":"1s"}`), m, patterns, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	original := key(p, []string{"a", "b"})
+	if original == key(p, []string{"a,b"}) {
+		t.Fatal("pattern boundaries must not collide")
+	}
+	otherDir := p
+	otherDir.workRel = "."
+	if original == key(otherDir, []string{"a", "b"}) {
+		t.Fatal("working directory must be part of the key")
+	}
+	otherTargets := p
+	otherTargets.pkgs = []workspace.Package{{ImportPath: "example.test/a"}}
+	if original == key(otherTargets, []string{"a", "b"}) {
+		t.Fatal("resolved test package universe must be part of the key")
+	}
+	reversed := p
+	reversed.pkgs = []workspace.Package{{ImportPath: "example.test/a"}, {ImportPath: "example.test/b"}}
+	if original != key(reversed, []string{"a", "b"}) {
+		t.Fatal("go list package ordering must not cause a cache miss")
+	}
+}
+
+// F03: cache reuse must be equivalent to re-executing the same mutant, even
+// when a non-Go file changes *only* its executable bit.
+func TestF03ExecutableFileModeInvalidatesCache(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable bits are required")
+	}
+	d := writeTestModule(t, "package p\nfunc F(x int) bool { return x > 0 }\n", `package p
+import (
+    "os/exec"
+    "testing"
+)
+func TestMode(t *testing.T) {
+    if F(0) {
+        if err := exec.Command("./probe.sh").Run(); err != nil { t.Fatalf("probe: %v", err) }
+    }
+}
+`)
+	probe := filepath.Join(d, "probe.sh")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	cfg.CacheDir = filepath.Join(d, ".mutation-judge", "cache")
+	run := func() model.Report {
+		t.Helper()
+		r, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Results) != 1 {
+			t.Fatalf("expected one mutant, got %d", len(r.Results))
+		}
+		return r
+	}
+	first := run()
+	if first.Results[0].Cached || first.Results[0].Verdict != model.VerdictSurvived {
+		t.Fatalf("0755 producer: cached=%v verdict=%s", first.Results[0].Cached, first.Results[0].Verdict)
+	}
+	if err := os.Chmod(probe, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := run()
+	if second.Results[0].Cached || second.Results[0].Verdict != model.VerdictKilled {
+		t.Fatalf("0644 consumer: cached=%v verdict=%s; want fresh KILLED", second.Results[0].Cached, second.Results[0].Verdict)
+	}
+	third := run()
+	if !third.Results[0].Cached || third.Results[0].Verdict != model.VerdictKilled {
+		t.Fatalf("unchanged executable mode should hit cache: cached=%v verdict=%s", third.Results[0].Cached, third.Results[0].Verdict)
+	}
+}
+
+// F03: a test can branch on arbitrary inherited environment variables, not
+// just the five Go toolchain values previously included in cache identity.
+func TestF03TestEnvironmentInvalidatesCache(t *testing.T) {
+	d := writeTestModule(t, "package p\nfunc F(x int) bool { return x > 0 }\n", `package p
+import (
+    "os"
+    "testing"
+)
+func TestStrict(t *testing.T) {
+    if os.Getenv("MJ_AUDIT_STRICT") == "1" && F(0) { t.Fatal("strict zero") }
+}
+`)
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	cfg.CacheDir = filepath.Join(d, ".mutation-judge", "cache")
+	run := func() model.Report {
+		t.Helper()
+		r, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Results) != 1 {
+			t.Fatalf("expected one mutant, got %d", len(r.Results))
+		}
+		return r
+	}
+	t.Setenv("MJ_AUDIT_STRICT", "0")
+	first := run()
+	if first.Results[0].Cached || first.Results[0].Verdict != model.VerdictSurvived {
+		t.Fatalf("relaxed mode: cached=%v verdict=%s", first.Results[0].Cached, first.Results[0].Verdict)
+	}
+	t.Setenv("MJ_AUDIT_STRICT", "1")
+	second := run()
+	if second.Results[0].Cached || second.Results[0].Verdict != model.VerdictKilled {
+		t.Fatalf("strict mode: cached=%v verdict=%s; want fresh KILLED", second.Results[0].Cached, second.Results[0].Verdict)
+	}
+	third := run()
+	if !third.Results[0].Cached || third.Results[0].Verdict != model.VerdictKilled {
+		t.Fatalf("unchanged environment should hit cache: cached=%v verdict=%s", third.Results[0].Cached, third.Results[0].Verdict)
+	}
+}
+
+// F03: absolute local module replacements are *not* copied into the module
+// sandbox and are mutable independently. Disable the result cache in that
+// configuration rather than fingerprinting an incomplete dependency set.
+func TestF03ExternalLocalReplacementDisablesCache(t *testing.T) {
+	dep := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dep, "go.mod"), []byte("module example.test/auditdep\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	depSource := filepath.Join(dep, "dep.go")
+	if err := os.WriteFile(depSource, []byte("package auditdep\nfunc Reject() bool { return false }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := writeTestModule(t, "package p\nfunc F(x int) bool { return x > 0 }\n", `package p
+import (
+    "testing"
+    "example.test/auditdep"
+)
+func TestDepend(t *testing.T) {
+    if F(0) && auditdep.Reject() { t.Fatal("dependent boundary") }
+}
+`)
+	gomod := "module example.test/pertest\n\ngo 1.22\n\nrequire example.test/auditdep v0.0.0\n\nreplace example.test/auditdep => " + filepath.ToSlash(dep) + "\n"
+	if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte(gomod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Operators = []string{"boundary"}
+	cfg.CacheDir = filepath.Join(d, ".mutation-judge", "cache")
+	run := func() model.Report {
+		t.Helper()
+		r, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Results) != 1 {
+			t.Fatalf("expected one mutant, got %d", len(r.Results))
+		}
+		if len(r.Warnings) == 0 || !strings.Contains(strings.Join(r.Warnings, " "), "caching disabled") {
+			t.Fatalf("missing warning about disabled cache: %v", r.Warnings)
+		}
+		return r
+	}
+	first := run()
+	if first.Results[0].Cached || first.Results[0].Verdict != model.VerdictSurvived {
+		t.Fatalf("external dep false: cached=%v verdict=%s", first.Results[0].Cached, first.Results[0].Verdict)
+	}
+	if err := os.WriteFile(depSource, []byte("package auditdep\nfunc Reject() bool { return true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := run()
+	if second.Results[0].Cached || second.Results[0].Verdict != model.VerdictKilled {
+		t.Fatalf("external dep changed: cached=%v verdict=%s; want fresh KILLED", second.Results[0].Cached, second.Results[0].Verdict)
+	}
+	third := run()
+	if third.Results[0].Cached || third.Results[0].Verdict != model.VerdictKilled {
+		t.Fatalf("local replace must stay non-cacheable: cached=%v verdict=%s", third.Results[0].Cached, third.Results[0].Verdict)
+	}
+}
+
+func TestF03UntrackedGoFlagsDisableCache(t *testing.T) {
+	for _, flags := range []string{"-modfile=elsewhere.mod", "-overlay /tmp/overlay.json", "-toolexec=/opt/wrapper", "-mod=mod"} {
+		got := untrackedGoFlagInputs(flags)
+		want := flags != "-mod=mod"
+		if got != want {
+			t.Errorf("untrackedGoFlagInputs(%q)=%v, want %v", flags, got, want)
 		}
 	}
 }

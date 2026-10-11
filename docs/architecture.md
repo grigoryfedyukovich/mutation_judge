@@ -61,7 +61,8 @@ SHA-256(
   CLI version,
   operator semantic version,
   invoked go toolchain (go env GOVERSION, GOOS, GOARCH, CGO_ENABLED, GOFLAGS),
-  sandbox digest (workspace.Digest),
+  sandbox digest (workspace.Digest, including file type, permission bits, and empty directories),
+  frozen effective child-process environment digest (no raw values),
   cache-relevant configuration JSON (timeout, test_run only — see below),
   backend name and version,
   mutant stable ID,
@@ -77,6 +78,8 @@ The invoked toolchain component (`runner.DetectToolchain`, `internal/runner/runn
 Only `Timeout` and `TestRun` from the full configuration are in the key, not the whole `Config.AsMap()` — those are the only two fields that actually reach a mutant's `go test` invocation (`analysis.cacheRelevantConfig`). This is narrower than it looks by accident: a `"workers"` key was added to `Config.AsMap()` purely so `--print-config` could show it, and initially the cache key used that same full map, so it silently became sensitive to worker count too — running the identical analysis with a different `--workers` value produced zero cache hits despite no mutant's actual outcome being affected by how many others ran alongside it. Found by testing the finished feature, not while building it; fixed by introducing this explicit minimal subset, with a permanent regression test confirmed to fail against the reverted code.
 
 The last component matters even though it's also a function of other inputs (effective configuration, which includes `--narrow-test-scope`, and the sandbox digest, which captures the dependency graph shape): before it was added explicitly, two runs against the same unchanged source tree but different top-level pattern arguments could produce the same key despite the real `go test` command differing — a genuine, if narrow, pre-existing gap found while adding dependency-graph-guided scoping (see `docs/performance.md`), fixed independently of whether that feature is enabled.
+
+The F03 cache identity revision (`mutation-judge-execution/v3`) binds verdicts to permission bits and the effective test environment in addition to source bytes. The effective environment is frozen at preparation and passed to baseline, coverage, and mutant `go test` processes; GOWORK is forced to `off`. Raw environment values are not reported or embedded in cache keys. A local `go.mod replace` target can reside outside the immutable snapshot; the analyzer therefore disables the result cache whenever any local replacement is declared (even when it happens to be inside the source tree). It also disables caching for GOFLAGS `-modfile`, `-overlay`, or `-toolexec` inputs that reference mutable external files. A warning explains the fallback. Arbitrary external files accessed by tests or mutable external toolchains remain outside the guaranteed cache-input contract; `--no-cache` is the conservative option for those projects.
 
 The stored JSON also has an independent schema marker. This prevents old result layouts from being silently accepted.
 

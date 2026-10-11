@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -783,5 +784,16 @@ func TestListTestsFailsOnBuildError(t *testing.T) {
 	_, err := ListTests(context.Background(), root, ".", ".", 10*time.Second)
 	if err == nil {
 		t.Fatal("expected an error for a package that fails to build")
+	}
+}
+
+func TestF03EffectiveTestEnvironment(t *testing.T) {
+	a := EffectiveTestEnvironment([]string{"B=2", "A=1", "GOWORK=/some/work", "B=last"})
+	b := EffectiveTestEnvironment([]string{"B=last", "A=1", "GOWORK=off"})
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("canonical environments differ: %v vs %v", a, b)
+	}
+	if !reflect.DeepEqual(a, []string{"A=1", "B=last", "GOWORK=off"}) {
+		t.Fatalf("wrong effective env: %v", a)
 	}
 }

@@ -206,7 +206,7 @@ progress = true
 5. For each mutant, create a fresh sandbox from the snapshot, verify the original source span, apply one atomic replacement, run the selected tests (or a narrower scope if configured), classify the result, and discard the sandbox. The baseline and profiling runs are also isolated.
 6. Render diagnostics and cache compatible backend results.
 
-Cache keys include the tool version, independently versioned operator semantics, all Go/test source content, module files, effective configuration, backend name/version, and mutant identity. Cache entries use a versioned schema.
+Cache keys include the tool version, independently versioned operator semantics, all Go/test source content, module files, effective configuration, backend name/version, and mutant identity. They also bind the **module-relative execution directory**, actual per-mutant test patterns, `-run` selector, and resolved test package universe (so a relative `./...` in two different directories cannot reuse a stale verdict). Cache entries also account for sandbox entry types, executable/file permissions, and a SHA-256 digest of the frozen effective test environment (environment values are not written to reports). Any main-module local `replace` dependency or `GOFLAGS` with `-modfile`, `-overlay`, or `-toolexec` disables caching with a report warning, because inputs outside the snapshot cannot be fingerprinted reliably. Cache entries use a versioned schema, and older unsafe execution keys are not reused. Reports record the execution working directory and effective command with each executed or cached mutant.
 
 ## Incremental workflow
 
