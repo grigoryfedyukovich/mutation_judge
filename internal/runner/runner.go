@@ -27,7 +27,10 @@ type Request struct {
 	TestRun     string
 	Timeout     time.Duration
 	CoverageOut string
-	Environment []string // frozen test environment; nil retains legacy os.Environ behavior
+	// CoveragePackages explicitly instruments the selected module packages, including
+	// imported production code when profiling tests from a dependent package.
+	CoveragePackages []string
+	Environment      []string // frozen test environment; nil retains legacy os.Environ behavior
 	// GoVersion is the invoked go toolchain's version (ToolchainInfo.GoVersion),
 	// supplied by the caller once per analysis run and recorded verbatim
 	// on the Result -- never re-derived here from runtime.Version(),
@@ -310,6 +313,9 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	}
 	if req.CoverageOut != "" {
 		args = append(args, "-covermode=count", "-coverprofile="+req.CoverageOut)
+		if len(req.CoveragePackages) > 0 {
+			args = append(args, "-coverpkg="+strings.Join(req.CoveragePackages, ","))
+		}
 	}
 	args = append(args, req.Patterns...)
 	cmd := exec.CommandContext(ctx, "go", args...)

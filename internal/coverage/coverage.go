@@ -37,7 +37,7 @@ func Parse(path, moduleRoot string) (Map, error) {
 			continue
 		}
 		count, err := strconv.Atoi(fields[2])
-		if err != nil || count <= 0 {
+		if err != nil || count < 0 {
 			continue
 		}
 		colon := strings.LastIndex(fields[0], ":")
@@ -61,8 +61,10 @@ func Parse(path, moduleRoot string) (Map, error) {
 		if m.Lines[rel] == nil {
 			m.Lines[rel] = map[int]bool{}
 		}
-		for l := a; l <= b; l++ {
-			m.Lines[rel][l] = true
+		if count > 0 {
+			for l := a; l <= b; l++ {
+				m.Lines[rel][l] = true
+			}
 		}
 	}
 	if err := s.Err(); err != nil {

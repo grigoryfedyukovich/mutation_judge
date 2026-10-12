@@ -59,7 +59,7 @@ type preparedAnalysis struct {
 	backendVersion  string
 	toolchain       runner.ToolchainInfo
 	filePackage     map[string]string   // relative file path -> owning package import path
-	testScopes      map[string][]string // package import path -> minimal safe go test patterns; nil unless NarrowTestScope is on
+	testScopes      map[string][]string // package import path -> observing test packages; resolved for scope/coverage selection
 	pkgs            []workspace.Package // resolved go test package universe; also used for per-test coverage and cache identity
 	perTestCoverage covermap.PerTest    // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
 }
@@ -179,7 +179,13 @@ func mutantTestRun(req Request, p preparedAnalysis, mut model.Mutation) string {
 	if req.Config.TestRun != "" || !req.Config.CoverageTestSelection {
 		return req.Config.TestRun
 	}
-	tests, known := p.perTestCoverage.CoveringTests(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine)
+	// A package with no dependency analysis or any missing observer profile
+	// cannot justify eliminating tests. In that case run the requested suite.
+	owner, ok := p.filePackage[mut.Span.File]
+	if !ok {
+		return req.Config.TestRun
+	}
+	tests, known := p.perTestCoverage.CoveringTestsForPackages(mut.Span.File, mut.Span.StartLine, mut.Span.EndLine, p.testScopes[owner])
 	if !known || len(tests) == 0 {
 		return req.Config.TestRun
 	}
@@ -212,7 +218,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 		return preparedAnalysis{}, err
 	}
 	var testScopes map[string][]string
-	if req.Config.NarrowTestScope {
+	if req.Config.NarrowTestScope || req.Config.CoverageTestSelection {
 		testScopes, err = workspace.TestScopes(req.CWD, req.Patterns)
 		if err != nil {
 			return preparedAnalysis{}, err
@@ -367,6 +373,16 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 // test scope, never a source of correctness risk on its own.
 func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p preparedAnalysis) (covermap.PerTest, error) {
 	var per covermap.PerTest
+	// Explicit package import paths avoid -coverpkg's default of instrumenting
+	// only the package under test, which loses production coverage when an
+	// integration test in package B imports and exercises package A.
+	instrument := make([]string, 0, len(p.pkgs))
+	for _, pkg := range p.pkgs {
+		if pkg.ImportPath != "" {
+			instrument = append(instrument, pkg.ImportPath)
+		}
+	}
+	sort.Strings(instrument)
 	for _, pkg := range p.pkgs {
 		if pkg.Error != nil && pkg.Error.Err != "" || !pkg.HasOwnTests() {
 			continue
@@ -397,7 +413,7 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 			}
 			result := e.Backend.Run(ctx, runner.Request{
 				Root: sandbox, WorkRel: p.workRel, Patterns: []string{pkg.ImportPath},
-				TestRun: "^" + regexp.QuoteMeta(name) + "$", Timeout: req.Config.Timeout, CoverageOut: profilePath, Environment: p.environment,
+				TestRun: "^" + regexp.QuoteMeta(name) + "$", Timeout: req.Config.Timeout, CoverageOut: profilePath, CoveragePackages: instrument, Environment: p.environment,
 				GoVersion: p.toolchain.GoVersion,
 			})
 			if result.Verdict != model.VerdictSurvived {
@@ -409,7 +425,7 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 			if err != nil {
 				return covermap.PerTest{}, fmt.Errorf("parsing coverage profile for %s: %w", name, err)
 			}
-			per.Add(name, m)
+			per.AddInPackage(pkg.ImportPath, name, m)
 		}
 	}
 	return per, nil
@@ -476,9 +492,9 @@ func untrackedGoFlagInputs(flags string) bool {
 }
 
 // cacheExecutionSchema changes whenever the serialized execution identity changes.
-// /v3 invalidates older entries that omitted executable bits, environment
-// variables, and local replacement dependency constraints.
-const cacheExecutionSchema = "mutation-judge-execution/v3"
+// /v4 invalidates prior coverage-selection cache identities after fixing
+// cross-package instrumentation and conservative observer attribution.
+const cacheExecutionSchema = "mutation-judge-execution/v4"
 
 // mutantCacheKey binds a verdict to the *resolved execution*, not just the
 // textual patterns. Go interprets ./... relative to WorkRel: the same source

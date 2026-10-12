@@ -95,3 +95,29 @@ func TestPerTestCoveringTestsConfidentlyEmpty(t *testing.T) {
 		t.Fatalf("expected no covering tests, got %v", tests)
 	}
 }
+
+func TestPerTestCrossPackageMissingAttributionFallsBack(t *testing.T) {
+	var p PerTest
+	p.AddInPackage("example/a", "TestLocal", mustParse(t, "mode: count\nexample/a/a.go:2.1,2.30 1 1\n"))
+	p.AddInPackage("example/b", "TestDependent", mustParse(t, "mode: count\nexample/b/b.go:1.1,1.20 1 1\n"))
+	if _, ok := p.CoveringTestsForPackages("a/a.go", 2, 2, []string{"example/a", "example/b"}); ok {
+		t.Fatal("missing imported production coverage must force full-suite execution")
+	}
+	p2 := PerTest{}
+	p2.AddInPackage("example/a", "TestLocal", mustParse(t, "mode: count\nexample/a/a.go:2.1,2.30 1 1\n"))
+	p2.AddInPackage("example/b", "TestDependent", mustParse(t, "mode: count\nexample/a/a.go:2.1,2.30 1 0\n"))
+	got, ok := p2.CoveringTestsForPackages("a/a.go", 2, 2, []string{"example/a", "example/b"})
+	if !ok || len(got) != 1 || got[0] != "TestLocal" {
+		t.Fatalf("zero-count row must be known-uncovered; got=%v known=%v", got, ok)
+	}
+}
+
+func TestPerTestSameNameAcrossPackagesRetainsObserver(t *testing.T) {
+	var p PerTest
+	p.AddInPackage("example/a", "TestBoundary", mustParse(t, "mode: count\nexample/a/a.go:2.1,2.30 1 0\n"))
+	p.AddInPackage("example/b", "TestBoundary", mustParse(t, "mode: count\nexample/a/a.go:2.1,2.30 1 1\n"))
+	got, ok := p.CoveringTestsForPackages("a/a.go", 2, 2, []string{"example/a", "example/b"})
+	if !ok || len(got) != 1 || got[0] != "TestBoundary" {
+		t.Fatalf("dependent observer must remain selected even with duplicate test names: got=%v known=%v", got, ok)
+	}
+}

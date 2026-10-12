@@ -676,9 +676,13 @@ func TestMutantTestRunFallsBackWhenUncertain(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		per.Add("TestA", m)
-		per.Add("TestB.Special", m) // a dot is a regexp metacharacter and must be escaped
-		got := mutantTestRun(on, preparedAnalysis{perTestCoverage: per}, mut)
+		per.AddInPackage("example.test/project/pkg", "TestA", m)
+		per.AddInPackage("example.test/project/pkg", "TestB.Special", m) // a dot must be escaped
+		got := mutantTestRun(on, preparedAnalysis{
+			perTestCoverage: per,
+			filePackage:     map[string]string{"pkg/foo.go": "example.test/project/pkg"},
+			testScopes:      map[string][]string{"example.test/project/pkg": {"example.test/project/pkg"}},
+		}, mut)
 		want := `^(TestA|TestB\.Special)$`
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
@@ -1474,5 +1478,59 @@ func TestBoundary(t *testing.T) {
 	}
 	if len(third.Results) != 1 || third.Results[0].Verdict != model.VerdictSurvived || !third.Results[0].Cached {
 		t.Fatalf("completed child should be reusable: %+v", third.Results)
+	}
+}
+
+// Regression F05: a mutant in package a is observed by b's integration test.
+// Without -coverpkg the b profile cannot see a's statements, and selecting
+// only TestWeak falsely marks a boundary mutant SURVIVED.
+func TestCoverageSelectionRetainsDependentPackageKiller(t *testing.T) {
+	mod := t.TempDir()
+	write := func(rel, data string) {
+		t.Helper()
+		path := filepath.Join(mod, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.test/dependent\n\ngo 1.22\n")
+	write("a/a.go", "package a\nfunc F(x int) bool { return x > 0 }\n")
+	write("a/a_test.go", `package a
+import "testing"
+func TestWeak(t *testing.T) { if !F(1) { t.Fatal("positive") } }
+`)
+	write("b/b_test.go", `package b
+import (
+  "testing"
+  "example.test/dependent/a"
+)
+func TestBoundary(t *testing.T) { if a.F(0) { t.Fatal("zero boundary") } }
+`)
+	for _, narrow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("narrow=%t", narrow), func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Cache = false
+			cfg.Operators = []string{"boundary"}
+			cfg.CoverageTestSelection = true
+			cfg.NarrowTestScope = narrow
+			engine := Engine{Version: "test", Backend: runner.GoTest{}}
+			report, err := engine.Analyze(context.Background(), Request{CWD: mod, Patterns: []string{"./..."}, Config: cfg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Results) != 1 {
+				t.Fatalf("results = %d, want 1", len(report.Results))
+			}
+			if report.Results[0].Verdict != model.VerdictKilled {
+				t.Fatalf("coverage selection missed dependent-package killer: verdict=%s, evidence=%v, warnings=%v", report.Results[0].Verdict, report.Results[0].Diagnostic.Evidence, report.Warnings)
+			}
+			cmd := fmt.Sprint(report.Results[0].Diagnostic.Evidence["test_command"])
+			if !strings.Contains(cmd, "TestBoundary") {
+				t.Fatalf("dependent package not attributed to coverage selection: command=%s warnings=%v", cmd, report.Warnings)
+			}
+		})
 	}
 }

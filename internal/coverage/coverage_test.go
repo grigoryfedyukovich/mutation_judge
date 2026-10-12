@@ -57,3 +57,17 @@ func TestAmbiguousSuffixIsUnknownEvenWithIdenticalLineSets(t *testing.T) {
 		t.Fatal("suffix shared by two distinct files must stay ambiguous even when their covered lines coincide")
 	}
 }
+
+func TestZeroCountCoverageIsKnownUncovered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coverage.out")
+	if err := os.WriteFile(path, []byte("mode: count\nexample.test/project/a/a.go:2.1,3.30 1 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Parse(path, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if covered, known := m.Covered("a/a.go", 2, 3); !known || covered {
+		t.Fatalf("zero-count row must be known-uncovered: covered=%t known=%t", covered, known)
+	}
+}

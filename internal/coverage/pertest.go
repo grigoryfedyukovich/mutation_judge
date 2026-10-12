@@ -2,7 +2,7 @@ package coverage
 
 import "sort"
 
-// PerTest holds one baseline coverage Map per top-level test function,
+// PerTest holds one baseline coverage Map per package-qualified top-level test,
 // built by running each test individually with its own coverage
 // profile (see runner.ListTests and the orchestration in
 // internal/analysis). It answers "which of these individually-run
@@ -12,15 +12,69 @@ import "sort"
 // keys a coverage profile reports exactly the way baseline coverage
 // does.
 type PerTest struct {
-	names []string
-	maps  []Map
+	names    []string
+	packages []string
+	maps     []Map
 }
 
 // Add records one test's own coverage map. Safe to call repeatedly;
 // PerTest has no other state to keep consistent.
 func (p *PerTest) Add(name string, m Map) {
+	p.AddInPackage("", name, m)
+}
+
+// AddInPackage preserves the owning test package. Top-level test names need
+// not be unique across packages; they are not evidence identities by themselves.
+func (p *PerTest) AddInPackage(pkg, name string, m Map) {
+	p.packages = append(p.packages, pkg)
 	p.names = append(p.names, name)
 	p.maps = append(p.maps, m)
+}
+
+// CoveringTestsForPackages is the conservative selector for mutation runs.
+// possible contains every test package that could transitively observe the
+// mutated package (from go list -deps -test). For each such test we require
+// an instrumented, unambiguous target file; otherwise an absent profile row
+// could mean missing instrumentation, not an uncovered span, so we fall back.
+// Names are returned for go test -run; duplicates across test packages are
+// deliberately retained by the underlying package-qualified records before
+// conversion to a regex (which may conservatively run more tests).
+func (p *PerTest) CoveringTestsForPackages(file string, start, end int, possible []string) ([]string, bool) {
+	if p.Len() == 0 || len(possible) == 0 {
+		return nil, false
+	}
+	allowed := make(map[string]bool, len(possible))
+	for _, pkg := range possible {
+		allowed[pkg] = true
+	}
+	covered := make(map[string]bool)
+	saw := make(map[string]bool)
+	for i, m := range p.maps {
+		if !allowed[p.packages[i]] {
+			continue
+		}
+		saw[p.packages[i]] = true
+		yes, known := m.Covered(file, start, end)
+		if !known { // missing/ambiguous cross-package instrumentation
+			return nil, false
+		}
+		if yes {
+			covered[p.names[i]] = true
+		}
+	}
+	// A dependent package with its own tests but no successfully recorded
+	// test coverage must not silently disappear from the observing universe.
+	for _, pkg := range possible {
+		if !saw[pkg] {
+			return nil, false
+		}
+	}
+	names := make([]string, 0, len(covered))
+	for name := range covered {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, true
 }
 
 // Len reports how many tests have recorded coverage.
