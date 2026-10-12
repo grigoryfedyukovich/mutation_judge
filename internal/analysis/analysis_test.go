@@ -1534,3 +1534,70 @@ func TestBoundary(t *testing.T) { if a.F(0) { t.Fatal("zero boundary") } }
 		})
 	}
 }
+
+// Regression F06: a non-Test execution unit can kill a mutation even when an
+// ordinary test reaches the same line without checking the boundary. Coverage
+// selection must keep examples with output assertions and fuzz seed corpora.
+func TestF06CoverageSelectionRetainsExampleAndFuzzKillers(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		body  string
+		other string
+	}{
+		{name: "example", other: "ExampleF", body: `package p
+import (
+    "fmt"
+    "testing"
+)
+func TestWeak(t *testing.T) { if !F(1) { t.Fatal("positive") } }
+func ExampleF() {
+    fmt.Println(F(0))
+    // Output: false
+}
+`},
+		{name: "fuzz_seed", other: "FuzzBoundary", body: `package p
+import "testing"
+func TestWeak(t *testing.T) { if !F(1) { t.Fatal("positive") } }
+func FuzzBoundary(f *testing.F) {
+    f.Add(0)
+    f.Fuzz(func(t *testing.T, x int) {
+        if x == 0 && F(x) { t.Fatal("zero") }
+    })
+}
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeTestModule(t, "package p\nfunc F(x int) bool { return x > 0 }\n", tc.body)
+			for _, narrow := range []bool{false, true} {
+				t.Run(fmt.Sprintf("narrow=%t", narrow), func(t *testing.T) {
+					cfg := config.Default()
+					cfg.Cache = false
+					cfg.Operators = []string{"boundary"}
+					cfg.CoverageTestSelection = true
+					cfg.NarrowTestScope = narrow
+					report, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), Request{CWD: dir, Patterns: []string{"."}, Config: cfg})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !report.Complete || len(report.Results) != 1 || report.Results[0].Verdict != model.VerdictKilled {
+						t.Fatalf("optimized run missed %s killer: %+v warnings=%v", tc.other, report.Summary, report.Warnings)
+					}
+					if len(report.Warnings) != 0 {
+						t.Fatalf("unexpected coverage-selection fallback: %v", report.Warnings)
+					}
+					cmd := fmt.Sprint(report.Results[0].Diagnostic.Evidence["test_command"])
+					if !strings.Contains(cmd, "TestWeak") || !strings.Contains(cmd, tc.other) {
+						t.Fatalf("selected -run dropped %s: command=%q", tc.other, cmd)
+					}
+				})
+			}
+			cfg := config.Default()
+			cfg.Cache = false
+			cfg.Operators = []string{"boundary"}
+			report, err := (Engine{Version: "test", Backend: runner.GoTest{}}).Analyze(context.Background(), Request{CWD: dir, Patterns: []string{"."}, Config: cfg})
+			if err != nil || len(report.Results) != 1 || report.Results[0].Verdict != model.VerdictKilled {
+				t.Fatalf("full-suite oracle should kill boundary mutant: results=%v err=%v", report.Results, err)
+			}
+		})
+	}
+}

@@ -15,6 +15,9 @@ type PerTest struct {
 	names    []string
 	packages []string
 	maps     []Map
+	// Examples and fuzz targets execute in ordinary go test, but do not have
+	// individual coverage profiles. Preserve these in every narrowed -run.
+	alwaysRun map[string][]string // test package -> runnable names
 }
 
 // Add records one test's own coverage map. Safe to call repeatedly;
@@ -29,6 +32,33 @@ func (p *PerTest) AddInPackage(pkg, name string, m Map) {
 	p.packages = append(p.packages, pkg)
 	p.names = append(p.names, name)
 	p.maps = append(p.maps, m)
+}
+
+// AddAlwaysRunInPackage records a runnable example or fuzz target that cannot
+// be excluded based on ordinary Test-function coverage alone.
+func (p *PerTest) AddAlwaysRunInPackage(pkg, name string) {
+	if p.alwaysRun == nil {
+		p.alwaysRun = make(map[string][]string)
+	}
+	p.alwaysRun[pkg] = append(p.alwaysRun[pkg], name)
+}
+
+// AlwaysRunForPackages returns the examples and fuzz seed targets that must
+// remain enabled for any potentially observing test package. A name collision
+// across packages is harmless: -run may conservatively execute extra units.
+func (p *PerTest) AlwaysRunForPackages(possible []string) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, pkg := range possible {
+		for _, name := range p.alwaysRun[pkg] {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // CoveringTestsForPackages is the conservative selector for mutation runs.

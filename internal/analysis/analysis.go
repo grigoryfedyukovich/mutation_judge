@@ -153,8 +153,9 @@ func mutantTestScope(req Request, p preparedAnalysis, mut model.Mutation) []stri
 
 // mutantTestRun returns the `-run` regular expression to use for one
 // mutant's execution. It is req.Config.TestRun unchanged unless all of
-// the following hold, in which case it narrows further to exactly the
-// tests known to reach the mutant's own span:
+// the following hold, in which case it narrows to ordinary tests known to
+// reach the mutant's own span, together with runnable examples and fuzz
+// targets from potentially observing packages:
 //
 //   - config.CoverageTestSelection is enabled and p.perTestCoverage was
 //     successfully built (see buildPerTestCoverage);
@@ -189,6 +190,11 @@ func mutantTestRun(req Request, p preparedAnalysis, mut model.Mutation) string {
 	if !known || len(tests) == 0 {
 		return req.Config.TestRun
 	}
+	// A normal `go test` also runs examples and fuzz seed targets. Their
+	// coverage is not included in ordinary Test profiles, so keep all of
+	// them in potentially observing packages even if they never appear in
+	// the computed Test-only covering set (F06).
+	tests = append(tests, p.perTestCoverage.AlwaysRunForPackages(p.testScopes[owner])...)
 	quoted := make([]string, len(tests))
 	for i, name := range tests {
 		quoted[i] = regexp.QuoteMeta(name)
@@ -348,7 +354,8 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	return coverage, err == nil, elapsed, nil
 }
 
-// buildPerTestCoverage runs every top-level Test function in every
+// buildPerTestCoverage lists all runnable units, preserves examples and fuzz
+// targets for every selected mutant, and runs every top-level Test function in every
 // package (within p.pkgs) that has its own test files individually,
 // each with its own coverage profile, to determine exactly which
 // tests reach which lines -- the "much heavier machinery" a plain
@@ -393,12 +400,15 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 		if err != nil {
 			return covermap.PerTest{}, fmt.Errorf("create listing sandbox for %s: %w", pkg.ImportPath, err)
 		}
-		names, err := runner.ListTestsWithEnvironment(ctx, listing, p.workRel, pkg.ImportPath, req.Config.Timeout, p.environment)
+		units, err := runner.ListRunnableUnitsWithEnvironment(ctx, listing, p.workRel, pkg.ImportPath, req.Config.Timeout, p.environment)
 		cleanup()
 		if err != nil {
-			return covermap.PerTest{}, fmt.Errorf("listing tests in %s: %w", pkg.ImportPath, err)
+			return covermap.PerTest{}, fmt.Errorf("listing runnable units in %s: %w", pkg.ImportPath, err)
 		}
-		for _, name := range names {
+		for _, name := range units.AlwaysRun {
+			per.AddAlwaysRunInPackage(pkg.ImportPath, name)
+		}
+		for _, name := range units.Tests {
 			if err := ctx.Err(); err != nil {
 				return covermap.PerTest{}, err
 			}

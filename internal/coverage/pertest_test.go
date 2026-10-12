@@ -3,6 +3,7 @@ package coverage
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -119,5 +120,20 @@ func TestPerTestSameNameAcrossPackagesRetainsObserver(t *testing.T) {
 	got, ok := p.CoveringTestsForPackages("a/a.go", 2, 2, []string{"example/a", "example/b"})
 	if !ok || len(got) != 1 || got[0] != "TestBoundary" {
 		t.Fatalf("dependent observer must remain selected even with duplicate test names: got=%v known=%v", got, ok)
+	}
+}
+
+// TestF06AlwaysRunForPackages keeps non-Test units only from possible
+// observing packages, deduplicated and in stable order.
+func TestF06AlwaysRunForPackages(t *testing.T) {
+	var p PerTest
+	p.AddAlwaysRunInPackage("example/a", "ExampleF")
+	p.AddAlwaysRunInPackage("example/a", "FuzzBoundary")
+	p.AddAlwaysRunInPackage("example/b", "ExampleF")
+	p.AddAlwaysRunInPackage("example/c", "ExampleOther")
+	got := p.AlwaysRunForPackages([]string{"example/b", "example/a"})
+	want := []string{"ExampleF", "FuzzBoundary"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

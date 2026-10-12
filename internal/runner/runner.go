@@ -150,18 +150,15 @@ func parseGoEnv(out []byte) (ToolchainInfo, error) {
 
 var failRE = regexp.MustCompile(`(?m)^\s*--- FAIL: ([^ (]+)`)
 
-// ListTests returns the top-level Test function names in pattern (a
-// single package import path or relative path, not `./...`-style
-// multi-package expansion -- callers that need per-package attribution
-// must call this once per package, since `go test -list` does not
-// prefix its output by package when given more than one). It never
-// runs a test: `go test -list` only enumerates. The "^Test" list
-// regexp keeps benchmarks and examples out of the result; a package
-// with no test files at all is not an error -- `go test -list` prints
-// `?   pkg  [no test files]` and exits 0, which yields an empty,
-// nil-error result here, since that line does not start with "Test"
-// and every other non-matching line (the "ok pkg time" summary) is
-// filtered the same way.
+// RunnableUnits contains top-level ordinary tests (profiled individually) and
+// examples / fuzz targets (always retained when coverage selection narrows -run).
+// go test -list does not qualify names with their package, so callers must list
+// one package at a time. Benchmarks are not selected by ordinary go test -run.
+type RunnableUnits struct {
+	Tests     []string
+	AlwaysRun []string
+}
+
 // EffectiveTestEnvironment makes GOWORK=off explicit and sorts effective
 // variables by name so a cache hash does not depend on insertion order.
 // Repeated variable names use the last value, as exec.Cmd.Env does.
@@ -185,15 +182,27 @@ func EffectiveTestEnvironment(inherited []string) []string {
 	return out
 }
 
+// ListTests returns only top-level ordinary Test functions. Use
+// ListRunnableUnitsWithEnvironment for coverage-driven selection: Go also runs
+// examples with Output comments and fuzz seed corpora during normal go test.
+// Ignoring those runnable units causes false SURVIVED verdicts.
 func ListTests(ctx context.Context, root, workRel, pattern string, timeout time.Duration) ([]string, error) {
 	return ListTestsWithEnvironment(ctx, root, workRel, pattern, timeout, nil)
 }
 
 func ListTestsWithEnvironment(ctx context.Context, root, workRel, pattern string, timeout time.Duration, environment []string) ([]string, error) {
+	units, err := ListRunnableUnitsWithEnvironment(ctx, root, workRel, pattern, timeout, environment)
+	return units.Tests, err
+}
 
+// ListRunnableUnitsWithEnvironment lists every runnable unit that the default
+// go test -run filter can select. Enumeration happens without executing tests.
+// Examples and fuzz targets cannot be omitted by coverage-based optimization:
+// their coverage is not profiled per unit, so they remain selected verbatim.
+func ListRunnableUnitsWithEnvironment(ctx context.Context, root, workRel, pattern string, timeout time.Duration, environment []string) (RunnableUnits, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "test", "-list", "^Test", pattern)
+	cmd := exec.CommandContext(ctx, "go", "test", "-list", "^(Test|Example|Fuzz)", pattern)
 	cmd.Dir = filepath.Join(root, filepath.FromSlash(workRel))
 	// Same reasoning as GoTest.Run: root is always a temporary sandbox
 	// copy of the module alone, never one of a go.work's use-listed
@@ -204,16 +213,21 @@ func ListTestsWithEnvironment(ctx context.Context, root, workRel, pattern string
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("go test -list failed for %s: %w", pattern, exitErrorWithStderr(err))
+		return RunnableUnits{}, fmt.Errorf("go test -list failed for %s: %w", pattern, exitErrorWithStderr(err))
 	}
-	var names []string
+	var units RunnableUnits
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Test") {
-			names = append(names, line)
+		switch {
+		case strings.HasPrefix(line, "Test"):
+			units.Tests = append(units.Tests, line)
+		case strings.HasPrefix(line, "Example"), strings.HasPrefix(line, "Fuzz"):
+			units.AlwaysRun = append(units.AlwaysRun, line)
 		}
 	}
-	return names, nil
+	sort.Strings(units.Tests)
+	sort.Strings(units.AlwaysRun)
+	return units, nil
 }
 
 // exitErrorWithStderr folds a *exec.ExitError's captured stderr into

@@ -760,6 +760,38 @@ func TestListTestsReturnsTopLevelTestNames(t *testing.T) {
 	}
 }
 
+// TestF06ListRunnableUnitsKeepsExamplesAndFuzzSeeds ensures that the
+// profiling enumerator cannot silently discard runnable non-Test units.
+func TestF06ListRunnableUnitsKeepsExamplesAndFuzzSeeds(t *testing.T) {
+	root := testModule(t, "package p\nfunc F(x int) bool { return x > 0 }\n", `package p
+import (
+    "fmt"
+    "testing"
+)
+func TestWeak(t *testing.T) { _ = F(1) }
+func ExampleF() {
+    fmt.Println(F(0))
+    // Output: false
+}
+func FuzzBoundary(f *testing.F) {
+    f.Add(0)
+    f.Fuzz(func(t *testing.T, x int) { _ = F(x) })
+}
+func BenchmarkF(b *testing.B) { _ = F(1) }
+`)
+	units, err := ListRunnableUnitsWithEnvironment(context.Background(), root, ".", ".", 20*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(units.Tests, []string{"TestWeak"}) || !reflect.DeepEqual(units.AlwaysRun, []string{"ExampleF", "FuzzBoundary"}) {
+		t.Fatalf("unexpected runnable units: %+v", units)
+	}
+	tests, err := ListTests(context.Background(), root, ".", ".", 20*time.Second)
+	if err != nil || !reflect.DeepEqual(tests, []string{"TestWeak"}) {
+		t.Fatalf("legacy ListTests returned %v, err=%v", tests, err)
+	}
+}
+
 // TestListTestsHandlesNoTestFiles confirms a package with no test
 // files at all is not an error -- `go test -list` reports
 // "[no test files]" and exits 0 for that case, which must yield an
