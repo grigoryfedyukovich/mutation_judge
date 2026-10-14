@@ -83,7 +83,7 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 		return model.Report{}, err
 	}
 
-	prepared, err := e.prepare(req, toolchain)
+	prepared, err := e.prepareContext(ctx, req, toolchain)
 	if err != nil {
 		return model.Report{}, err
 	}
@@ -203,7 +203,11 @@ func mutantTestRun(req Request, p preparedAnalysis, mut model.Mutation) string {
 }
 
 func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAnalysis, error) {
-	root, err := workspace.ModuleRoot(req.CWD)
+	return e.prepareContext(context.Background(), req, toolchain)
+}
+
+func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runner.ToolchainInfo) (preparedAnalysis, error) {
+	root, err := workspace.ModuleRootContext(ctx, req.CWD)
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
@@ -211,7 +215,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	if err != nil || workRel == ".." || strings.HasPrefix(workRel, ".."+string(filepath.Separator)) {
 		return preparedAnalysis{}, fmt.Errorf("working directory must be inside module root %s", root)
 	}
-	pkgs, err := workspace.ListPackages(req.CWD, req.Patterns)
+	pkgs, err := workspace.ListPackagesContext(ctx, req.CWD, req.Patterns)
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
@@ -225,7 +229,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	}
 	var testScopes map[string][]string
 	if req.Config.NarrowTestScope || req.Config.CoverageTestSelection {
-		testScopes, err = workspace.TestScopes(req.CWD, req.Patterns)
+		testScopes, err = workspace.TestScopesContext(ctx, req.CWD, req.Patterns)
 		if err != nil {
 			return preparedAnalysis{}, err
 		}
@@ -248,7 +252,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	parseStart := time.Now()
 	var changed map[string]map[int]bool
 	if req.Config.ChangedBase != "" {
-		changed, err = gitdiff.ChangedLines(root, req.Config.ChangedBase)
+		changed, err = gitdiff.ChangedLinesContext(ctx, root, req.Config.ChangedBase)
 		if err != nil {
 			return preparedAnalysis{}, err
 		}
@@ -275,7 +279,7 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 	// replacement can reference mutable source outside that snapshot. Until
 	// replacement trees are captured as immutable inputs, do not reuse any
 	// verdict for modules with local replacements (including absolute paths).
-	localReplacement, err := workspace.HasLocalReplacements(snapshot)
+	localReplacement, err := workspace.HasLocalReplacementsContext(ctx, snapshot)
 	if err != nil {
 		return preparedAnalysis{}, fmt.Errorf("inspect local replacements: %w", err)
 	}

@@ -35,3 +35,13 @@ The four operators formerly listed under "Optional expansion" as future work -- 
 - Contract attribution, or naming the assertion *in the test source* (testing.T `file.go:N:` log text from failed tests is already captured as `responsible_assertions`; the tool still does not parse the test file to identify `require.Equal` vs `t.Errorf`).
 - Further operators beyond the twelve opt-in families now implemented.
 - macOS `clonefile(2)` sandbox clone (Linux `FICLONE` exists; the clone success path is untested in the project's Linux CI environment).
+
+### Subprocess cancellation boundaries (F07)
+
+On Linux/macOS/BSD, the runner and toolchain preparation use independent
+process groups and a 250ms pipe cleanup grace; normal children and their
+descendants cannot indefinitely retain the output pipes after a timeout.
+A deliberately detached daemon or a child that calls `setsid` is outside
+that process group and cannot be guaranteed to terminate. Other operating
+systems have direct-child cancellation and bounded pipe cleanup only. This
+change does not impose a hard memory/output limit (see F15).

@@ -3,17 +3,24 @@ package gitdiff
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/example/mutation-judge/internal/proc"
 )
 
 var hunkRE = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
 
 func ChangedLines(root, base string) (map[string]map[int]bool, error) {
+	return ChangedLinesContext(context.Background(), root, base)
+}
+
+// ChangedLinesContext allows interruption during incremental preparation.
+func ChangedLinesContext(ctx context.Context, root, base string) (map[string]map[int]bool, error) {
 	// Git pathspecs are recursive, but use explicit glob magic so this cannot be
 	// mistaken for a shell glob by future maintainers.
 	//
@@ -28,9 +35,9 @@ func ChangedLines(root, base string) (map[string]map[int]bool, error) {
 	// Go file is treated as if it had no changed lines at all, rather
 	// than erroring or including it. Forcing this off makes the header
 	// always raw UTF-8, which Parse already handles correctly.
-	cmd := exec.Command("git", "-c", "core.quotepath=false", "diff", "--unified=0", "--no-ext-diff", base, "--", ":(glob)**/*.go")
+	cmd := proc.Command(ctx, "git", "-c", "core.quotepath=false", "diff", "--unified=0", "--no-ext-diff", base, "--", ":(glob)**/*.go")
 	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
+	out, err := proc.CombinedOutput(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s failed: %w\n%s", base, err, strings.TrimSpace(string(out)))
 	}

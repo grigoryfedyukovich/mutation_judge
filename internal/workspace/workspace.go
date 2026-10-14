@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,16 +9,22 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/example/mutation-judge/internal/proc"
 )
 
 func ModuleRoot(cwd string) (string, error) {
-	cmd := exec.Command("go", "env", "GOMOD")
+	return ModuleRootContext(context.Background(), cwd)
+}
+
+// ModuleRootContext resolves the module without outliving the analysis request.
+func ModuleRootContext(ctx context.Context, cwd string) (string, error) {
+	cmd := proc.Command(ctx, "go", "env", "GOMOD")
 	cmd.Dir = cwd
-	out, err := cmd.Output()
+	out, err := proc.Output(cmd)
 	if err != nil {
 		return "", fmt.Errorf("go env GOMOD failed: %w", err)
 	}
@@ -26,7 +33,7 @@ func ModuleRoot(cwd string) (string, error) {
 		return "", fmt.Errorf("no Go module found from %s", cwd)
 	}
 	root := filepath.Dir(gomod)
-	if err := rejectUnsafeWorkspace(cwd, root); err != nil {
+	if err := rejectUnsafeWorkspaceContext(ctx, cwd, root); err != nil {
 		return "", err
 	}
 	return root, nil
@@ -67,9 +74,13 @@ func ModuleRoot(cwd string) (string, error) {
 // go.work that survives this check is, for every purpose this tool
 // cares about, already indistinguishable from no go.work at all.
 func rejectUnsafeWorkspace(cwd, moduleRoot string) error {
-	cmd := exec.Command("go", "env", "GOWORK")
+	return rejectUnsafeWorkspaceContext(context.Background(), cwd, moduleRoot)
+}
+
+func rejectUnsafeWorkspaceContext(ctx context.Context, cwd, moduleRoot string) error {
+	cmd := proc.Command(ctx, "go", "env", "GOWORK")
 	cmd.Dir = cwd
-	out, err := cmd.Output()
+	out, err := proc.Output(cmd)
 	if err != nil {
 		return fmt.Errorf("go env GOWORK failed: %w", err)
 	}
@@ -228,10 +239,14 @@ func (p Package) HasOwnTests() bool {
 }
 
 func ListPackages(cwd string, patterns []string) ([]Package, error) {
+	return ListPackagesContext(context.Background(), cwd, patterns)
+}
+
+func ListPackagesContext(ctx context.Context, cwd string, patterns []string) ([]Package, error) {
 	args := append([]string{"list", "-json", "-e"}, patterns...)
-	cmd := exec.Command("go", args...)
+	cmd := proc.Command(ctx, "go", args...)
 	cmd.Dir = cwd
-	out, err := cmd.Output()
+	out, err := proc.Output(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("go list failed: %w", err)
 	}
@@ -261,10 +276,14 @@ func ListPackages(cwd string, patterns []string) ([]Package, error) {
 // test-only edges -- confirmed against a synthetic fixture with an
 // external test package before this was written the way it is.
 func TestScopes(cwd string, patterns []string) (map[string][]string, error) {
+	return TestScopesContext(context.Background(), cwd, patterns)
+}
+
+func TestScopesContext(ctx context.Context, cwd string, patterns []string) (map[string][]string, error) {
 	args := append([]string{"list", "-json", "-deps", "-test", "-e"}, patterns...)
-	cmd := exec.Command("go", args...)
+	cmd := proc.Command(ctx, "go", args...)
 	cmd.Dir = cwd
-	out, err := cmd.Output()
+	out, err := proc.Output(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("go list -deps -test failed: %w", err)
 	}
@@ -759,10 +778,14 @@ func Digest(root, cacheDir string) (string, error) {
 // replacement, even an absolute path beneath root, is resolved by go test
 // independently of the module snapshot and is not a safe cache input.
 func HasLocalReplacements(root string) (bool, error) {
-	cmd := exec.Command("go", "mod", "edit", "-json")
+	return HasLocalReplacementsContext(context.Background(), root)
+}
+
+func HasLocalReplacementsContext(ctx context.Context, root string) (bool, error) {
+	cmd := proc.Command(ctx, "go", "mod", "edit", "-json")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GOWORK=off")
-	b, err := cmd.Output()
+	b, err := proc.Output(cmd)
 	if err != nil {
 		return false, fmt.Errorf("go mod edit -json: %w", err)
 	}

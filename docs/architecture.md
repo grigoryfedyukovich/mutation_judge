@@ -87,6 +87,29 @@ The F04 cache-store schema (`mutation-judge-cache/v2`) also validates the **verd
 
 ## Orchestration phases
 
+### F07: subprocess lifetime and output-pipe cleanup
+
+On Linux, macOS, and supported BSD systems, each Go test, test-listing,
+Go-toolchain discovery, package/preparation query, and incremental Git diff
+runs in its **own process group**. Deadline expiry or parent cancellation
+kills the group, including ordinary descendants that inherited stdout/stderr.
+A finite `250ms` `exec.Cmd.WaitDelay` bounds output-pipe draining after a
+process exits or is canceled. After the subprocess returns, remaining members
+of its group are also terminated (including when the direct child exited
+normally). The effective bound for a test run is its requested timeout **plus
+up to 250ms of pipe cleanup**, not the timeout alone. An exited parent with
+lingering output writers is treated as a command failure rather than a
+successful test run. A canceled test remains `UNKNOWN`; an elapsed test
+budget remains `TIMEOUT`, and neither is reusable from cache.
+
+This group isolation is not a security sandbox: a process deliberately creating
+another process group/session, or external daemons, can escape descendant
+cleanup. On other operating systems, cancellation still terminates the direct
+process and `WaitDelay` bounds inherited pipes, but group-wide termination is
+not implemented. File-tree copying and parsing are not subprocesses and are
+not made preemptible by this change. Preparation tool subprocesses honor the
+analysis context, but preparation has no separate hard deadline.
+
 `analysis.Engine` separates four phases: workspace/candidate preparation, baseline execution, serial mutant execution, and report construction. A cancellation after at least one completed mutant produces a report with `complete=false`; it is never mislabeled as a complete run.
 
 ## Diagnostic shape

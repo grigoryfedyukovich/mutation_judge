@@ -257,3 +257,8 @@ The v0.1 implementation mutates ordinary production Go files returned by `go lis
 - [Specification conformance](docs/spec-conformance.md)
 - [2026-07-18 review resolution](docs/reviews/review-resolution-v0.1.2.md)
 - [Correctness and expansion issue list](ISSUES.md)
+
+**Subprocess timeouts:** On Linux/macOS/BSD, canceled or timed-out `go test`
+process groups and their ordinary descendants are terminated; inherited
+output pipes have a 250ms cleanup grace. Preparation commands honor analysis
+cancellation. Deliberately detached processes remain outside this guarantee.

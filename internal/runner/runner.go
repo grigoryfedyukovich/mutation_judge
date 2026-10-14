@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/example/mutation-judge/internal/model"
+	"github.com/example/mutation-judge/internal/proc"
 )
 
 type Request struct {
@@ -75,7 +76,9 @@ func (GoTest) Name() string { return "go-test" }
 // cache entry keyed off this instead of being silently masked by a
 // plausible-looking but wrong value.
 func (GoTest) Version() string {
-	out, err := exec.Command("go", "env", "GOVERSION").Output()
+	versionCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := proc.Output(proc.Command(versionCtx, "go", "env", "GOVERSION"))
 	if err != nil {
 		return "unknown"
 	}
@@ -116,8 +119,8 @@ func (t ToolchainInfo) Key() string {
 // caller rather than silently substituting some other value, since
 // every mutant execution needs a working `go` anyway.
 func DetectToolchain(ctx context.Context) (ToolchainInfo, error) {
-	cmd := exec.CommandContext(ctx, "go", append([]string{"env"}, goEnvVars...)...)
-	out, err := cmd.Output()
+	cmd := proc.Command(ctx, "go", append([]string{"env"}, goEnvVars...)...)
+	out, err := proc.Output(cmd)
 	if err != nil {
 		return ToolchainInfo{}, fmt.Errorf("detect go toolchain (go env %s): %w", strings.Join(goEnvVars, " "), err)
 	}
@@ -202,7 +205,7 @@ func ListTestsWithEnvironment(ctx context.Context, root, workRel, pattern string
 func ListRunnableUnitsWithEnvironment(ctx context.Context, root, workRel, pattern string, timeout time.Duration, environment []string) (RunnableUnits, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "test", "-list", "^(Test|Example|Fuzz)", pattern)
+	cmd := proc.Command(ctx, "go", "test", "-list", "^(Test|Example|Fuzz)", pattern)
 	cmd.Dir = filepath.Join(root, filepath.FromSlash(workRel))
 	// Same reasoning as GoTest.Run: root is always a temporary sandbox
 	// copy of the module alone, never one of a go.work's use-listed
@@ -211,7 +214,7 @@ func ListRunnableUnitsWithEnvironment(ctx context.Context, root, workRel, patter
 	if environment != nil {
 		cmd.Env = append([]string(nil), environment...)
 	}
-	out, err := cmd.Output()
+	out, err := proc.Output(cmd)
 	if err != nil {
 		return RunnableUnits{}, fmt.Errorf("go test -list failed for %s: %w", pattern, exitErrorWithStderr(err))
 	}
@@ -332,7 +335,7 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 		}
 	}
 	args = append(args, req.Patterns...)
-	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd := proc.Command(ctx, "go", args...)
 	cmd.Dir = filepath.Join(req.Root, filepath.FromSlash(req.WorkRel))
 	// req.Root is a temporary copy of the module root alone (see
 	// workspace.CopyModule) -- never one of a go.work's use-listed
@@ -360,7 +363,7 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	cmd.Stdout = &jsonOut
 	cmd.Stderr = &errOut
 	start := time.Now()
-	err := cmd.Run()
+	err := proc.Run(cmd)
 	dur := time.Since(start).Milliseconds()
 
 	events, decodeErr := decodeTestEvents(jsonOut.Bytes())
