@@ -1,10 +1,8 @@
 package report
 
 import (
-	"bytes"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -39,50 +37,21 @@ func Render(w io.Writer, format string, r model.Report) error {
 	}
 }
 
-// RenderMeasured serializes the report once, records that serialization cost,
-// patches the two reserved timing values in the serialized bytes, and then
-// emits the finished artifact. Destination I/O is intentionally not included
-// in rendering_ms because it depends on the caller's output device.
+// RenderMeasured uses a counting pass to measure serialization, then streams
+// the finished report directly to the destination. The previous implementation
+// accumulated the complete report in memory to patch two timing sentinels;
+// for large mutation sets that duplicated the entire report's resident size.
+// The dry serialization pass is excluded from TotalMS except for its measured
+// rendering cost. Destination I/O is still excluded from that metric.
 func RenderMeasured(w io.Writer, format string, r *model.Report) error {
-	const renderSentinel int64 = -9223372036854775807
-	const totalSentinel int64 = -9223372036854775806
-
 	baseTotal := r.Timing.TotalMS
-	toRender := *r
-	toRender.Timing.RenderingMS = renderSentinel
-	toRender.Timing.TotalMS = totalSentinel
-
-	var buf bytes.Buffer
 	started := time.Now()
-	if err := Render(&buf, format, toRender); err != nil {
+	if err := Render(io.Discard, format, *r); err != nil {
 		return err
 	}
-	renderingMS := time.Since(started).Milliseconds()
-	r.Timing.RenderingMS = renderingMS
-	r.Timing.TotalMS = baseTotal + renderingMS
-
-	out, ok := replaceLast(buf.Bytes(), strconv.FormatInt(renderSentinel, 10), strconv.FormatInt(r.Timing.RenderingMS, 10))
-	if !ok {
-		return errors.New("rendering timing placeholder missing from serialized report")
-	}
-	out, ok = replaceLast(out, strconv.FormatInt(totalSentinel, 10), strconv.FormatInt(r.Timing.TotalMS, 10))
-	if !ok {
-		return errors.New("total timing placeholder missing from serialized report")
-	}
-	_, err := w.Write(out)
-	return err
-}
-
-func replaceLast(data []byte, old, replacement string) ([]byte, bool) {
-	i := bytes.LastIndex(data, []byte(old))
-	if i < 0 {
-		return data, false
-	}
-	out := make([]byte, 0, len(data)-len(old)+len(replacement))
-	out = append(out, data[:i]...)
-	out = append(out, replacement...)
-	out = append(out, data[i+len(old):]...)
-	return out, true
+	r.Timing.RenderingMS = time.Since(started).Milliseconds()
+	r.Timing.TotalMS = baseTotal + r.Timing.RenderingMS
+	return Render(w, format, *r)
 }
 
 type errorWriter struct {

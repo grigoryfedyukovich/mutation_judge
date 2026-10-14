@@ -179,7 +179,7 @@ func TestHTMLReportRendersAndEscapesSource(t *testing.T) {
 	}
 }
 
-func TestRenderMeasuredPatchesTimingWithoutSecondRender(t *testing.T) {
+func TestRenderMeasuredStreamsTimingWithoutBuffering(t *testing.T) {
 	r := model.Report{
 		ToolVersion: "x", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{}, Summary: model.Summary{ScoreText: "n/a"}, Timing: model.Timing{TotalMS: 7},
 		Results: []model.Result{{Mutation: model.Mutation{Diff: "user source -9223372036854775807 must remain"}}},

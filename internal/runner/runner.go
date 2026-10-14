@@ -40,14 +40,15 @@ type Request struct {
 }
 
 type Result struct {
-	Verdict    model.Verdict     `json:"verdict"`
-	Output     string            `json:"output"`
-	Tests      []string          `json:"tests,omitempty"`
-	Assertions []model.Assertion `json:"assertions,omitempty"`
-	Panics     []model.Panic     `json:"panics,omitempty"`
-	DurationMS int64             `json:"duration_ms"`
-	ExitCode   int               `json:"exit_code"`
-	GoVersion  string            `json:"go_version"`
+	Verdict         model.Verdict     `json:"verdict"`
+	Output          string            `json:"output"`
+	Tests           []string          `json:"tests,omitempty"`
+	Assertions      []model.Assertion `json:"assertions,omitempty"`
+	Panics          []model.Panic     `json:"panics,omitempty"`
+	DurationMS      int64             `json:"duration_ms"`
+	OutputTruncated bool              `json:"output_truncated,omitempty"`
+	ExitCode        int               `json:"exit_code"`
+	GoVersion       string            `json:"go_version"`
 }
 
 type Backend interface {
@@ -356,21 +357,19 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	if req.Environment != nil {
 		cmd.Env = append([]string(nil), req.Environment...)
 	}
-	// Captured separately: jsonOut is decoded as structured events; errOut
-	// is kept only to surface human-readable diagnostics (e.g. the actual
-	// compiler error line) in the report and as fallback evidence.
-	var jsonOut, errOut bytes.Buffer
-	cmd.Stdout = &jsonOut
+	// Incremental, memory-bounded capture: never buffer the entire JSON stream.
+	jsonOut := newJSONEventStream()
+	errOut := boundedText{limit: maxStderrBytes}
+	cmd.Stdout = jsonOut
 	cmd.Stderr = &errOut
 	start := time.Now()
 	err := proc.Run(cmd)
 	dur := time.Since(start).Milliseconds()
+	jsonOut.finish()
+	text := jsonOut.diagnosticOutput(errOut)
+	res := Result{DurationMS: dur, Output: text, OutputTruncated: jsonOut.outputTruncated(errOut), GoVersion: req.GoVersion}
 
-	events, decodeErr := decodeTestEvents(jsonOut.Bytes())
-	text := trimOutput(reconstructOutput(errOut.String(), events), 64*1024)
-	res := Result{DurationMS: dur, Output: text, GoVersion: req.GoVersion}
-
-	if isTimeout(ctx.Err(), err, text) {
+	if ctx.Err() == context.DeadlineExceeded || (err != nil && (jsonOut.timeoutHeader || timeoutPanicRE.Match(errOut.data))) {
 		res.Verdict = model.VerdictTimeout
 		res.ExitCode = -1
 		return res
@@ -392,12 +391,13 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 		return res
 	}
 
-	if decodeErr != nil || len(events) == 0 {
-		// go test did not produce a parseable -json stream at all: an
-		// unusual toolchain failure that never reaches test2json (for
-		// example, a build-constraint exclusion is rejected during
-		// package loading, before any JSON is written). Fall back to the
-		// evidence we still have.
+	if jsonOut.eventCount == 0 {
+		// No protocol events: a toolchain/setup failure may have written
+		// only stderr. Never guess after losing an oversized or invalid event.
+		if jsonOut.incomplete || errOut.truncated() {
+			res.Verdict = model.VerdictUnknown
+			return res
+		}
 		res.Tests = failingTests(text)
 		if fallbackBuildFailureRE.MatchString(text) {
 			res.Verdict = model.VerdictInvalid
@@ -407,11 +407,18 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 		return res
 	}
 
-	res.Verdict, res.Tests = classifyEvents(events)
-	if res.Verdict == model.VerdictKilled {
-		res.Assertions = extractAssertions(events, res.Tests)
-		res.Panics = extractPanics(events, res.Tests)
+	res.Verdict, res.Tests = jsonOut.classify()
+	// A long unstructured stderr stream can conceal a Go-internal timeout
+	// or setup failure after our preview ends. Only protocol-confirmed
+	// failures or build summaries allow a definitive verdict then.
+	if errOut.truncated() && res.Verdict == model.VerdictKilled && len(res.Tests) == 0 && len(jsonOut.pkgBuildFailed) == 0 {
+		res.Verdict = model.VerdictUnknown
 	}
+	if res.Verdict == model.VerdictKilled {
+		res.Assertions = limitAssertions(extractAssertions(jsonOut.evidence, res.Tests))
+		res.Panics = limitPanics(extractPanics(jsonOut.evidence, res.Tests))
+	}
+
 	return res
 }
 

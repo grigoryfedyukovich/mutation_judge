@@ -164,11 +164,9 @@ func renderSARIF(w io.Writer, r model.Report) error {
 				"generated_at":   r.GeneratedAt,
 				"complete":       r.Complete,
 				"summary":        r.Summary,
-				// RenderMeasured patches these two sentinels into the
-				// serialized output after timing the render itself; see
-				// report.go. They live here, in the run's properties
-				// bag, rather than being invented fields on the SARIF
-				// schema proper.
+				// RenderMeasured records these timing fields after a
+				// counting pass. They live in run properties rather
+				// than adding nonstandard SARIF fields.
 				"rendering_ms": r.Timing.RenderingMS,
 				"total_ms":     r.Timing.TotalMS,
 			},

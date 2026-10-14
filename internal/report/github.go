@@ -57,10 +57,8 @@ func renderGitHubAnnotations(w io.Writer, r model.Report) error {
 	s := r.Summary
 	ew.printf("::notice title=mutation-judge summary::%s (%d killed, %d survived, %d invalid, %d timeout, %d unknown, %d unsupported, %d flagged)\n",
 		ghEscapeData(s.ScoreText), s.Killed, s.Survived, s.Invalid, s.Timeout, s.Unknown, s.Unsupported, count)
-	// See sarif.go's equivalent comment: RenderMeasured patches these
-	// two sentinels into the serialized output after timing the render
-	// itself, so they need to be present somewhere in the output for
-	// every format, not just the structured ones. ::debug:: commands
+	// RenderMeasured measures serialization in a counting pass;
+	// emit the timing fields directly in each output format. ::debug:: commands
 	// are silent unless the workflow has step debug logging enabled,
 	// so this doesn't add noise to an ordinary CI log.
 	ew.printf("::debug::mutation-judge timing rendering_ms=%d total_ms=%d\n", r.Timing.RenderingMS, r.Timing.TotalMS)

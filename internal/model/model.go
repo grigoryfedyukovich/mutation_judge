@@ -155,17 +155,18 @@ type Diagnostic struct {
 }
 
 type Result struct {
-	Mutation      Mutation    `json:"mutation"`
-	Verdict       Verdict     `json:"verdict"`
-	Responsible   []string    `json:"responsible_tests,omitempty"`
-	Assertions    []Assertion `json:"responsible_assertions,omitempty"`
-	Panics        []Panic     `json:"responsible_panics,omitempty"`
-	Covered       bool        `json:"covered_by_selected_tests"`
-	CoverageKnown bool        `json:"coverage_known"`
-	Cached        bool        `json:"cached"`
-	DurationMS    int64       `json:"duration_ms"`
-	Output        string      `json:"output,omitempty"`
-	Diagnostic    Diagnostic  `json:"diagnostic"`
+	Mutation        Mutation    `json:"mutation"`
+	Verdict         Verdict     `json:"verdict"`
+	Responsible     []string    `json:"responsible_tests,omitempty"`
+	Assertions      []Assertion `json:"responsible_assertions,omitempty"`
+	Panics          []Panic     `json:"responsible_panics,omitempty"`
+	Covered         bool        `json:"covered_by_selected_tests"`
+	CoverageKnown   bool        `json:"coverage_known"`
+	Cached          bool        `json:"cached"`
+	DurationMS      int64       `json:"duration_ms"`
+	Output          string      `json:"output,omitempty"`
+	OutputTruncated bool        `json:"output_truncated,omitempty"`
+	Diagnostic      Diagnostic  `json:"diagnostic"`
 }
 
 type Summary struct {

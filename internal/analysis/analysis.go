@@ -844,6 +844,9 @@ func makeResult(mut model.Mutation, rr runner.Result, cached, covered, coverageK
 	if len(rr.Panics) > 0 {
 		evidence["responsible_panics"] = rr.Panics
 	}
+	if rr.OutputTruncated {
+		evidence["output_truncated"] = true
+	}
 	if rr.Output != "" && rr.Verdict != model.VerdictSurvived {
 		evidence["backend_output"] = rr.Output
 	}
@@ -857,7 +860,7 @@ func makeResult(mut model.Mutation, rr runner.Result, cached, covered, coverageK
 	return model.Result{
 		Mutation: mut, Verdict: rr.Verdict, Responsible: rr.Tests, Assertions: rr.Assertions, Panics: rr.Panics,
 		Covered: covered, CoverageKnown: coverageKnown,
-		Cached: cached, DurationMS: rr.DurationMS, Output: rr.Output,
+		Cached: cached, DurationMS: rr.DurationMS, Output: rr.Output, OutputTruncated: rr.OutputTruncated,
 		Diagnostic: model.Diagnostic{
 			ID: verdictRule(rr.Verdict), Location: mut.Span, Statement: statement, Evidence: evidence,
 			Assumptions: []string{"selected tests are represented by the reported go test command", "one mutant is active at a time"},

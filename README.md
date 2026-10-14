@@ -224,6 +224,7 @@ JSON output uses schema `mutation-judge.report/v1`. Each result contains:
 - a stable mutant and verdict rule ID;
 - exact source span and unified diff;
 - verdict, responsible tests, and responsible assertions (testing.T log lines from failed tests);
+- bounded backend diagnostic output and an `output_truncated` flag when evidence was clipped;
 - baseline coverage status when available;
 - evidence, assumptions, and a mechanically grounded suggestion for survivors;
 - tool/backend versions, effective configuration, explicit bounds, and phase timing.

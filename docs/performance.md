@@ -376,3 +376,35 @@ higher-stakes place to ship unverified platform-specific code than a text
 classifier was.
 
 **Examples and fuzz seed safety (F06):** runnable examples and fuzz targets are enumerated alongside ordinary tests and unconditionally retained for every potentially observing test package. They are not individually coverage-attributed, so suites with many examples or fuzz seeds may see less test-selection speedup, but cannot lose their observations solely because they are not ordinary `Test...` functions. Regression fixtures verify both kinds of killers with and without package-scope narrowing. Coverage selection still cannot certify behavior mediated by uninstrumented external processes or state-dependent interactions.
+
+## Bounded backend capture (F15)
+
+`go test -json` stdout is now parsed incrementally rather than accumulated in
+`bytes.Buffer`. Verdict tracking is independent of diagnostic evidence. The
+runner retains up to 64 KiB of decoded output, 16 KiB of unstructured stderr,
+256 KiB / 4,096 events of assertion and panic evidence, and 256 KiB for a
+single JSON record. Test/package state is limited to 8,192 identities, each
+with at most 512 bytes of identity text. Assertions and panic entries in the
+report are capped at 128 each. The report's `output_truncated` field and
+diagnostic evidence indicate when output/evidence was clipped.
+
+The runner continues draining output after hitting a retention budget, so
+late `fail` events are still observed. A malformed/oversized JSON record or
+classification-state overflow makes a *negative inference* inconclusive:
+failed subprocesses become `UNKNOWN` unless explicit failure evidence is
+available. This avoids treating missing observations as valid test outcomes.
+A successful subprocess exit can still be reported `SURVIVED`. Very long
+individual output records may prevent reliable attribution; increasing the
+record cap would increase peak resident memory. Subprocess output is not
+retained to a file, and terminal/report output is abbreviated by default.
+
+`RenderMeasured` now measures one discard render and streams a second pass to
+the destination. This avoids constructing another whole-report buffer, at the
+cost of a second serialization. This bounds *captured output* memory; it does
+not enforce a total process RAM limit, nor prevent resident memory from
+growing with the number of mutants/results or many concurrent workers.
+
+Synthetic tests drive tens of thousands of events and multi-megabyte output
+through small chunks, and an end-to-end Go fixture verifies a late failure
+after a large stdout/stderr flood. These verify capture limits and verdict
+correctness, not a universal operating-system peak-RSS bound.
