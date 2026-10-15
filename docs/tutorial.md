@@ -373,6 +373,8 @@ Important details:
 - Deleted-only lines cannot produce a current-source mutation.
 - A multiline expression is selected when its mutation span overlaps a changed line.
 - If no mutation site overlaps the diff, the report can contain zero mutants.
+- Incremental discovery asks Git for uncolored, standard-prefix, zero-context output and decodes C-quoted filenames (including quotes, backslashes, and Unicode). Repository color/prefix settings do not change the selected files.
+- An unrecognized or malformed Git diff is a preparation error, **not** an empty changed set. This avoids silently skipping mutants when Git output cannot be interpreted safely.
 - The baseline still has to pass before any mutant is classified.
 - The archive itself may not contain Git history; run this section in a clone or an initialized repository.
 

@@ -81,7 +81,7 @@ Important flags:
 | Flag | Meaning |
 |---|---|
 | `--operators` | `boundary`, `boolean` on by default; `arithmetic`, `errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational`, `literal`, `statement`, `condition`, `returnvalue`, `connective`, `bounds` are opt-in |
-| `--changed REV` | Generate mutants only on added or modified lines from `git diff REV` |
+| `--changed REV` | Generate mutants only on added or modified lines from `git diff REV`; malformed Git output is an error, not an empty selection |
 | `--test-run REGEXP` | Pass a test selection regexp to `go test -run` |
 | `--timeout DURATION` | Per-baseline and per-mutant command deadline |
 | `--max-mutants N` | Deterministic execution bound; `0` is unlimited |
