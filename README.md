@@ -38,9 +38,15 @@ SURVIVED M-... examples/boundary/counter.go:5:7 replace comparison > with >=
   suggested test: add a boundary case where n equals 0 and assert the original branch behavior
     --- a/examples/boundary/counter.go
     +++ b/examples/boundary/counter.go
-    @@ -5,1 +5,1 @@
+    @@ -2,7 +2,7 @@
+
+     // CountPositive records calls only for positive values.
+     func CountPositive(n int, process func(int)) {
     -    if n > 0 {
     +    if n >= 0 {
+             process(n)
+         }
+     }
 ```
 
 The [full tutorial](docs/tutorial.md) follows this survivor through test repair, then covers selected-test scope, arithmetic invalids, generated source, Git-diff mode, JSON/HTML/SARIF/GitHub-annotations reports, caching, CI policy, and tracking survivors across runs.
@@ -222,7 +228,7 @@ Only mutation spans overlapping lines added or modified in the zero-context Git 
 JSON output uses schema `mutation-judge.report/v1`. Each result contains:
 
 - a stable mutant and verdict rule ID;
-- exact source span and unified diff;
+- exact source span and Git-applicable contextual unified diff (including EOF newline markers where required);
 - verdict, responsible tests, and responsible assertions (testing.T log lines from failed tests);
 - bounded backend diagnostic output and an `output_truncated` flag when evidence was clipped;
 - baseline coverage status when available;

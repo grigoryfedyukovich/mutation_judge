@@ -78,7 +78,7 @@ func TestMultilineDiffHasCorrectHunkCounts(t *testing.T) {
 	for _, m := range ms {
 		if m.RuleID == "MJ-BOOL-DROP-RIGHT" {
 			found = true
-			if !strings.Contains(m.Diff, "@@ -3,2 +3,1 @@") {
+			if !strings.Contains(m.Diff, "@@ -1,5 +1,4 @@") {
 				t.Fatalf("unexpected multiline diff:\n%s", m.Diff)
 			}
 		}
@@ -454,7 +454,7 @@ func recvOne(a, b chan int) int {
 	}
 }
 
-// boundaryMutant finds the single boundary mutant whose Original text
+// boundaryMutant finds the single boundary mutant whose deleted diff line
 // contains needle, failing the test if there isn't exactly one match
 // -- the guarded-comparison tests below each construct a fixture with
 // exactly one comparison of interest, and want to fail loudly if that
@@ -464,8 +464,15 @@ func boundaryMutant(t *testing.T, ms []model.Mutation, needle string) model.Muta
 	t.Helper()
 	var found []model.Mutation
 	for _, m := range ms {
-		if m.Operator == "boundary" && strings.Contains(m.Diff, needle) {
-			found = append(found, m)
+		if m.Operator != "boundary" {
+			continue
+		}
+		for _, line := range strings.Split(m.Diff, "\n") {
+			// Context lines may also contain needle; only match changed lines.
+			if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") && strings.Contains(line, needle) {
+				found = append(found, m)
+				break
+			}
 		}
 	}
 	if len(found) != 1 {

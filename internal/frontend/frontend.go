@@ -1844,6 +1844,75 @@ func (l lineOffsets) containing(offset int) int {
 	return i - 1
 }
 
+// diffLines splits a source block into actual lines without inventing an extra
+// empty line after a final newline. The final line retains its original EOF
+// state so the emitted patch can include the required no-newline marker.
+func diffLines(block []byte) [][]byte {
+	if len(block) == 0 {
+		return nil
+	}
+	var out [][]byte
+	for len(block) > 0 {
+		n := bytes.IndexByte(block, '\n')
+		if n < 0 {
+			out = append(out, block)
+			break
+		}
+		out = append(out, block[:n+1])
+		block = block[n+1:]
+	}
+	return out
+}
+
+// diffPath uses Git's C-quoted path syntax for paths containing characters
+// that would otherwise make the ---/+++ headers ambiguous. Plain paths are
+// left unquoted to match the usual unified-diff convention.
+func diffPath(prefix, file string) string {
+	name := prefix + filepath.ToSlash(file)
+	quoted := false
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '\\' || c == '"' || c < 0x20 || c == 0x7f {
+			quoted = true
+			break
+		}
+	}
+	if !quoted {
+		return name
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c == '\\' || c == '"':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case c < 0x20 || c == 0x7f:
+			// Git accepts three-digit C octal escapes, unlike Go's \xNN.
+			fmt.Fprintf(&b, "\\%03o", c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func writeDiffLines(b *strings.Builder, prefix byte, lines [][]byte) {
+	for _, line := range lines {
+		b.WriteByte(prefix)
+		b.Write(line)
+		if line[len(line)-1] != '\n' {
+			b.WriteString("\n\\ No newline at end of file\n")
+		}
+	}
+}
+
+// unifiedDiff produces a contextual, applicable patch for the mutation. It
+// preserves each real line's EOF state instead of inventing an extra line
+// after a trailing newline. Git apply requires surrounding context for hunks
+// within a file, so keep up to three unchanged lines on either side.
 func unifiedDiff(file string, src []byte, lines lineOffsets, start, end int, replacement string) string {
 	startLine := lines.containing(start)
 	endOffset := end
@@ -1854,20 +1923,40 @@ func unifiedDiff(file string, src []byte, lines lineOffsets, start, end int, rep
 	lineStart := lines[startLine]
 	lineEnd := len(src)
 	if endLine+1 < len(lines) {
-		lineEnd = lines[endLine+1] - 1
+		lineEnd = lines[endLine+1]
 	}
-	oldBlock := string(src[lineStart:lineEnd])
-	newBlock := string(src[lineStart:start]) + replacement + string(src[end:lineEnd])
-	line := startLine + 1
-	oldLines := strings.Split(oldBlock, "\n")
-	newLines := strings.Split(newBlock, "\n")
+	oldBlock := src[lineStart:lineEnd]
+	newBlock := make([]byte, 0, len(oldBlock)-(end-start)+len(replacement))
+	newBlock = append(newBlock, src[lineStart:start]...)
+	newBlock = append(newBlock, replacement...)
+	newBlock = append(newBlock, src[end:lineEnd]...)
+
+	ctxStartLine := startLine - 3
+	if ctxStartLine < 0 {
+		ctxStartLine = 0
+	}
+	ctxEndLine := endLine + 4
+	if ctxEndLine > len(lines) {
+		ctxEndLine = len(lines)
+	}
+	ctxStart := lines[ctxStartLine]
+	ctxEnd := len(src)
+	if ctxEndLine < len(lines) {
+		ctxEnd = lines[ctxEndLine]
+	}
+	prefixLines := diffLines(src[ctxStart:lineStart])
+	oldLines := diffLines(oldBlock)
+	newLines := diffLines(newBlock)
+	suffixLines := diffLines(src[lineEnd:ctxEnd])
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n@@ -%d,%d +%d,%d @@\n", file, file, line, len(oldLines), line, len(newLines))
-	for _, text := range oldLines {
-		fmt.Fprintf(&b, "-%s\n", text)
-	}
-	for _, text := range newLines {
-		fmt.Fprintf(&b, "+%s\n", text)
-	}
+	fmt.Fprintf(&b, "--- %s\n+++ %s\n@@ -%d,%d +%d,%d @@\n",
+		diffPath("a/", file), diffPath("b/", file), ctxStartLine+1,
+		len(prefixLines)+len(oldLines)+len(suffixLines), ctxStartLine+1,
+		len(prefixLines)+len(newLines)+len(suffixLines))
+	writeDiffLines(&b, ' ', prefixLines)
+	writeDiffLines(&b, '-', oldLines)
+	writeDiffLines(&b, '+', newLines)
+	writeDiffLines(&b, ' ', suffixLines)
 	return b.String()
 }
