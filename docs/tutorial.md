@@ -746,6 +746,23 @@ The strict, ID-exact counts still show this as one removed entry and one new ent
 ./bin/mutation-judge compare --baseline baseline.json --current current.json --format html --output compare.html
 ```
 
+### Comparison compatibility (F09)
+
+`compare` requires both reports to cover the complete discovered population and to use compatible operators, backend/tool semantics, Go environment, test scope, and effective per-mutant commands. A report made with `--max-mutants 1` is **not** proof that missing mutants were removed, even if `complete=true` for that retained set. Interrupted runs, `--changed` partial discovery, different test scopes, external untracked dependencies, or missing provenance are similarly not grounds for inferring a code change or a newly killing test. By default these comparisons fail with input error (exit code 2):
+
+```sh
+./bin/mutation-judge compare --baseline full.json --current limited.json
+# error: reports are not comparable ...
+```
+
+For an exploratory investigation, deliberately override that restriction:
+
+```sh
+./bin/mutation-judge compare --baseline full.json --current limited.json --allow-incompatible --format json
+```
+
+The output records `comparable: false` and `compatibility_issues`, moves missing mutant IDs into `not_analyzed`, and moves verdict changes that cannot be verified into `unverified_changes`. These are observations, **not** proof of source removal or test repair; `--fail-on-new-survivors` refuses to run as a CI gate on such a comparison. Regenerate full, matching reports to make a reliable claim. Recorded history entries include the report's bounds, completeness, operator semantics, test scope and full verdict counts, but the displayed trend remains an unqualified score unless you examine those fields.
+
 For a running score history:
 
 ```bash

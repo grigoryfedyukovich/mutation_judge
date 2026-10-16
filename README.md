@@ -107,7 +107,7 @@ mutation-judge record --label "PR #104" report.json
 mutation-judge trend
 ```
 
-`compare` diffs two reports at the mutant level into six buckets: `new survivors`, `fixed survivors`, `still-open`, `reclassified`, `removed mutants`, and an `unchanged` count -- plus a conservative `likely_shifted` correlation that recognizes when a removed entry and a new entry are probably the same mutation, just relocated by an unrelated earlier edit (not a real gap or fix). `record`/`trend` keep a running score log at `.mutation-judge/history.ndjson`. See `docs/tutorial.md` section 16 -- in particular the mutant-ID matching caveat there before relying on `compare` across a heavily-edited file.
+`compare` compares **compatible, complete mutation experiments**. It refuses incomplete, bounded, incremental, or mismatched scopes, test settings, tool semantics, and actual per-mutant commands (exit code 2). `--allow-incompatible` produces an explicitly **exploratory** text/JSON/HTML diff: `not_analyzed` lists IDs missing from a report without evidence of removal/introduction, and `unverified_changes` lists transitions that cannot prove a test repair or regression. A CI gate (`--fail-on-new-survivors`) is not available in exploratory mode. For comparable reports, the original six verdict buckets and conservative `likely_shifted` correlation remain. `record`/`trend` keep an NDJSON score history at `.mutation-judge/history.ndjson` including completeness, bounds, operator semantics, selected test scope, and all verdict counts. See `docs/tutorial.md` §16 and `docs/limitations.md` for ID and compatibility limitations.
 
 ## Supported mutations
 

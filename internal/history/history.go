@@ -31,17 +31,29 @@ const DefaultPath = ".mutation-judge/history.ndjson"
 // which one is meaningful is a property of the caller's CI, not of a
 // report).
 type Entry struct {
-	Time        time.Time `json:"time"`
-	Label       string    `json:"label"`
-	Score       float64   `json:"score"`
-	ScoreText   string    `json:"score_text"`
-	Generated   int       `json:"generated"`
-	Killed      int       `json:"killed"`
-	Survived    int       `json:"survived"`
-	Invalid     int       `json:"invalid"`
-	Timeout     int       `json:"timeout"`
-	Unknown     int       `json:"unknown"`
-	Unsupported int       `json:"unsupported"`
+	Time              time.Time `json:"time"`
+	Label             string    `json:"label"`
+	Score             float64   `json:"score"`
+	ScoreText         string    `json:"score_text"`
+	Generated         int       `json:"generated"`
+	Killed            int       `json:"killed"`
+	Survived          int       `json:"survived"`
+	Invalid           int       `json:"invalid"`
+	Timeout           int       `json:"timeout"`
+	Unknown           int       `json:"unknown"`
+	Unsupported       int       `json:"unsupported"`
+	Equivalent        int       `json:"equivalent"`
+	Complete          bool      `json:"complete"`
+	Discovered        int       `json:"discovered_before_bound"`
+	Retained          int       `json:"retained_after_bound"`
+	Completed         int       `json:"completed_mutants"`
+	Patterns          []string  `json:"patterns,omitempty"`
+	WorkingDirectory  string    `json:"test_working_directory,omitempty"`
+	OperatorSemantics string    `json:"operator_semantics,omitempty"`
+	OperatorSelection any       `json:"operators,omitempty"`
+	TestRun           any       `json:"test_run,omitempty"`
+	CoverageSelection any       `json:"coverage_test_selection,omitempty"`
+	NarrowTestScope   any       `json:"narrow_test_scope,omitempty"`
 }
 
 // EntryFromReport builds an Entry from a report's own summary.
@@ -51,6 +63,16 @@ func EntryFromReport(label string, r model.Report, t time.Time) Entry {
 		Time: t, Label: label, Score: s.Score, ScoreText: s.ScoreText,
 		Generated: s.Generated, Killed: s.Killed, Survived: s.Survived,
 		Invalid: s.Invalid, Timeout: s.Timeout, Unknown: s.Unknown, Unsupported: s.Unsupported,
+		Equivalent: s.Equivalent, Complete: r.Complete,
+		Discovered:        boundInt(r.Bounds, "discovered_before_bound"),
+		Retained:          boundInt(r.Bounds, "retained_after_bound"),
+		Completed:         boundInt(r.Bounds, "completed_mutants"),
+		Patterns:          append([]string(nil), r.Patterns...),
+		WorkingDirectory:  boundString(r.Bounds, "test_working_directory"),
+		OperatorSemantics: boundString(r.Bounds, "operator_semantics"),
+		OperatorSelection: r.EffectiveConfig["operators"], TestRun: r.EffectiveConfig["test_run"],
+		CoverageSelection: r.EffectiveConfig["coverage_test_selection"],
+		NarrowTestScope:   r.EffectiveConfig["narrow_test_scope"],
 	}
 }
 
@@ -150,4 +172,17 @@ func (e *errWriter) printf(format string, args ...any) {
 		return
 	}
 	_, e.err = fmt.Fprintf(e.w, format, args...)
+}
+
+func boundInt(m map[string]any, key string) int {
+	if n, ok := m[key].(int); ok {
+		return n
+	}
+	return 0
+}
+func boundString(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }

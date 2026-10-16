@@ -86,6 +86,16 @@ func (d MutantDiff) Mutation() model.Mutation {
 
 // Diff is the result of comparing two reports.
 type Diff struct {
+	// Comparable is true only when both reports describe compatible, complete
+	// experiments; false indicates exploratory output, never a CI-quality gate.
+	Comparable          bool     `json:"comparable"`
+	CompatibilityIssues []string `json:"compatibility_issues,omitempty"`
+	// NotAnalyzed describes IDs absent on one side when the reports cannot
+	// establish complete, like-for-like discovery; absence is not removal.
+	NotAnalyzed []MutantDiff `json:"not_analyzed"`
+	// A changed verdict in an incompatible experiment is an observation,
+	// not a demonstrated test improvement or regression.
+	UnverifiedChanges []MutantDiff `json:"unverified_changes"`
 	// NewSurvivors are mutant IDs actionable in Current but not in
 	// Baseline: either a previously-killed (or otherwise unactionable)
 	// mutant regressed, a brand-new mutant (from new code) was
@@ -165,6 +175,11 @@ type Diff struct {
 	LikelyShifted []ShiftCandidate `json:"likely_shifted"`
 }
 
+// Compare is a low-level ID classifier that does NOT validate experiment
+// completeness or scope. For user-facing comparisons always use
+// InspectCompatibility and CompareReports, which reject or qualify claims
+// from missing IDs and incompatible executions.
+//
 // Compare builds a Diff between a baseline report (e.g. the base
 // branch) and a current report (e.g. a pull request), matched by
 // mutant ID. Every distinct mutant ID across both reports lands in

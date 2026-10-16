@@ -29,7 +29,22 @@
     <span>current score: {{.CurrentText}}</span>
   </p>
 </header>
-
+{{if .CompatibilityIssues}}
+<section class="bucket"><h2>Exploratory comparison — incompatible reports</h2>
+<p>These reports cannot establish changes in test quality or mutant removal:</p>
+<ul>{{range .CompatibilityIssues}}<li>{{.}}</li>{{end}}</ul>
+</section>
+{{end}}
+<section class="bucket">
+<h2>Unverified verdict transitions ({{len .UnverifiedChanges}})</h2>
+{{if not .UnverifiedChanges}}<p class="empty">none</p>{{end}}
+{{range .UnverifiedChanges}}<p><code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}}</code>: {{.Baseline.Verdict}} → {{.Current.Verdict}} (not a demonstrated test improvement/regression)</p>{{end}}
+</section>
+<section class="bucket">
+<h2>Not analysed / absence unproven ({{len .NotAnalyzed}})</h2>
+{{if not .NotAnalyzed}}<p class="empty">none</p>{{end}}
+{{range .NotAnalyzed}}<p><code>{{.Mutation.Span.File}}:{{.Mutation.Span.StartLine}} — {{.ID}}</code> (not evidence of code removal or introduction)</p>{{end}}
+</section>
 <section class="bucket">
   <h2>New survivors ({{len .NewSurvivors}})</h2>
   {{if not .NewSurvivors}}<p class="empty">none</p>{{end}}

@@ -791,6 +791,11 @@ func (e Engine) executeMutantsParallel(ctx context.Context, req Request, p prepa
 }
 
 func buildReport(toolVersion string, req Request, p preparedAnalysis, results []model.Result, complete bool, baselineMS, executionMS int64, warnings []string, started time.Time) model.Report {
+	resolved := make([]string, 0, len(p.pkgs))
+	for _, pkg := range p.pkgs {
+		resolved = append(resolved, pkg.ImportPath)
+	}
+	sort.Strings(resolved)
 	return model.Report{
 		SchemaVersion:   model.SchemaVersion,
 		ToolVersion:     toolVersion,
@@ -800,20 +805,23 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 		Patterns:        append([]string(nil), req.Patterns...),
 		EffectiveConfig: req.Config.AsMap(),
 		Bounds: map[string]any{
-			"max_mutants":             req.Config.MaxMutants,
-			"per_mutant_timeout":      req.Config.Timeout.String(),
-			"discovered_before_bound": p.discovered,
-			"retained_after_bound":    len(p.mutants),
-			"completed_mutants":       len(results),
-			"backend_name":            p.backendName,
-			"backend_version":         p.backendVersion,
-			"operator_semantics":      frontend.SemanticsVersion,
-			"test_command":            testCommand(req.Config, req.Patterns),
-			"test_working_directory":  p.workRel,
-			"goos":                    p.toolchain.GOOS,
-			"goarch":                  p.toolchain.GOARCH,
-			"cgo_enabled":             p.toolchain.CgoEnabled,
-			"goflags":                 p.toolchain.GoFlags,
+			"max_mutants":                req.Config.MaxMutants,
+			"per_mutant_timeout":         req.Config.Timeout.String(),
+			"discovered_before_bound":    p.discovered,
+			"retained_after_bound":       len(p.mutants),
+			"completed_mutants":          len(results),
+			"backend_name":               p.backendName,
+			"backend_version":            p.backendVersion,
+			"operator_semantics":         frontend.SemanticsVersion,
+			"test_command":               testCommand(req.Config, req.Patterns),
+			"test_working_directory":     p.workRel,
+			"resolved_test_packages":     resolved,
+			"execution_environment_hash": p.environmentHash,
+			"execution_inputs_complete":  p.cacheSafe,
+			"goos":                       p.toolchain.GOOS,
+			"goarch":                     p.toolchain.GOARCH,
+			"cgo_enabled":                p.toolchain.CgoEnabled,
+			"goflags":                    p.toolchain.GoFlags,
 		},
 		Semantics: []string{
 			"Each mutant is a single source-span replacement applied atomically to a temporary copy of the Go module.",

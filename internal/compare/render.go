@@ -24,7 +24,14 @@ func RenderText(w io.Writer, d Diff) error {
 	}
 
 	ew := &errWriter{w: w}
-	ew.printf("compare: baseline vs current\n  baseline score: %s\n  current score:  %s\n\n", d.BaselineText, d.CurrentText)
+	ew.printf("compare: baseline vs current\n  baseline score: %s\n  current score:  %s\n", d.BaselineText, d.CurrentText)
+	if len(d.CompatibilityIssues) > 0 {
+		ew.printf("  WARNING: EXPLORATORY, NOT COMPARABLE\n")
+		for _, issue := range d.CompatibilityIssues {
+			ew.printf("    - %s\n", issue)
+		}
+	}
+	ew.printf("\n")
 
 	ew.printf("new survivors: %d\n", len(d.NewSurvivors))
 	for _, md := range d.NewSurvivors {
@@ -75,6 +82,21 @@ func RenderText(w io.Writer, d Diff) error {
 		}
 	}
 
+	ew.printf("\nunverified verdict transitions: %d\n", len(d.UnverifiedChanges))
+	for _, md := range d.UnverifiedChanges {
+		m := md.Mutation()
+		ew.printf("  %s:%d:%d %s: %s -> %s (not a demonstrated fix/regression)\n", m.Span.File, m.Span.StartLine, m.Span.StartCol, md.ID, md.Baseline.Verdict, md.Current.Verdict)
+	}
+	ew.printf("\nnot analysed / absence unproven: %d\n", len(d.NotAnalyzed))
+	for _, md := range d.NotAnalyzed {
+		m := md.Mutation()
+		ew.printf("  %s:%d:%d %s (missing from %s; not proof of a source change)\n", m.Span.File, m.Span.StartLine, m.Span.StartCol, md.ID, func() string {
+			if md.Current == nil {
+				return "current"
+			}
+			return "baseline"
+		}())
+	}
 	ew.printf("\nunchanged: %d\n", d.UnchangedCount)
 	return ew.err
 }
@@ -108,6 +130,12 @@ func RenderJSON(w io.Writer, d Diff) error {
 	}
 	if d.RemovedMutants == nil {
 		d.RemovedMutants = []MutantDiff{}
+	}
+	if d.UnverifiedChanges == nil {
+		d.UnverifiedChanges = []MutantDiff{}
+	}
+	if d.NotAnalyzed == nil {
+		d.NotAnalyzed = []MutantDiff{}
 	}
 	if d.LikelyShifted == nil {
 		d.LikelyShifted = []ShiftCandidate{}

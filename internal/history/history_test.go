@@ -89,3 +89,27 @@ func TestRenderTrendJSONEmptyIsArrayNotNull(t *testing.T) {
 		t.Fatalf("expected an empty array, got: %s", b.String())
 	}
 }
+
+func TestF09HistoryPreservesCompletenessAndScope(t *testing.T) {
+	r := model.Report{
+		Complete: false, Patterns: []string{"./pkg"},
+		Bounds:          map[string]any{"discovered_before_bound": 7, "retained_after_bound": 3, "completed_mutants": 2, "test_working_directory": "pkg", "operator_semantics": "mutation-judge-operators/v15"},
+		EffectiveConfig: map[string]any{"operators": []string{"boundary"}, "test_run": "^Test", "narrow_test_scope": true, "coverage_test_selection": true},
+		Summary:         model.Summary{Generated: 2, Killed: 1, Equivalent: 1},
+	}
+	want := EntryFromReport("PR", r, time.Now().UTC())
+	if want.Complete || want.Discovered != 7 || want.Retained != 3 || want.Completed != 2 || want.Equivalent != 1 || want.WorkingDirectory != "pkg" || !want.NarrowTestScope.(bool) {
+		t.Fatalf("lost provenance: %+v", want)
+	}
+	file := filepath.Join(t.TempDir(), "history.ndjson")
+	if err := Append(file, want); err != nil {
+		t.Fatal(err)
+	}
+	records, err := Read(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Completed != 2 || records[0].OperatorSemantics != "mutation-judge-operators/v15" {
+		t.Fatalf("metadata not persisted: %+v", records)
+	}
+}
