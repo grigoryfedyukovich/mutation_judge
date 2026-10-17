@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -102,27 +101,16 @@ func runCompare(args []string) int {
 	return exitOK
 }
 
-// loadReport reads a --format json report previously written by this
-// same tool. compare and record both read reports this way rather than
-// re-running analysis themselves -- they're pure post-processing over
-// whatever the caller already produced. The schema major is validated
-// here (model.ValidateSchemaVersion) rather than left to whatever
-// encoding/json happens to leave zero-valued on a mismatch, since this
-// project's own documented policy is that a consumer of this JSON --
-// which is exactly what compare and record are, of their own past
-// output -- should reject an unrecognized schema major rather than
-// silently assume current field semantics apply to it.
+// loadReport validates the entire imported document, including schema identity,
+// completeness and numerical invariants. Both compare and record use it.
 func loadReport(path string) (model.Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return model.Report{}, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
-	var r model.Report
-	if err := json.NewDecoder(f).Decode(&r); err != nil {
-		return model.Report{}, fmt.Errorf("decode %s: %w", path, err)
-	}
-	if err := model.ValidateSchemaVersion(r.SchemaVersion); err != nil {
+	r, err := model.DecodeReport(f)
+	if err != nil {
 		return model.Report{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return r, nil

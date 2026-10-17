@@ -479,7 +479,7 @@ jq -r '
 ' ./artifacts/mutation-report.json | sort -u
 ```
 
-A consumer should reject unknown schema major versions rather than silently assuming field semantics.
+Consumers must check the complete `mutation-judge.report/v1` schema identifier; a matching `/v1` suffix from another producer is not sufficient. `compare` and `record` additionally validate required report fields, mutant IDs, verdicts, summary counts, scores, execution bounds, and JSON end-of-input. Incomplete but internally consistent reports remain valid imports, although `compare` rejects incomplete or bounded comparisons unless `--allow-incompatible` is supplied.
 
 ## 11. Produce a self-contained HTML report
 

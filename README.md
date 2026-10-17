@@ -235,7 +235,14 @@ JSON output uses schema `mutation-judge.report/v1`. Each result contains:
 - evidence, assumptions, and a mechanically grounded suggestion for survivors;
 - tool/backend versions, effective configuration, explicit bounds, and phase timing.
 
-Consumers should reject unknown schema major versions.
+Imported reports used by `compare` and `record` must have the exact
+`mutation-judge.report/v1` schema identifier and complete required structure.
+The loader rejects malformed fields, duplicate mutant IDs, invalid verdicts,
+summary/score inconsistencies, impossible execution bounds, and trailing JSON.
+An intentionally interrupted report (`complete=false`) or one limited by
+`--max-mutants` is valid input, but report comparison still treats it as
+incompatible unless explicitly run in exploratory mode. Unknown fields in an
+otherwise valid v1 report are tolerated.
 
 ## Development
 
