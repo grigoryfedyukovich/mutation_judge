@@ -214,6 +214,16 @@ progress = true
 
 Cache keys include the tool version, independently versioned operator semantics, all Go/test source content, module files, effective configuration, backend name/version, and mutant identity. They also bind the **module-relative execution directory**, actual per-mutant test patterns, `-run` selector, and resolved test package universe (so a relative `./...` in two different directories cannot reuse a stale verdict). Cache entries also account for sandbox entry types, executable/file permissions, and a SHA-256 digest of the frozen effective test environment (environment values are not written to reports). Any main-module local `replace` dependency or `GOFLAGS` with `-modfile`, `-overlay`, or `-toolexec` disables caching with a report warning, because inputs outside the snapshot cannot be fingerprinted reliably. Cache entries use a versioned schema, and older unsafe execution keys are not reused. Reports record the execution working directory and effective command with each executed or cached mutant.
 
+### Race-enabled Go tests and coverage
+
+Baseline coverage and per-test coverage profiling use `-covermode=atomic`.
+This is required when `GOFLAGS=-race` is enabled (including when the setting
+comes from `go env -w GOFLAGS=...`). The explicit mode also overrides an
+incompatible `-covermode=count` inherited through `GOFLAGS`, while normal
+(non-coverage) mutant executions retain the project’s configured Go flags.
+Atomic counters may add profiling overhead compared with count mode, but
+avoid rejecting an otherwise valid race-enabled test configuration.
+
 ## Incremental workflow
 
 ```bash

@@ -215,6 +215,13 @@ present. A report warning explains why. Snapshot copying still excludes the
 paths listed above; tests depending on uncaptured external inputs should use
 `--no-cache`.
 
+Coverage-producing commands (baseline and optional per-test profiles) use
+`-covermode=atomic` rather than `count`. Go requires atomic instrumentation
+when running with the race detector (`GOFLAGS=-race`); the same mode remains
+valid without `-race`. This may be more expensive than `count` coverage, but
+ensures a consistent valid execution regardless of ambient Go race settings.
+Non-coverage mutant executions do not add either flag.
+
 ## Coverage-attributed per-test selection (`--coverage-test-selection`)
 
 Opt-in (default off), independent of `--narrow-test-scope` and stackable on top of it: narrows a mutant's `go test -run` pattern to ordinary top-level `Test...` functions whose own baseline coverage reaches the mutant's span **plus all runnable `Example...` and `Fuzz...` units in potentially observing packages**. Examples and fuzz seed corpora are preserved even when their coverage is not measured per unit. This prevents a coverage-based false `SURVIVED` verdict when an example output check or fuzz seed is the only mutation killer.

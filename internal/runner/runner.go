@@ -255,7 +255,7 @@ func exitErrorWithStderr(err error) error {
 // protocol marker in the JSON event stream -- see classifyEvents -- which
 // does not depend on guessing at the wording of a specific compiler
 // diagnostic.
-var fallbackBuildFailureRE = regexp.MustCompile(`(?m)(\[build failed\]|build constraints exclude all Go files|syntax error:|undefined:|cannot use .* as .* value|declared and not used|expected .* found)`)
+var fallbackBuildFailureRE = regexp.MustCompile(`(?m)(\[build failed\]|build constraints exclude all Go files|syntax error:|undefined:|cannot use .* as .* value|declared and not used|expected .* found|^go: -covermode must be )`)
 
 // testEvent mirrors one line of the line-delimited JSON that `go test
 // -json` writes to stdout (via cmd/internal/test2json). stdout carries
@@ -330,7 +330,12 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 		args = append(args, "-run", req.TestRun)
 	}
 	if req.CoverageOut != "" {
-		args = append(args, "-covermode=count", "-coverprofile="+req.CoverageOut)
+		// Atomic coverage works with both normal and race-enabled test binaries.
+		// In particular, Go rejects -race together with -covermode=count,
+		// including when -race comes from GOFLAGS or persistent go env.
+		// Using atomic consistently also avoids guessing which build flags
+		// an inherited GOFLAGS value enables in this sandbox.
+		args = append(args, "-covermode=atomic", "-coverprofile="+req.CoverageOut)
 		if len(req.CoveragePackages) > 0 {
 			args = append(args, "-coverpkg="+strings.Join(req.CoveragePackages, ","))
 		}
