@@ -2,6 +2,7 @@ package coverage
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,63 +16,120 @@ type Map struct {
 	suffixOwner map[string]string
 }
 
+// Parse loads a Go coverage profile. Every record must be valid: silently
+// skipping malformed rows could make an observing test appear uncovered and
+// make --coverage-test-selection omit it. Zero-count blocks still register
+// their file as instrumented, distinguishing known-uncovered from unknown.
 func Parse(path, moduleRoot string) (Map, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Map{}, err
 	}
 	defer f.Close()
-	m := Map{Lines: map[string]map[int]bool{}, BySuffix: map[string]map[int]bool{}, ambiguous: map[string]bool{}, suffixOwner: map[string]string{}}
+	m := Map{
+		Lines: map[string]map[int]bool{}, BySuffix: map[string]map[int]bool{},
+		ambiguous: map[string]bool{}, suffixOwner: map[string]string{},
+	}
 	s := bufio.NewScanner(f)
-	first := true
+	// The default Scanner limit is too small for generated paths in some
+	// workspaces; reject genuinely oversized lines as an explicit error.
+	s.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	lineNumber := 0
+	mode := ""
 	for s.Scan() {
+		lineNumber++
 		line := strings.TrimSpace(s.Text())
-		if first {
-			first = false
-			if strings.HasPrefix(line, "mode:") {
-				continue
+		if lineNumber == 1 {
+			switch line {
+			case "mode: set", "mode: count", "mode: atomic":
+				mode = strings.TrimPrefix(line, "mode: ")
+			default:
+				return Map{}, fmt.Errorf("coverage profile %s:%d: invalid mode header %q", path, lineNumber, line)
 			}
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 3 {
 			continue
 		}
-		count, err := strconv.Atoi(fields[2])
-		if err != nil || count < 0 {
-			continue
+		file, start, end, count, err := parseBlock(line, mode)
+		if err != nil {
+			return Map{}, fmt.Errorf("coverage profile %s:%d: %w", path, lineNumber, err)
 		}
-		colon := strings.LastIndex(fields[0], ":")
-		if colon < 0 {
-			continue
-		}
-		file := fields[0][:colon]
-		rangePart := fields[0][colon+1:]
-		parts := strings.Split(rangePart, ",")
-		if len(parts) != 2 {
-			continue
-		}
-		start := strings.Split(parts[0], ".")
-		end := strings.Split(parts[1], ".")
-		if len(start) != 2 || len(end) != 2 {
-			continue
-		}
-		a, _ := strconv.Atoi(start[0])
-		b, _ := strconv.Atoi(end[0])
 		rel := normalize(file, moduleRoot)
 		if m.Lines[rel] == nil {
 			m.Lines[rel] = map[int]bool{}
 		}
 		if count > 0 {
-			for l := a; l <= b; l++ {
+			for l := start; l <= end; l++ {
 				m.Lines[rel][l] = true
 			}
 		}
 	}
 	if err := s.Err(); err != nil {
-		return Map{}, err
+		return Map{}, fmt.Errorf("read coverage profile %s: %w", path, err)
+	}
+	if lineNumber == 0 {
+		return Map{}, fmt.Errorf("coverage profile %s: missing mode header", path)
 	}
 	m.buildSuffixIndex()
 	return m, nil
+}
+
+// parseBlock validates all four fields of Go's coverprofile block format:
+// file:start.line,end.line statements count. The maximum block span is a
+// defensive guard against corrupted input requiring enormous allocations.
+// A legitimate Go basic block should never span a million source lines.
+func parseBlock(line, mode string) (file string, startLine, endLine, count int, err error) {
+	fields := strings.Fields(line)
+	if len(fields) != 3 {
+		return "", 0, 0, 0, fmt.Errorf("expected coverage span, statement count, and execution count, got %q", line)
+	}
+	colon := strings.LastIndexByte(fields[0], ':')
+	if colon <= 0 || colon == len(fields[0])-1 {
+		return "", 0, 0, 0, fmt.Errorf("invalid coverage file/span %q", fields[0])
+	}
+	file = fields[0][:colon]
+	rangePart := fields[0][colon+1:]
+	start, end, ok := strings.Cut(rangePart, ",")
+	if !ok || strings.Contains(end, ",") {
+		return "", 0, 0, 0, fmt.Errorf("invalid coverage range %q", rangePart)
+	}
+	startLine, startCol, err := parsePosition(start)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("invalid start position: %w", err)
+	}
+	endLine, endCol, err := parsePosition(end)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("invalid end position: %w", err)
+	}
+	if endLine < startLine || (endLine == startLine && endCol <= startCol) {
+		return "", 0, 0, 0, fmt.Errorf("inverted or empty coverage range %q", rangePart)
+	}
+	if endLine-startLine > 1_000_000 {
+		return "", 0, 0, 0, fmt.Errorf("coverage range %q exceeds supported block size", rangePart)
+	}
+	statements, err := strconv.Atoi(fields[1])
+	if err != nil || statements < 0 {
+		return "", 0, 0, 0, fmt.Errorf("invalid statement count %q", fields[1])
+	}
+	count, err = strconv.Atoi(fields[2])
+	if err != nil || count < 0 || (mode == "set" && count > 1) {
+		return "", 0, 0, 0, fmt.Errorf("invalid execution count %q for mode %s", fields[2], mode)
+	}
+	return file, startLine, endLine, count, nil
+}
+
+func parsePosition(position string) (line, column int, err error) {
+	lineText, columnText, ok := strings.Cut(position, ".")
+	if !ok || strings.Contains(columnText, ".") {
+		return 0, 0, fmt.Errorf("expected line.column, got %q", position)
+	}
+	line, err = strconv.Atoi(lineText)
+	if err != nil || line <= 0 {
+		return 0, 0, fmt.Errorf("invalid line %q", lineText)
+	}
+	column, err = strconv.Atoi(columnText)
+	if err != nil || column <= 0 {
+		return 0, 0, fmt.Errorf("invalid column %q", columnText)
+	}
+	return line, column, nil
 }
 
 // buildSuffixIndex indexes every path-suffix of each coverage file key so
