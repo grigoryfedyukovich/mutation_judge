@@ -275,13 +275,12 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	}
 	parsingMS := time.Since(parseStart).Milliseconds()
 
-	// The sandbox is the only copied dependency tree. A main-module local
-	// replacement can reference mutable source outside that snapshot. Until
-	// replacement trees are captured as immutable inputs, do not reuse any
-	// verdict for modules with local replacements (including absolute paths).
-	localReplacement, err := workspace.HasLocalReplacementsContext(ctx, snapshot)
+	// Local replacements must be frozen into the same snapshot as the main
+	// module. Merely disabling the cache does not prevent a baseline from
+	// writing into an external module and contaminating subsequent mutants.
+	localReplacement, err := workspace.IsolateLocalReplacements(ctx, root, snapshot, req.Config.CacheDir)
 	if err != nil {
-		return preparedAnalysis{}, fmt.Errorf("inspect local replacements: %w", err)
+		return preparedAnalysis{}, fmt.Errorf("isolate local replacements: %w", err)
 	}
 	// GOFLAGS -modfile and -overlay can read arbitrary files outside the
 	// sandbox; their paths alone are not a fingerprint of their contents.
@@ -289,7 +288,7 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	cacheSafe := !localReplacement && !untrackedFlags
 	var cacheWarning string
 	if req.Config.Cache && !cacheSafe {
-		cacheWarning = "mutation result caching disabled: external local replacements or Go flag files are not included in the immutable source snapshot"
+		cacheWarning = "mutation result caching disabled: local replacements or external Go flag files require conservative cache policy"
 	}
 	environment := runner.EffectiveTestEnvironment(os.Environ())
 	environmentHash := digestEnvironment(environment)

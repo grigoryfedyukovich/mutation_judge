@@ -213,7 +213,17 @@ files (`-modfile`, `-overlay`, `-toolexec`) are not part of the copied module
 snapshot, so mutation result caching is disabled conservatively when they are
 present. A report warning explains why. Snapshot copying still excludes the
 paths listed above; tests depending on uncaptured external inputs should use
-`--no-cache`.
+`--no-cache`. As of the R01 repair, main-module `go.mod replace` targets with
+local filesystem paths are copied into the immutable input snapshot and
+rewritten **only in the sandbox go.mod**. A fresh copy of that snapshot,
+including external replacement contents, is used for every baseline,
+profiling, enumeration, and mutant run; the original replacement directories
+are not test execution inputs. Cache reuse remains deliberately disabled for
+local replacements until the complete dependency graph is included in the
+cache contract. The extra copies can increase execution time and disk usage.
+Unsupported replacements (e.g. targeting an ancestor of the main module, or
+an excluded/uncopyable module directory) return an explicit preparation error
+instead of silently running against a shared host dependency tree.
 
 Coverage-producing commands (baseline and optional per-test profiles) use
 `-covermode=atomic` rather than `count`. Go requires atomic instrumentation
