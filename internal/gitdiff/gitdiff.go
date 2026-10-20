@@ -21,6 +21,7 @@ func ChangedLines(root, base string) (map[string]map[int]bool, error) {
 }
 
 // ChangedLinesContext allows interruption during incremental preparation.
+// Non-ignored untracked Go files use line 0 as a whole-file change marker.
 // Explicit diff options override user/repository settings that would alter
 // the format of machine-consumed headers. Git still C-quotes some pathnames
 // even with core.quotepath=false (quotes, backslashes and control bytes).
@@ -37,6 +38,31 @@ func ChangedLinesContext(ctx context.Context, root, base string) (map[string]map
 	lines, err := Parse(out)
 	if err != nil {
 		return nil, fmt.Errorf("parse git diff %s: %w", base, err)
+	}
+	// Untracked working-tree sources are invisible to git diff, but are
+	// compiled by Go and must be selected in incremental analysis. -z
+	// avoids ambiguity for quoted, backslash, and newline-containing paths.
+	untracked := proc.Command(ctx, "git", "ls-files", "--others", "--exclude-standard", "-z",
+		"--", ":(glob)**/*.go")
+	untracked.Dir = root
+	paths, err := proc.CombinedOutput(untracked)
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files (untracked Go files) failed: %w\n%s", err, strings.TrimSpace(string(paths)))
+	}
+	for _, item := range bytes.Split(paths, []byte{0}) {
+		if len(item) == 0 {
+			continue
+		}
+		path := string(item)
+		if !strings.HasSuffix(path, ".go") || strings.HasPrefix(path, "/") ||
+			path == "." || path == ".." || strings.HasPrefix(path, "../") ||
+			strings.Contains(path, "/../") || strings.HasPrefix(path, "./") {
+			return nil, fmt.Errorf("invalid untracked Go path %q", path)
+		}
+		// Physical source lines start at 1. Line 0 marks the entire
+		// file changed, without allocating one entry per source line or
+		// rereading live files outside the immutable input snapshot.
+		lines[path] = map[int]bool{0: true}
 	}
 	return lines, nil
 }

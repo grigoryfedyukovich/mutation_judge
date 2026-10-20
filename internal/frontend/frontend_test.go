@@ -2462,3 +2462,20 @@ func countUntilDone(next func() string) int {
 		}
 	}
 }
+
+func TestChangedLinesWholeFileMarker(t *testing.T) {
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "new.go"), []byte("package p\n\nfunc F(x int) bool { return x > 0 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := Discover(d, []string{"new.go"}, Options{
+		Operators:    map[string]bool{"boundary": true},
+		ChangedLines: map[string]map[int]bool{"new.go": {0: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Span.StartLine != 3 {
+		t.Fatalf("expected one mutation on line 3: %#v", ms)
+	}
+}

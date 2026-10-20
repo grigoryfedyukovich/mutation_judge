@@ -337,7 +337,7 @@ Only enable this when the generated file is intentionally treated as maintained 
 
 ## 8. Walkthrough: analyze only changed lines
 
-`--changed REV` asks Git for a zero-context diff and retains mutation spans that overlap added or modified lines in the current source tree.
+`--changed REV` asks Git for a zero-context diff and retains mutation spans that overlap added or modified tracked lines in the current source tree. Non-ignored, untracked `.go` files are also included wholesale; they need not be staged first.
 
 In a Git checkout, make a semantics-preserving edit to the incremental example:
 
@@ -372,6 +372,7 @@ Important details:
 
 - Deleted-only lines cannot produce a current-source mutation.
 - A multiline expression is selected when its mutation span overlaps a changed line.
+- Non-ignored untracked `.go` files are wholly changed, including files in new package directories; the selected Go package scope still applies. Git-ignored files do not enter incremental discovery.
 - If no mutation site overlaps the diff, the report can contain zero mutants.
 - Incremental discovery asks Git for uncolored, standard-prefix, zero-context output and decodes C-quoted filenames (including quotes, backslashes, and Unicode). Repository color/prefix settings do not change the selected files.
 - An unrecognized or malformed Git diff is a preparation error, **not** an empty changed set. This avoids silently skipping mutants when Git output cannot be interpreted safely.

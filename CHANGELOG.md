@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- R02/F08 follow-up: include non-ignored untracked `.go` files in `--changed REV` via NUL-delimited Git listing. Each untracked file is wholly changed while package scope and Git ignore rules still apply; added unusual-filename and end-to-end regression tests.
+
 - R01/F01 follow-up: isolate local `go.mod replace` dependencies in the immutable snapshot, redirect absolute and relative replacements in sandbox-only go.mod, and clone those dependencies before every baseline, profiling, enumeration and mutant run. External dependency writes no longer produce false KILLED verdicts. Fail closed on unsafe/unmaterializable targets; cache remains disabled for local replacements. Added real-Go regressions with sequential/parallel workers, profiler selection, and versioned/transitive replaces.
 
 - F13: Race-compatible atomic coverage for baseline and per-test profiling; setup-error classification and end-to-end race/GOFLAGS regressions.

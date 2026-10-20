@@ -87,7 +87,7 @@ Important flags:
 | Flag | Meaning |
 |---|---|
 | `--operators` | `boundary`, `boolean` on by default; `arithmetic`, `errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational`, `literal`, `statement`, `condition`, `returnvalue`, `connective`, `bounds` are opt-in |
-| `--changed REV` | Generate mutants only on added or modified lines from `git diff REV`; malformed Git output is an error, not an empty selection |
+| `--changed REV` | Generate mutants on added/modified tracked lines **and all lines of non-ignored untracked Go files**; malformed Git output is an error, not an empty selection |
 | `--test-run REGEXP` | Pass a test selection regexp to `go test -run` |
 | `--timeout DURATION` | Per-baseline and per-mutant command deadline |
 | `--max-mutants N` | Deterministic execution bound; `0` is unlimited |
@@ -231,7 +231,7 @@ git switch feature/parser-cleanup
 mutation-judge --changed origin/main ./...
 ```
 
-Only mutation spans overlapping lines added or modified in the zero-context Git diff are considered. Deleted-only hunks do not generate a source mutation because no current source span exists.
+Mutation spans on added or modified tracked lines in the zero-context Git diff are considered. Non-ignored, untracked `.go` files are treated as wholly changed (even before `git add`). Git-ignored files and files outside the selected Go package patterns are excluded. Deleted-only hunks do not generate a source mutation because no current source span exists.
 
 ## JSON contract
 

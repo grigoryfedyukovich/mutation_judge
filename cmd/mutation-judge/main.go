@@ -103,7 +103,7 @@ func run() (code int) {
 	cacheDir := fs.String("cache-dir", cfg.CacheDir, "content-addressed cache directory")
 	noCache := fs.Bool("no-cache", !cfg.Cache, "disable the result cache")
 	maxMutants := fs.Int("max-mutants", cfg.MaxMutants, "maximum mutants to execute; zero means unlimited")
-	changed := fs.String("changed", cfg.ChangedBase, "mutate only lines changed from this Git revision")
+	changed := fs.String("changed", cfg.ChangedBase, "mutate tracked changed lines plus non-ignored untracked Go files, relative to this Git revision")
 	ciMin := fs.Float64("ci-min-score", cfg.CIMinScore, "fail policy when score is below this percentage; zero disables")
 	ciCode := fs.Int("ci-exit-code", cfg.CIExitCode, "exit code used for CI policy failure")
 	includeGenerated := fs.Bool("include-generated", cfg.IncludeGenerated, "include generated Go source")

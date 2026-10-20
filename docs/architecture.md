@@ -27,7 +27,7 @@ Go frontend ----------> span-based mutation model
 - `internal/config`: strict flat TOML/YAML-subset configuration and validation; unsupported nested syntax is rejected.
 - `internal/workspace`: module/package discovery, source digest, safe module copy, atomic apply/restore boundary.
 - `internal/frontend`: Go AST candidate discovery lowered immediately to source-span replacements.
-- `internal/gitdiff`: zero-context diff hunk parsing for changed-line mode.
+- `internal/gitdiff`: zero-context diff hunk parsing plus NUL-delimited, ignore-aware untracked Go source listing for changed-line mode (line 0 is the whole-file sentinel).
 - `internal/coverage`: baseline Go coverage-profile mapping.
 - `internal/runner`: narrow execution backend interface plus the concrete `go test` backend.
 - `internal/cache`: content-addressed, schema-versioned backend result cache.

@@ -1798,6 +1798,11 @@ func overlapsChanged(sp model.Span, changed map[string]map[int]bool) bool {
 	if !ok {
 		return false
 	}
+	// Physical source lines start at 1; line 0 marks an untracked
+	// Go source whose entire content is considered changed.
+	if lines[0] {
+		return true
+	}
 	for l := sp.StartLine; l <= sp.EndLine; l++ {
 		if lines[l] {
 			return true

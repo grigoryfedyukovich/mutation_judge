@@ -178,3 +178,71 @@ func TestChangedLinesHandlesNonASCIIFilename(t *testing.T) {
 		t.Fatalf("expected line 3 of %s to be reported changed, got %#v", name, m)
 	}
 }
+
+// Untracked Go files are compiled even before git add. Use the NUL path
+// protocol so special filenames are selected without ambiguous decoding.
+func TestChangedLinesIncludesUntrackedAndRespectsIgnores(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.name", "test")
+	run("config", "user.email", "test@example.com")
+	run("config", "core.quotepath", "true")
+	write(".gitignore", "ignored.go\nignored/\n")
+	write("tracked.go", "package p\nfunc Tracked(x int) bool { return x > 0 }\n")
+	run("add", ".gitignore", "tracked.go")
+	run("commit", "-qm", "base")
+	files := []string{"plain.go", "sub/nested.go", "café.go", `quote".go`, `back\slash.go`, "tab\tname.go", "line\nfeed.go"}
+	for _, name := range files {
+		write(name, "package p\nfunc F(x int) bool { return x > 0 }\n")
+	}
+	write("ignored.go", "package p\n")
+	write("ignored/sub.go", "package p\n")
+	write("notes.txt", "not Go")
+	changed, err := ChangedLines(root, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != len(files) {
+		t.Fatalf("want %d paths, got %#v", len(files), changed)
+	}
+	for _, name := range files {
+		if !changed[name][0] {
+			t.Errorf("no whole-file marker for %q: %#v", name, changed[name])
+		}
+	}
+	for _, name := range []string{"ignored.go", "ignored/sub.go", "notes.txt", "tracked.go"} {
+		if _, ok := changed[name]; ok {
+			t.Errorf("unexpected unchanged/ignored path %q", name)
+		}
+	}
+	// After staging, ordinary diff hunks contain physical line numbers.
+	run("add", "plain.go")
+	changed, err = ChangedLines(root, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed["plain.go"][0] || !changed["plain.go"][2] {
+		t.Fatalf("staged new file: %#v", changed["plain.go"])
+	}
+}
