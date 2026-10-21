@@ -1,3 +1,10 @@
+## Unreleased — R03 input snapshot consistency
+
+- Resolve packages, test scopes, source ownership, and mutation discovery from a verified immutable input snapshot rather than different live-checkout states.
+- Pin Git comparison commit and index, and collect incremental tracked/untracked changes against the same source snapshot (including nested module Git metadata).
+- Parse local replacement directives from the frozen module before package resolution, verify dependency copies, and reject detected source/index edits during acquisition.
+- Add regressions for post-capture host edits, nested repositories, index edits, and concurrent-copy mismatches.
+
 # Changelog
 
 ## Unreleased

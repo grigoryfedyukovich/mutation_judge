@@ -25,7 +25,7 @@ const localReplacementsDir = ".mutation-judge-local-replacements"
 // entire resolved module graph is represented in cache identity.
 func IsolateLocalReplacements(ctx context.Context, hostRoot, snapshot, cacheDir string) (bool, error) {
 	cmd := proc.Command(ctx, "go", "mod", "edit", "-json")
-	cmd.Dir = hostRoot
+	cmd.Dir = snapshot
 	cmd.Env = append(os.Environ(), "GOWORK=off")
 	raw, err := proc.Output(cmd)
 	if err != nil {
@@ -121,6 +121,13 @@ func IsolateLocalReplacements(ctx context.Context, hostRoot, snapshot, cacheDir 
 			copied, cleanup, err := CopyModule(realSource, cacheDir)
 			if err != nil {
 				return found, fmt.Errorf("snapshot local replacement %q: %w", source, err)
+			}
+			// Reject input edits that overlap the external dependency copy.
+			// Otherwise an arbitrary mixture of dependency versions could
+			// be reused for every mutant as though it were one snapshot.
+			if err := VerifyModuleCopy(realSource, copied, cacheDir); err != nil {
+				cleanup()
+				return found, fmt.Errorf("local replacement %q changed during acquisition: %w", source, err)
 			}
 			dest := filepath.Join(destinationRoot, name)
 			err = os.Rename(copied, dest)

@@ -246,6 +246,7 @@ func ListPackagesContext(ctx context.Context, cwd string, patterns []string) ([]
 	args := append([]string{"list", "-json", "-e"}, patterns...)
 	cmd := proc.Command(ctx, "go", args...)
 	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	out, err := proc.Output(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("go list failed: %w", err)
@@ -283,6 +284,7 @@ func TestScopesContext(ctx context.Context, cwd string, patterns []string) (map[
 	args := append([]string{"list", "-json", "-deps", "-test", "-e"}, patterns...)
 	cmd := proc.Command(ctx, "go", args...)
 	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	out, err := proc.Output(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("go list -deps -test failed: %w", err)

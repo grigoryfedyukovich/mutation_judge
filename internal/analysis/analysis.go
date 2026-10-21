@@ -34,6 +34,8 @@ type Engine struct {
 	Version  string
 	Backend  runner.Backend
 	Progress func(Progress)
+	// afterSnapshot is a test seam for verifying post-capture host edits.
+	afterSnapshot func()
 }
 
 type Request struct {
@@ -215,29 +217,19 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	if err != nil || workRel == ".." || strings.HasPrefix(workRel, ".."+string(filepath.Separator)) {
 		return preparedAnalysis{}, fmt.Errorf("working directory must be inside module root %s", root)
 	}
-	pkgs, err := workspace.ListPackagesContext(ctx, req.CWD, req.Patterns)
-	if err != nil {
-		return preparedAnalysis{}, err
-	}
-	files, err := workspace.SourceFiles(root, pkgs)
-	if err != nil {
-		return preparedAnalysis{}, err
-	}
-	filePackage, err := fileOwningPackages(root, pkgs)
-	if err != nil {
-		return preparedAnalysis{}, err
-	}
-	var testScopes map[string][]string
-	if req.Config.NarrowTestScope || req.Config.CoverageTestSelection {
-		testScopes, err = workspace.TestScopesContext(ctx, req.CWD, req.Patterns)
+	// Pin the Git index and revision before capturing source inputs. Git
+	// selection later uses the snapshot, never the mutable host worktree.
+	var gitBase *gitdiff.SnapshotBase
+	if req.Config.ChangedBase != "" {
+		gitBase, err = gitdiff.CaptureSnapshotBase(ctx, root, req.Config.ChangedBase)
 		if err != nil {
 			return preparedAnalysis{}, err
 		}
+		defer gitBase.Close()
 	}
-
-	// All discovery and verdicts must observe one immutable input tree.
-	// The host may be edited during a long analysis, but it is never
-	// consulted again for mutant execution or cache identity.
+	// Capture inputs FIRST: all subsequent package, test-scope, and mutation
+	// discovery must use these same bytes. Verify that no edit overlapped
+	// the copy before admitting the snapshot to an experiment.
 	snapshot, cleanup, err := workspace.CopyModule(root, req.Config.CacheDir)
 	if err != nil {
 		return preparedAnalysis{}, err
@@ -248,15 +240,53 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 			cleanup()
 		}
 	}()
+	if err = workspace.VerifyModuleCopy(root, snapshot, req.Config.CacheDir); err != nil {
+		return preparedAnalysis{}, err
+	}
+	if gitBase != nil {
+		if err := gitBase.VerifyIndex(); err != nil {
+			return preparedAnalysis{}, err
+		}
+	}
+	if e.afterSnapshot != nil {
+		e.afterSnapshot()
+	}
 
 	parseStart := time.Now()
 	var changed map[string]map[int]bool
-	if req.Config.ChangedBase != "" {
-		changed, err = gitdiff.ChangedLinesContext(ctx, root, req.Config.ChangedBase)
+	if gitBase != nil {
+		changed, err = gitBase.ChangedLinesFromSnapshotContext(ctx, snapshot)
 		if err != nil {
 			return preparedAnalysis{}, err
 		}
 	}
+	// All local replacements, including out-of-tree dependencies, must be
+	// redirected before asking Go to resolve packages or test dependencies.
+	localReplacement, err := workspace.IsolateLocalReplacements(ctx, root, snapshot, req.Config.CacheDir)
+	if err != nil {
+		return preparedAnalysis{}, fmt.Errorf("isolate local replacements: %w", err)
+	}
+	workDir := filepath.Join(snapshot, workRel)
+	pkgs, err := workspace.ListPackagesContext(ctx, workDir, req.Patterns)
+	if err != nil {
+		return preparedAnalysis{}, err
+	}
+	files, err := workspace.SourceFiles(snapshot, pkgs)
+	if err != nil {
+		return preparedAnalysis{}, err
+	}
+	filePackage, err := fileOwningPackages(snapshot, pkgs)
+	if err != nil {
+		return preparedAnalysis{}, err
+	}
+	var testScopes map[string][]string
+	if req.Config.NarrowTestScope || req.Config.CoverageTestSelection {
+		testScopes, err = workspace.TestScopesContext(ctx, workDir, req.Patterns)
+		if err != nil {
+			return preparedAnalysis{}, err
+		}
+	}
+
 	opset := make(map[string]bool, len(req.Config.Operators))
 	for _, op := range req.Config.Operators {
 		opset[op] = true
@@ -275,13 +305,6 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	}
 	parsingMS := time.Since(parseStart).Milliseconds()
 
-	// Local replacements must be frozen into the same snapshot as the main
-	// module. Merely disabling the cache does not prevent a baseline from
-	// writing into an external module and contaminating subsequent mutants.
-	localReplacement, err := workspace.IsolateLocalReplacements(ctx, root, snapshot, req.Config.CacheDir)
-	if err != nil {
-		return preparedAnalysis{}, fmt.Errorf("isolate local replacements: %w", err)
-	}
 	// GOFLAGS -modfile and -overlay can read arbitrary files outside the
 	// sandbox; their paths alone are not a fingerprint of their contents.
 	untrackedFlags := untrackedGoFlagInputs(toolchain.GoFlags)
