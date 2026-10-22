@@ -14,6 +14,8 @@ import (
 type Config struct {
 	Operators             []string
 	Timeout               time.Duration
+	PreparationTimeout    time.Duration
+	TotalTimeout          time.Duration
 	TestRun               string
 	Format                string
 	Output                string
@@ -32,14 +34,15 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		Operators:  []string{"boundary", "boolean"},
-		Timeout:    20 * time.Second,
-		CacheDir:   ".mutation-judge/cache",
-		Cache:      true,
-		CIExitCode: 10,
-		Format:     "text",
-		Progress:   true,
-		Workers:    1,
+		Operators:          []string{"boundary", "boolean"},
+		Timeout:            20 * time.Second,
+		PreparationTimeout: 2 * time.Minute,
+		CacheDir:           ".mutation-judge/cache",
+		Cache:              true,
+		CIExitCode:         10,
+		Format:             "text",
+		Progress:           true,
+		Workers:            1,
 	}
 }
 
@@ -47,6 +50,8 @@ func (c Config) AsMap() map[string]any {
 	return map[string]any{
 		"operators":               c.Operators,
 		"timeout":                 c.Timeout.String(),
+		"preparation_timeout":     c.PreparationTimeout.String(),
+		"total_timeout":           c.TotalTimeout.String(),
 		"test_run":                c.TestRun,
 		"format":                  c.Format,
 		"output":                  c.Output,
@@ -408,6 +413,20 @@ func set(c *Config, key, value string) error {
 			return fmt.Errorf("invalid timeout: %w", err)
 		}
 		c.Timeout = d
+	case "preparation_timeout", "total_timeout":
+		v, err := parseString()
+		if err != nil {
+			return err
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %w", key, err)
+		}
+		if key == "preparation_timeout" {
+			c.PreparationTimeout = d
+		} else {
+			c.TotalTimeout = d
+		}
 	case "test_run":
 		v, err := parseString()
 		if err != nil {
@@ -539,6 +558,9 @@ func Validate(c Config) error {
 		if !known[op] {
 			return fmt.Errorf("unknown operator %q", op)
 		}
+	}
+	if c.PreparationTimeout < 0 || c.TotalTimeout < 0 {
+		return errors.New("preparation_timeout and total_timeout cannot be negative")
 	}
 	if c.Timeout <= 0 {
 		return errors.New("timeout must be positive")

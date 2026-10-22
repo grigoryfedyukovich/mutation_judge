@@ -2,7 +2,9 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,12 +14,21 @@ import (
 // Subsequent host edits do not influence an already verified snapshot.
 // It deliberately compares the copied bytes rather than metadata timestamps.
 func VerifyModuleCopy(host, snapshot, cacheDir string) error {
+	return VerifyModuleCopyContext(context.Background(), host, snapshot, cacheDir)
+}
+
+// VerifyModuleCopyContext uses fixed-size buffers rather than reading entire
+// files into memory and respects cancellation during snapshot verification.
+func VerifyModuleCopyContext(ctx context.Context, host, snapshot, cacheDir string) error {
 	hostAbs, err := filepath.Abs(host)
 	if err != nil {
 		return err
 	}
 	seen := map[string]bool{}
 	err = sandboxEntries(host, cacheDir, func(path, rel string, d fs.DirEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		seen[rel] = true
 		dst := filepath.Join(snapshot, filepath.FromSlash(rel))
 		got, err := os.Lstat(dst)
@@ -58,15 +69,11 @@ func VerifyModuleCopy(host, snapshot, cacheDir string) error {
 		if !got.Mode().IsRegular() || got.Mode().Perm() != info.Mode().Perm() {
 			return fmt.Errorf("source mode/type changed during snapshot acquisition: %s", rel)
 		}
-		a, err := os.ReadFile(path)
+		same, err := sameFileBytes(ctx, path, dst)
 		if err != nil {
 			return err
 		}
-		b, err := os.ReadFile(dst)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(a, b) {
+		if !same {
 			return fmt.Errorf("source bytes changed during snapshot acquisition: %s", rel)
 		}
 		return nil
@@ -77,9 +84,45 @@ func VerifyModuleCopy(host, snapshot, cacheDir string) error {
 	// Detect entries removed from host after they were captured. Do not follow
 	// links: the snapshot is a materialized tree, not an overlay of the host.
 	return sandboxEntries(snapshot, cacheDir, func(_ string, rel string, _ fs.DirEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !seen[rel] {
 			return fmt.Errorf("source disappeared during snapshot acquisition: %s", rel)
 		}
 		return nil
 	})
+}
+
+func sameFileBytes(ctx context.Context, a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+	aa, bb := make([]byte, 32<<10), make([]byte, 32<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		n, ea := io.ReadFull(fa, aa)
+		m, eb := io.ReadFull(fb, bb)
+		if n != m || !bytes.Equal(aa[:n], bb[:m]) {
+			return false, nil
+		}
+		if ea == io.EOF || ea == io.ErrUnexpectedEOF {
+			return eb == io.EOF || eb == io.ErrUnexpectedEOF, nil
+		}
+		if ea != nil {
+			return false, ea
+		}
+		if eb != nil {
+			return false, eb
+		}
+	}
 }

@@ -90,6 +90,8 @@ Important flags:
 | `--changed REV` | Generate mutants on added/modified tracked lines **and all lines of non-ignored untracked Go files**; malformed Git output is an error, not an empty selection |
 | `--test-run REGEXP` | Pass a test selection regexp to `go test -run` |
 | `--timeout DURATION` | Per-baseline and per-mutant command deadline |
+| `--preparation-timeout DURATION` | Wall-clock budget for toolchain detection and input preparation; default `2m`, `0` disables |
+| `--total-timeout DURATION` | Optional wall-clock budget for the entire analysis; default `0` (off). An expired budget fails and a partial report is emitted if execution had begun |
 | `--max-mutants N` | Deterministic execution bound; `0` is unlimited |
 | `--format` | `text`, `json`, `html`, `sarif` (GitHub code scanning), or `github` (inline PR annotations via workflow commands, no upload step) |
 | `--output PATH` | Write the report to a file |
@@ -285,4 +287,12 @@ The v0.1 implementation mutates ordinary production Go files returned by `go lis
 **Subprocess timeouts:** On Linux/macOS/BSD, canceled or timed-out `go test`
 process groups and their ordinary descendants are terminated; inherited
 output pipes have a 250ms cleanup grace. Preparation commands honor analysis
-cancellation. Deliberately detached processes remain outside this guarantee.
+cancellation. Preparation additionally has a 2-minute deadline (configurable
+with `--preparation-timeout`). Every preparation subprocess has a 32 MiB
+stdout/combined-output capture budget; stderr captured separately is limited
+to 64 KiB. Overflow is an explicit error, never silently parsed as truncated
+Go JSON, a Git diff, or a test list. Snapshot copy/verification observe
+cancellation and use fixed-size file buffers. An optional `--total-timeout`
+bounds the analysis phase, not final report serialization. Deliberately
+detached processes remain outside the Unix descendant guarantee. These limits
+do not provide a total-RSS bound (results still grow with the mutant count).

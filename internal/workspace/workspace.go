@@ -554,6 +554,12 @@ func fingerprintSymlinkTarget(rootAbs, target string) string {
 }
 
 func CopyModule(root, cacheDir string) (string, func(), error) {
+	return CopyModuleContext(context.Background(), root, cacheDir)
+}
+
+// CopyModuleContext checks cancellation between entries and while copying
+// large files during preparation. Sandboxes are removed on cancellation.
+func CopyModuleContext(ctx context.Context, root, cacheDir string) (string, func(), error) {
 	tmp, err := os.MkdirTemp("", "mutation-judge-*")
 	if err != nil {
 		return "", nil, err
@@ -565,6 +571,9 @@ func CopyModule(root, cacheDir string) (string, func(), error) {
 		return "", nil, err
 	}
 	err = sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		dst := filepath.Join(tmp, filepath.FromSlash(rel))
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
@@ -587,7 +596,7 @@ func CopyModule(root, cacheDir string) (string, func(), error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("unsupported sandbox entry type %s: %s", info.Mode().Type(), rel)
 		}
-		return copyFile(path, dst, info.Mode())
+		return copyFileContext(ctx, path, dst, info.Mode())
 	})
 	if err != nil {
 		cleanup()
@@ -816,6 +825,13 @@ func HasLocalReplacementsContext(ctx context.Context, root string) (bool, error)
 // which case this always falls back to the byte-for-byte copy below --
 // see reflink_linux.go and reflink_other.go).
 func copyFile(src, dst string, mode os.FileMode) error {
+	return copyFileContext(context.Background(), src, dst, mode)
+}
+
+func copyFileContext(ctx context.Context, src, dst string, mode os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if tryReflink(dst, src) {
 		return os.Chmod(dst, mode.Perm())
 	}
@@ -828,7 +844,28 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, cpErr := io.Copy(out, in)
+	buf := make([]byte, 32<<10)
+	var cpErr error
+	for {
+		if cpErr = ctx.Err(); cpErr != nil {
+			break
+		}
+		var n int
+		n, cpErr = in.Read(buf)
+		if n > 0 {
+			if _, err := out.Write(buf[:n]); err != nil {
+				cpErr = err
+				break
+			}
+		}
+		if cpErr == io.EOF {
+			cpErr = nil
+			break
+		}
+		if cpErr != nil {
+			break
+		}
+	}
 	closeErr := out.Close()
 	if cpErr != nil {
 		return cpErr

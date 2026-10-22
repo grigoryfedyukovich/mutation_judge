@@ -97,6 +97,8 @@ func run() (code int) {
 	fs.SetOutput(os.Stderr)
 	operators := fs.String("operators", strings.Join(cfg.Operators, ","), "comma-separated operators: boundary,boolean,arithmetic,errorreturn,switch,loop,channel,assignment,relational,literal,statement,condition,returnvalue,connective,bounds")
 	timeout := fs.Duration("timeout", cfg.Timeout, "maximum time for each test run")
+	preparationTimeout := fs.Duration("preparation-timeout", cfg.PreparationTimeout, "deadline for toolchain detection, snapshot and mutation discovery (0 disables)")
+	totalTimeout := fs.Duration("total-timeout", cfg.TotalTimeout, "maximum wall-clock duration for the complete analysis (0 disables)")
 	testRun := fs.String("test-run", cfg.TestRun, "Go test -run regular expression")
 	format := fs.String("format", cfg.Format, "report format: text, json, html, sarif, github")
 	output := fs.String("output", cfg.Output, "write report to this path instead of stdout")
@@ -132,6 +134,8 @@ func run() (code int) {
 	}
 	cfg.Operators = splitComma(*operators)
 	cfg.Timeout = *timeout
+	cfg.PreparationTimeout = *preparationTimeout
+	cfg.TotalTimeout = *totalTimeout
 	cfg.TestRun = *testRun
 	cfg.Format = *format
 	cfg.Output = *output
@@ -271,6 +275,10 @@ func run() (code int) {
 			fmt.Fprintln(os.Stderr, "warning: could not write interruption journal:", jerr)
 		}
 		return exitInterrupted
+	}
+	if exceeded, _ := r.Bounds["analysis_deadline_exceeded"].(bool); exceeded {
+		fmt.Fprintln(os.Stderr, "mutation-judge: total analysis deadline exceeded (partial report written)")
+		return exitInput
 	}
 	if cfg.CIMinScore > 0 && r.Summary.Killed+r.Summary.Survived > 0 && r.Summary.Score < cfg.CIMinScore {
 		return cfg.CIExitCode

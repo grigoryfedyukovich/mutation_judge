@@ -425,3 +425,30 @@ Synthetic tests drive tens of thousands of events and multi-megabyte output
 through small chunks, and an end-to-end Go fixture verifies a late failure
 after a large stdout/stderr flood. These verify capture limits and verdict
 correctness, not a universal operating-system peak-RSS bound.
+
+
+## R04 — Preparation resource limits
+
+Toolchain detection, Git comparisons, local replacement rewrites, and runnable
+unit enumeration now use a bounded capture path. A command retaining more than
+32 MiB of stdout (or 32 MiB combined stdout/stderr) fails with an explicit
+`subprocess output exceeds capture budget` error. When stdout is captured
+separately, stderr retention is bounded to 64 KiB and oversized stderr also
+fails. Captures continue draining to avoid deadlocking a child that writes
+beyond the limit. The cap is fixed in `internal/proc`; an unusually large Go
+package graph or diff may fail rather than be partially analyzed.
+
+The preparation phase defaults to a 2-minute wall-clock budget and accepts
+`--preparation-timeout DURATION` or `preparation_timeout` in config. A separate
+`--total-timeout DURATION` / `total_timeout` is opt-in and bounds the analysis
+run, including individual test execution. `0` disables each budget. An expiry
+is an error, not a successful zero-mutant or partial-score measurement.
+Snapshot copying checks cancellation between files and while copying file
+chunks; snapshot verification compares fixed-size chunks. The time needed
+for file-system cleanup after cancellation remains outside a hard deadline.
+
+**Not yet a whole-program RAM bound:** JSON package graphs and mutant results
+are still accumulated in memory, though no single subprocess output capture
+can grow without limit. This pass does not implement external result
+checkpointing or incremental export. A 32 MiB capture cap is not a promise
+that process RSS stays below 32 MiB (or any fixed constant).

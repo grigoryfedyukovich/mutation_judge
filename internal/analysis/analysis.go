@@ -68,6 +68,11 @@ type preparedAnalysis struct {
 
 func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) {
 	started := time.Now()
+	if req.Config.TotalTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, req.Config.TotalTimeout)
+		defer cancel()
+	}
 	if e.Backend == nil {
 		e.Backend = runner.GoTest{}
 	}
@@ -80,16 +85,28 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 	// key and the report, and failing fast here beats discovering a
 	// missing/broken `go` only after paying for sandbox setup and
 	// discovery first.
-	toolchain, err := runner.DetectToolchain(ctx)
+	// Preparation has an independent deadline, even when the caller uses
+	// a signal-only context. Its budget includes toolchain detection,
+	// dependency resolution, snapshot creation and mutation discovery.
+	prepCtx := ctx
+	prepCancel := func() {}
+	if req.Config.PreparationTimeout > 0 {
+		prepCtx, prepCancel = context.WithTimeout(ctx, req.Config.PreparationTimeout)
+	}
+	defer prepCancel()
+	toolchain, err := runner.DetectToolchain(prepCtx)
 	if err != nil {
 		return model.Report{}, err
 	}
 
-	prepared, err := e.prepareContext(ctx, req, toolchain)
+	prepared, err := e.prepareContext(prepCtx, req, toolchain)
 	if err != nil {
 		return model.Report{}, err
 	}
 	defer prepared.cleanup()
+	// The preparation deadline must not curtail tests once discovery is
+	// complete; the entire analysis deadline (if set) remains active.
+	prepCancel()
 
 	coverage, coverageKnown, baselineMS, err := e.runBaseline(ctx, req, prepared)
 	if err != nil {
@@ -126,7 +143,16 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 	if prepared.cacheWarning != "" {
 		warnings = append([]string{prepared.cacheWarning}, warnings...)
 	}
-	return buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started), nil
+	deadlineExceeded := req.Config.TotalTimeout > 0 && ctx.Err() == context.DeadlineExceeded
+	if deadlineExceeded {
+		complete = false
+		warnings = append(warnings, "total analysis deadline exceeded; partial results cannot establish complete mutation coverage")
+	}
+	r := buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started)
+	if deadlineExceeded {
+		r.Bounds["analysis_deadline_exceeded"] = true
+	}
+	return r, nil
 }
 
 // mutantTestScope returns the go test patterns to use for one mutant's
@@ -230,7 +256,7 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	// Capture inputs FIRST: all subsequent package, test-scope, and mutation
 	// discovery must use these same bytes. Verify that no edit overlapped
 	// the copy before admitting the snapshot to an experiment.
-	snapshot, cleanup, err := workspace.CopyModule(root, req.Config.CacheDir)
+	snapshot, cleanup, err := workspace.CopyModuleContext(ctx, root, req.Config.CacheDir)
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
@@ -240,7 +266,7 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 			cleanup()
 		}
 	}()
-	if err = workspace.VerifyModuleCopy(root, snapshot, req.Config.CacheDir); err != nil {
+	if err = workspace.VerifyModuleCopyContext(ctx, root, snapshot, req.Config.CacheDir); err != nil {
 		return preparedAnalysis{}, err
 	}
 	if gitBase != nil {
@@ -299,6 +325,11 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
+	// Frontend discovery can be CPU-intensive; even if it finishes after
+	// its deadline, do not admit the resulting snapshot as a valid run.
+	if err := ctx.Err(); err != nil {
+		return preparedAnalysis{}, fmt.Errorf("preparation deadline or cancellation: %w", err)
+	}
 	discovered := len(mutants)
 	if req.Config.MaxMutants > 0 && len(mutants) > req.Config.MaxMutants {
 		mutants = mutants[:req.Config.MaxMutants]
@@ -318,6 +349,9 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	sourceDigest, err := workspace.Digest(snapshot, req.Config.CacheDir)
 	if err != nil {
 		return preparedAnalysis{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return preparedAnalysis{}, fmt.Errorf("preparation deadline or cancellation: %w", err)
 	}
 	// The snapshot is a template, never a runnable workspace. A test may
 	// write anywhere in its sandbox, so no sandbox is reused.

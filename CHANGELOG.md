@@ -1,3 +1,10 @@
+## Unreleased — R04 preparation resource budgets
+
+- Set a default 2-minute preparation deadline and optional overall analysis deadline (`--preparation-timeout`, `--total-timeout`; also flat TOML/YAML keys). Both can be disabled with `0`; an overall execution deadline yields an incomplete report and a nonzero exit.
+- Bound `proc.Output`/`CombinedOutput` captures for Go/Git preparation commands to 32 MiB, with a 64 KiB independent stderr cap. Oversized output raises an explicit error instead of being parsed as truncated evidence; streams continue draining after the limit is reached.
+- Make initial module/dependency snapshot copying and validation cancellation-aware and replace whole-file byte reads with chunked comparisons. Add overflow, cancellation, and config regressions.
+- **Remaining limitation:** Go-list output is capped rather than streamed into the package graph; report result population and snapshot metadata can still grow with project size. No global peak-RSS guarantee.
+
 ## Unreleased — R03 input snapshot consistency
 
 - Resolve packages, test scopes, source ownership, and mutation discovery from a verified immutable input snapshot rather than different live-checkout states.
