@@ -1,6 +1,6 @@
 // Package a is part of the fixture for
 // TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency and
-// TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage: its own test
+// TestWithoutNarrowTestScopeKeepsFullPackagePattern: its own test
 // deliberately misses the n == 100/101 boundary that distinguishes
 // Classify's `n > 100` from a `n >= 100` mutant, so a's own test can
 // never kill it. Only package d's external test file

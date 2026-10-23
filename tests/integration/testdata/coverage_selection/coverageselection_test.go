@@ -2,7 +2,6 @@ package coverageselection
 
 import (
 	"testing"
-	"time"
 )
 
 // TestClassifyBoundary exercises exactly the n == 100/101 boundary
@@ -17,8 +16,7 @@ func TestClassifyBoundary(t *testing.T) {
 	}
 }
 
-// TestSlowUnrelated never calls Classify at all.
-func TestSlowUnrelated(t *testing.T) {
-	time.Sleep(3 * time.Second)
+// TestUnrelated never calls Classify at all.
+func TestUnrelated(t *testing.T) {
 	Unrelated()
 }

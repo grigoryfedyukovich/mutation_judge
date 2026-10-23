@@ -1,3 +1,9 @@
+## Unreleased — R06 integration-suite reliability
+
+- Build the integration CLI once per test process, reuse it across cases, and remove it after the suite. This eliminates redundant builds and reduces Go build-cache contention.
+- Give fixture subprocesses a 120-second outer deadline and finite output-pipe cleanup, with targeted tests for timeouts and binary reuse.
+- Replace 3-second timing-based package/test selection fixtures with deterministic assertions over each mutant's recorded `test_command`, actual `KILLED` verdict and responsible test. This retains cross-package and coverage-selection correctness checks without slow wall-clock thresholds.
+
 ## Unreleased — R05 Windows subprocess tree lifecycle
 
 - Run Windows Go/Git subprocesses inside kill-on-close Job Objects. Start the direct child suspended, assign it to the job, then resume it to prevent descendant creation before containment.
@@ -17,8 +23,6 @@
 - Pin Git comparison commit and index, and collect incremental tracked/untracked changes against the same source snapshot (including nested module Git metadata).
 - Parse local replacement directives from the frozen module before package resolution, verify dependency copies, and reject detected source/index edits during acquisition.
 - Add regressions for post-capture host edits, nested repositories, index edits, and concurrent-copy mismatches.
-
-# Changelog
 
 ## Unreleased
 

@@ -1,8 +1,8 @@
 // Package coverageselection is built specifically for
 // TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest and
-// TestWithoutCoverageTestSelectionRunsTheSlowUnrelatedTest:
+// TestWithoutCoverageTestSelectionKeepsAllTests:
 // TestClassifyBoundary is the only test that reaches Classify's own
-// n > 100 boundary; TestSlowUnrelated never calls Classify at all and
+// n > 100 boundary; TestUnrelated never calls Classify at all and
 // sleeps 3 seconds specifically to give those two tests an
 // unambiguous, non-flaky timing signal for whether
 // --coverage-test-selection actually narrowed the per-mutant `-run`

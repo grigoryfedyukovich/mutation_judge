@@ -1,21 +1,23 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestBoundaryExampleEndToEnd(t *testing.T) {
 	root := projectRoot()
-	cmd := exec.Command("go", "run", "./cmd/mutation-judge", "--no-cache", "--progress=false", "--operators", "boundary", "--max-mutants", "1", "./examples/boundary")
+	cmd := integrationCommand(t, "go", "run", "./cmd/mutation-judge", "--no-cache", "--progress=false", "--operators", "boundary", "--max-mutants", "1", "./examples/boundary")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -31,7 +33,7 @@ func TestJSONOutputAndNestedParentDirectory(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
 	outPath := filepath.Join(t.TempDir(), "nested", "report.json")
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--max-mutants", "1", "--format", "json", "--output", outPath, "./examples/boundary")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--max-mutants", "1", "--format", "json", "--output", outPath, "./examples/boundary")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -59,7 +61,7 @@ func TestJSONOutputAndNestedParentDirectory(t *testing.T) {
 func TestCIPolicyUsesConfiguredExitCode(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--ci-min-score", "100", "--ci-exit-code", "17", "./examples/boundary")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--ci-min-score", "100", "--ci-exit-code", "17", "./examples/boundary")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -83,7 +85,7 @@ func TestCgoPackageEndToEnd(t *testing.T) {
 	}
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "./tests/integration/testdata/cgo")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "./tests/integration/testdata/cgo")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	text := string(out)
@@ -105,7 +107,7 @@ func TestCgoPackageEndToEnd(t *testing.T) {
 func TestPackageInitPanicEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "./tests/integration/testdata/initpanic")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "./tests/integration/testdata/initpanic")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	text := string(out)
@@ -132,7 +134,7 @@ func TestPackageInitPanicEndToEnd(t *testing.T) {
 func TestMultiPackageCompileFailureIsInvalidNotKilledEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "arithmetic",
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "arithmetic",
 		"./tests/integration/testdata/multipkg/...")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
@@ -158,7 +160,7 @@ func TestMultiPackageCompileFailureIsInvalidNotKilledEndToEnd(t *testing.T) {
 func TestCustomTestMainEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "./tests/integration/testdata/custommain")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "./tests/integration/testdata/custommain")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	text := string(out)
@@ -181,7 +183,7 @@ func TestCustomTestMainEndToEnd(t *testing.T) {
 func TestBuildTagExcludedFileIsNeverMutatedEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "./tests/integration/testdata/buildtags")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "./tests/integration/testdata/buildtags")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -207,170 +209,110 @@ func TestBuildTagExcludedFileIsNeverMutatedEndToEnd(t *testing.T) {
 	}
 }
 
-// TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency is the
-// critical correctness test for --narrow-test-scope: a mutation-testing
-// tool that silently reports a false SURVIVED because it narrowed test
-// scope incorrectly would be actively harmful, worse than not narrowing
-// at all. tests/integration/testdata/scoping is built specifically so a
-// mutant in package a is *not* caught by a's own test, and *is* caught
-// only by package d's external ("package d_test") test file -- a
-// dependency reachable only through a _test.go file in a different
-// package, which a naive walk of ordinary build Imports would miss
-// entirely. With scoping enabled, this must still be KILLED.
-func TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency(t *testing.T) {
-	root := projectRoot()
-	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
-		"--narrow-test-scope", "./tests/integration/testdata/scoping/...")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, text)
-	}
-	if !strings.Contains(text, "KILLED") {
-		t.Fatalf("expected the mutant to be KILLED via d's external test even with scoping on:\n%s", text)
-	}
-	if strings.Contains(text, "SURVIVED") {
-		t.Fatalf("a SURVIVED result here would mean scoping silently missed a real cross-package dependency:\n%s", text)
-	}
-	if !strings.Contains(text, "killed by: TestClassifyBoundary") {
-		t.Fatalf("expected attribution to d's TestClassifyBoundary specifically:\n%s", text)
-	}
-
-	// The unambiguous proof that scoping actually narrowed something
-	// (not just "safely did nothing"): package unrelated's test sleeps
-	// 3s and has no relationship to package a. Baseline always validates
-	// the *full* pattern set regardless of scoping (it's checking the
-	// person's whole test suite passes before any mutation happens, not
-	// something scoping should ever skip) so overall wall time alone
-	// isn't the right signal -- it will always include that 3s+ from
-	// baseline. The mutant-execution phase specifically must not.
-	mutantsMS := parseMutantsTimingMS(t, text)
-	if mutantsMS >= 3000 {
-		t.Fatalf("mutants phase took %dms; --narrow-test-scope should have excluded the unrelated package's slow, irrelevant test from mutant execution specifically (full output:\n%s)", mutantsMS, text)
-	}
+// Selected test scope is verified from the command recorded in each mutant's
+// diagnostic evidence. Wall-clock thresholds on sleeping fixtures were flaky
+// under CPU contention and slowed down the entire suite by tens of seconds.
+// The verdict and responsible-tests assertions below independently validate
+// that the selected command actually exercises the observing test.
+type selectionResult struct {
+	Verdict     string   `json:"verdict"`
+	Responsible []string `json:"responsible_tests"`
+	Diagnostic  struct {
+		Evidence struct {
+			TestCommand []string `json:"test_command"`
+		} `json:"evidence"`
+	} `json:"diagnostic"`
 }
 
-// TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage is the control
-// for the timing assertion above: it proves the fixture's 3-second
-// signal is real -- caused by scoping, not some other reason the
-// unrelated package's test wouldn't run anyway -- by confirming the
-// *default* (scoping off) behavior does pay that cost.
-func TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage(t *testing.T) {
-	root := projectRoot()
-	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
-		"./tests/integration/testdata/scoping/...")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, text)
-	}
-	// Without scoping, every mutant re-runs the full pattern set, which
-	// includes the unrelated package's 3s test -- this is the direct
-	// counterpart of the mutants-phase assertion in the scoped test
-	// above, isolating the same phase for a fair comparison.
-	mutantsMS := parseMutantsTimingMS(t, text)
-	if mutantsMS < 3000 {
-		t.Fatalf("mutants phase took only %dms without --narrow-test-scope; expected the unrelated package's 3s test to run as part of the default full pattern set (full output:\n%s)", mutantsMS, text)
-	}
-}
-
-// TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest is the
-// critical correctness test for --coverage-test-selection, the same
-// bar TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency holds
-// --narrow-test-scope to: a mutation-testing tool that silently
-// reports a false SURVIVED because it narrowed test execution
-// incorrectly would be actively harmful, worse than not narrowing at
-// all. This is a different axis of narrowing than --narrow-test-scope
-// (which package's tests to run) -- this is which specific tests
-// *within* an already-included package to run, based on which of them
-// actually reached the mutated line during baseline profiling.
-// tests/integration/testdata/coverage_selection is built specifically
-// so the mutant on Classify's `n > 100` is reachable only through
-// TestClassifyBoundary; TestSlowUnrelated shares the same package but
-// never calls Classify at all, and sleeps 3 seconds so its
-// inclusion/exclusion from a given mutant's own `go test` invocation
-// is an unambiguous, non-flaky timing signal. With coverage-test
-// selection enabled, the mutant must still be KILLED by
-// TestClassifyBoundary, and the mutants phase specifically (not
-// baseline, and not the per-test profiling this feature does up
-// front, both of which legitimately still run every test at least
-// once) must not pay TestSlowUnrelated's 3s cost.
-func TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest(t *testing.T) {
-	root := projectRoot()
-	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
-		"--coverage-test-selection", "./tests/integration/testdata/coverage_selection/...")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, text)
-	}
-	if strings.Contains(text, "coverage-test-selection disabled") {
-		t.Fatalf("coverage-test-selection must not fall back to disabled for this well-behaved fixture:\n%s", text)
-	}
-	if !strings.Contains(text, "KILLED") {
-		t.Fatalf("expected the mutant to be KILLED by TestClassifyBoundary even with coverage-test-selection on:\n%s", text)
-	}
-	if strings.Contains(text, "SURVIVED") {
-		t.Fatalf("a SURVIVED result here would mean coverage-test-selection silently excluded the one test that actually kills this mutant:\n%s", text)
-	}
-	if !strings.Contains(text, "killed by: TestClassifyBoundary") {
-		t.Fatalf("expected attribution to TestClassifyBoundary specifically:\n%s", text)
-	}
-
-	mutantsMS := parseMutantsTimingMS(t, text)
-	if mutantsMS >= 3000 {
-		t.Fatalf("mutants phase took %dms; --coverage-test-selection should have excluded TestSlowUnrelated from this mutant's own `go test -run` invocation specifically (full output:\n%s)", mutantsMS, text)
-	}
-}
-
-// TestWithoutCoverageTestSelectionRunsTheSlowUnrelatedTest is the
-// control for the timing assertion above, the same role
-// TestWithoutNarrowTestScopeRunsTheSlowUnrelatedPackage plays for
-// --narrow-test-scope: it proves the fixture's 3-second signal is
-// real -- caused by coverage-test selection, not some other reason
-// TestSlowUnrelated wouldn't run anyway -- by confirming the default
-// (feature off) behavior does pay that cost on the single mutant's own
-// run.
-func TestWithoutCoverageTestSelectionRunsTheSlowUnrelatedTest(t *testing.T) {
-	root := projectRoot()
-	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary",
-		"./tests/integration/testdata/coverage_selection/...")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, text)
-	}
-	mutantsMS := parseMutantsTimingMS(t, text)
-	if mutantsMS < 3000 {
-		t.Fatalf("mutants phase took only %dms without --coverage-test-selection; expected TestSlowUnrelated to run as part of the mutant's own full-package test invocation (full output:\n%s)", mutantsMS, text)
-	}
-}
-
-// parseMutantsTimingMS extracts the "mutants=Nms" component from a text
-// report's trailing timing line, to assert on the mutant-execution
-// phase specifically rather than total wall time, which always includes
-// baseline (see the two tests above for why that distinction matters
-// here).
-func parseMutantsTimingMS(t *testing.T, text string) int {
+func selectionReport(t *testing.T, extra ...string) selectionResult {
 	t.Helper()
-	re := regexp.MustCompile(`mutants=(\d+)ms`)
-	m := re.FindStringSubmatch(text)
-	if m == nil {
-		t.Fatalf("could not find a mutants=Nms timing component in output:\n%s", text)
-	}
-	ms, err := strconv.Atoi(m[1])
+	args := append([]string{"--no-cache", "--progress=false", "--operators", "boundary", "--format", "json"}, extra...)
+	cmd := integrationCommand(t, buildBinary(t, projectRoot()), args...)
+	cmd.Dir = projectRoot()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("mutants timing %q did not parse as an integer: %v", m[1], err)
+		t.Fatalf("mutation analysis failed: %v\n%s", err, out)
 	}
-	return ms
+	var report struct {
+		Results  []selectionResult `json:"results"`
+		Warnings []string          `json:"warnings"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("decode mutation report: %v\n%s", err, out)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("want one boundary mutant, got %d: %s", len(report.Results), out)
+	}
+	if len(report.Warnings) != 0 {
+		t.Fatalf("unexpected analysis warnings: %v", report.Warnings)
+	}
+	if len(report.Results[0].Diagnostic.Evidence.TestCommand) == 0 {
+		t.Fatal("mutant report omits executed test command")
+	}
+	return report.Results[0]
+}
+
+func commandArg(args []string, value string) bool {
+	for _, arg := range args {
+		if arg == value {
+			return true
+		}
+	}
+	return false
+}
+
+func responsibleFor(r selectionResult, name string) bool {
+	return commandArg(r.Responsible, name)
+}
+
+// The boundary mutant in scoping/a is killed only by d's external test. Its
+// unrelated sibling package must be absent from the narrowed go test command.
+func TestNarrowTestScopeKillsAcrossExternalTestOnlyDependency(t *testing.T) {
+	r := selectionReport(t, "--narrow-test-scope", "./tests/integration/testdata/scoping/...")
+	if r.Verdict != "KILLED" || !responsibleFor(r, "TestClassifyBoundary") {
+		t.Fatalf("missing dependent-package kill: %+v", r)
+	}
+	scope := strings.Join(r.Diagnostic.Evidence.TestCommand, " ")
+	if !strings.Contains(scope, "/scoping/d") || strings.Contains(scope, "/scoping/unrelated") || strings.Contains(scope, "/scoping/...") {
+		t.Fatalf("dependent package was not selected narrowly: %s", scope)
+	}
+}
+
+// The default mutation run keeps the full user-supplied package pattern.
+func TestWithoutNarrowTestScopeKeepsFullPackagePattern(t *testing.T) {
+	r := selectionReport(t, "./tests/integration/testdata/scoping/...")
+	cmd := r.Diagnostic.Evidence.TestCommand
+	if !commandArg(cmd, "./tests/integration/testdata/scoping/...") || r.Verdict != "KILLED" {
+		t.Fatalf("full test package scope not preserved: %+v", r)
+	}
+}
+
+// The weak test does not call Classify. The selected command must restrict -run
+// to the boundary test, and that test must actually kill the mutant.
+func TestCoverageTestSelectionKillsWithoutRunningUnrelatedTest(t *testing.T) {
+	r := selectionReport(t, "--coverage-test-selection", "./tests/integration/testdata/coverage_selection/...")
+	if r.Verdict != "KILLED" || !responsibleFor(r, "TestClassifyBoundary") {
+		t.Fatalf("coverage selection discarded observing test: %+v", r)
+	}
+	cmd := r.Diagnostic.Evidence.TestCommand
+	for i, arg := range cmd {
+		if arg == "-run" {
+			if i+1 == len(cmd) || cmd[i+1] != "^(TestClassifyBoundary)$" {
+				t.Fatalf("coverage selection chose unexpected tests: %v", cmd)
+			}
+			return
+		}
+	}
+	t.Fatalf("coverage selection failed to narrow -run: %v", cmd)
+}
+
+// With coverage selection disabled, no per-test -run narrowing is allowed.
+func TestWithoutCoverageTestSelectionKeepsAllTests(t *testing.T) {
+	r := selectionReport(t, "./tests/integration/testdata/coverage_selection/...")
+	cmd := r.Diagnostic.Evidence.TestCommand
+	if r.Verdict != "KILLED" || commandArg(cmd, "-run") || !commandArg(cmd, "./tests/integration/testdata/coverage_selection/...") {
+		t.Fatalf("default full test scope not preserved: %+v", r)
+	}
 }
 
 // TestWorkersProducesSameResultsAsSequential is the real-toolchain
@@ -388,7 +330,7 @@ func TestWorkersProducesSameResultsAsSequential(t *testing.T) {
 	runJSON := func(extraArgs ...string) reportSummary {
 		args := append([]string{"--no-cache", "--progress=false", "--operators", "boundary", "--format", "json"}, extraArgs...)
 		args = append(args, "./tests/integration/testdata/workers")
-		cmd := exec.Command(binary, args...)
+		cmd := integrationCommand(t, binary, args...)
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -444,7 +386,7 @@ type reportSummary struct {
 func TestSARIFOutputEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "sarif", "./examples/boundary")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "sarif", "./examples/boundary")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -495,7 +437,7 @@ func TestGitHubAnnotationsOutputEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
 
-	survivor := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "github", "./examples/boundary")
+	survivor := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "github", "./examples/boundary")
 	survivor.Dir = root
 	out, err := survivor.CombinedOutput()
 	if err != nil {
@@ -509,7 +451,7 @@ func TestGitHubAnnotationsOutputEndToEnd(t *testing.T) {
 		t.Fatalf("expected a summary notice line:\n%s", text)
 	}
 
-	clean := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "github", "./examples/boundary_fixed")
+	clean := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "github", "./examples/boundary_fixed")
 	clean.Dir = root
 	out, err = clean.CombinedOutput()
 	if err != nil {
@@ -561,7 +503,7 @@ func TestCountPositive(t *testing.T) {
 	}
 
 	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("baseline run failed: %v\n%s", err, out)
@@ -589,13 +531,13 @@ func TestCountPositive(t *testing.T) {
 	}
 
 	currentPath := filepath.Join(t.TempDir(), "current.json")
-	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd = integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("current run failed: %v\n%s", err, out)
 	}
 
-	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath)
+	cmd = integrationCommand(t, binary, "compare", "--baseline", baselinePath, "--current", currentPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("compare failed: %v\n%s", err, out)
@@ -616,7 +558,7 @@ func TestCountPositive(t *testing.T) {
 
 	// Reversing the direction turns the fix into a regression, and
 	// --fail-on-new-survivors must actually fail the command.
-	cmd = exec.Command(binary, "compare", "--baseline", currentPath, "--current", baselinePath, "--fail-on-new-survivors", "--fail-exit-code", "7")
+	cmd = integrationCommand(t, binary, "compare", "--baseline", currentPath, "--current", baselinePath, "--fail-on-new-survivors", "--fail-exit-code", "7")
 	err = cmd.Run()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
@@ -666,7 +608,7 @@ func TestCountPositive(t *testing.T) {
 	}
 
 	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("baseline run failed: %v\n%s", err, out)
@@ -675,7 +617,7 @@ func TestCountPositive(t *testing.T) {
 	// baseline vs itself: no change, so this exercises the "none" /
 	// zero-count path in the template for every bucket except unchanged.
 	htmlPath := filepath.Join(t.TempDir(), "compare.html")
-	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", baselinePath, "--format", "html", "--output", htmlPath)
+	cmd = integrationCommand(t, binary, "compare", "--baseline", baselinePath, "--current", baselinePath, "--format", "html", "--output", htmlPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("compare --format html failed: %v\n%s", err, out)
 	}
@@ -712,12 +654,12 @@ func TestCountPositive(t *testing.T) {
 		t.Fatal(err)
 	}
 	currentPath := filepath.Join(t.TempDir(), "current.json")
-	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd = integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("current run failed: %v\n%s", err, out)
 	}
-	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "html", "--output", htmlPath)
+	cmd = integrationCommand(t, binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "html", "--output", htmlPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("compare --format html failed: %v\n%s", err, out)
 	}
@@ -776,7 +718,7 @@ func TestCountPositive(t *testing.T) {
 	}
 
 	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("baseline run failed: %v\n%s", err, out)
@@ -797,13 +739,13 @@ func AlwaysTrue() bool { return true }
 	}
 
 	currentPath := filepath.Join(t.TempDir(), "current.json")
-	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd = integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("current run failed: %v\n%s", err, out)
 	}
 
-	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "json")
+	cmd = integrationCommand(t, binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("compare failed: %v\n%s", err, out)
@@ -875,7 +817,7 @@ func TestCountPositive(t *testing.T) {
 	}
 
 	baselinePath := filepath.Join(t.TempDir(), "baseline.json")
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", baselinePath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("baseline run failed: %v\n%s", err, out)
@@ -906,13 +848,13 @@ func CountPositive(n int, f func(int)) {
 	}
 
 	currentPath := filepath.Join(t.TempDir(), "current.json")
-	cmd = exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
+	cmd = integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", currentPath, ".")
 	cmd.Dir = moduleDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("current run failed: %v\n%s", err, out)
 	}
 
-	cmd = exec.Command(binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "json")
+	cmd = integrationCommand(t, binary, "compare", "--baseline", baselinePath, "--current", currentPath, "--format", "json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("compare failed: %v\n%s", err, out)
@@ -952,7 +894,7 @@ func TestRecordAndTrendEndToEnd(t *testing.T) {
 	binary := buildBinary(t, root)
 
 	reportPath := filepath.Join(t.TempDir(), "report.json")
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", reportPath, "./examples/boundary")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", "json", "--output", reportPath, "./examples/boundary")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("analysis run failed: %v\n%s", err, out)
@@ -960,13 +902,13 @@ func TestRecordAndTrendEndToEnd(t *testing.T) {
 
 	historyPath := filepath.Join(t.TempDir(), "history.ndjson")
 	for _, label := range []string{"PR #101", "PR #102"} {
-		cmd := exec.Command(binary, "record", "--label", label, "--history-file", historyPath, reportPath)
+		cmd := integrationCommand(t, binary, "record", "--label", label, "--history-file", historyPath, reportPath)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("record %s failed: %v\n%s", label, err, out)
 		}
 	}
 
-	cmd = exec.Command(binary, "trend", "--history-file", historyPath)
+	cmd = integrationCommand(t, binary, "trend", "--history-file", historyPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("trend failed: %v\n%s", err, out)
@@ -991,7 +933,7 @@ func TestAssertionAttributionEndToEnd(t *testing.T) {
 	binary := buildBinary(t, root)
 	run := func(format string) []byte {
 		t.Helper()
-		cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", format, "./tests/integration/testdata/assertions")
+		cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "boundary", "--format", format, "./tests/integration/testdata/assertions")
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -1073,7 +1015,7 @@ func TestAssertionAttributionEndToEnd(t *testing.T) {
 func TestStatementDeletionSurvivesWhenTestOnlyChecksError(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "statement", "--format", "json", "./tests/integration/testdata/assertions")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "statement", "--format", "json", "./tests/integration/testdata/assertions")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1110,7 +1052,7 @@ func TestStatementDeletionSurvivesWhenTestOnlyChecksError(t *testing.T) {
 func TestConditionNegationEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "condition", "--format", "json", "./tests/integration/testdata/condition")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "condition", "--format", "json", "./tests/integration/testdata/condition")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1148,7 +1090,7 @@ func TestConditionNegationEndToEnd(t *testing.T) {
 func TestReturnValueEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "returnvalue", "--format", "json", "./tests/integration/testdata/returnvalue")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "returnvalue", "--format", "json", "./tests/integration/testdata/returnvalue")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1187,7 +1129,7 @@ func TestReturnValueEndToEnd(t *testing.T) {
 func TestConnectiveEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "connective", "--format", "json", "./tests/integration/testdata/connective")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "connective", "--format", "json", "./tests/integration/testdata/connective")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1222,7 +1164,7 @@ func TestConnectiveEndToEnd(t *testing.T) {
 func TestDiscardedResultEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "returnvalue", "--format", "json", "./tests/integration/testdata/discarded")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "returnvalue", "--format", "json", "./tests/integration/testdata/discarded")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1261,7 +1203,7 @@ func TestDiscardedResultEndToEnd(t *testing.T) {
 func TestBoundsEndToEnd(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
-	cmd := exec.Command(binary, "--no-cache", "--progress=false", "--operators", "bounds", "--format", "json", "./tests/integration/testdata/bounds")
+	cmd := integrationCommand(t, binary, "--no-cache", "--progress=false", "--operators", "bounds", "--format", "json", "./tests/integration/testdata/bounds")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1300,13 +1242,111 @@ func projectRoot() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
 }
 
+// Each integration test exercises the same CLI revision. Compiling it afresh for
+// every test adds dozens of competing Go build processes to the suite and makes
+// its duration sensitive to package-level parallelism and the host Go build cache.
+// Keep one test-private binary for the lifetime of this test process. This also
+// supports future parallel subtests without racing the build.
+var (
+	binaryOnce      sync.Once
+	sharedBinary    string
+	sharedBinaryDir string
+	sharedBinaryErr error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedBinaryDir != "" {
+		if err := os.RemoveAll(sharedBinaryDir); err != nil {
+			fmt.Fprintf(os.Stderr, "integration: remove temporary CLI binary: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
+}
+
 func buildBinary(t *testing.T, root string) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "mutation-judge")
-	cmd := exec.Command("go", "build", "-o", binary, "./cmd/mutation-judge")
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
+	binaryOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "mutation-judge-integration-bin-*")
+		if err != nil {
+			sharedBinaryErr = err
+			return
+		}
+		sharedBinaryDir = dir
+		name := "mutation-judge"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		sharedBinary = filepath.Join(dir, name)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "go", "build", "-o", sharedBinary, "./cmd/mutation-judge")
+		cmd.Dir = root
+		cmd.WaitDelay = time.Second
+		if out, err := cmd.CombinedOutput(); err != nil {
+			sharedBinaryErr = fmt.Errorf("integration CLI build: %w\n%s", err, out)
+		}
+	})
+	if sharedBinaryErr != nil {
+		t.Fatal(sharedBinaryErr)
 	}
-	return binary
+	return sharedBinary
+}
+
+// No integration subprocess should stall the entire test package indefinitely.
+// The CLI's own per-command timeouts are tested separately; this is an outer
+// safety deadline for the fixture process and its output collection.
+func integrationCommand(t *testing.T, name string, args ...string) *exec.Cmd {
+	t.Helper()
+	return integrationCommandWithTimeout(t, 120*time.Second, name, args...)
+}
+
+func integrationCommandWithTimeout(t *testing.T, timeout time.Duration, name string, args ...string) *exec.Cmd {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+// TestIntegrationHarnessBinaryReuse makes the shared build an executable
+// invariant: future integration tests must not silently reinstate one build
+// per test case.
+func TestIntegrationHarnessBinaryReuse(t *testing.T) {
+	root := projectRoot()
+	first, second := buildBinary(t, root), buildBinary(t, root)
+	if first != second {
+		t.Fatalf("CLI binary rebuilt: %q != %q", first, second)
+	}
+	if _, err := os.Stat(first); err != nil {
+		t.Fatalf("missing shared CLI binary: %v", err)
+	}
+}
+
+func TestIntegrationHarnessTimeoutChild(t *testing.T) {
+	if os.Getenv("MJ_INTEGRATION_TIMEOUT_HELPER") != "1" {
+		return
+	}
+	time.Sleep(10 * time.Second)
+}
+
+func TestIntegrationHarnessTimeout(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := integrationCommandWithTimeout(t, 80*time.Millisecond, executable, "-test.run=^TestIntegrationHarnessTimeoutChild$")
+	cmd.Env = append(os.Environ(), "MJ_INTEGRATION_TIMEOUT_HELPER=1")
+	start := time.Now()
+	err = cmd.Run()
+	if err == nil {
+		t.Fatal("expected subprocess deadline to terminate helper")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("deadline exceeded cleanup grace: %v", elapsed)
+	}
 }
