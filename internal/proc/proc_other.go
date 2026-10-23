@@ -1,4 +1,4 @@
-//go:build !linux && !darwin && !freebsd && !netbsd && !openbsd && !dragonfly
+//go:build !windows && !linux && !darwin && !freebsd && !netbsd && !openbsd && !dragonfly
 
 package proc
 
@@ -8,3 +8,5 @@ import "os/exec"
 // bounded pipe teardown; a process-tree abstraction is not provided here.
 func configure(cmd *exec.Cmd) {}
 func cleanup(cmd *exec.Cmd)   {}
+
+func runManaged(cmd *exec.Cmd) error { return cmd.Run() }

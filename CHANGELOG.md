@@ -1,3 +1,9 @@
+## Unreleased — R05 Windows subprocess tree lifecycle
+
+- Run Windows Go/Git subprocesses inside kill-on-close Job Objects. Start the direct child suspended, assign it to the job, then resume it to prevent descendant creation before containment.
+- Terminate the Windows job on timeout or cancellation; close it after command completion to terminate remaining descendants, while retaining the 250ms output-pipe cleanup bound. Refuse to run uncontained if job setup fails.
+- Add Windows-native descendant, cancellation, timeout, and output-pipe regression tests and a Windows CI lifecycle job. Preserve Unix process-group behavior.
+
 ## Unreleased — R04 preparation resource budgets
 
 - Set a default 2-minute preparation deadline and optional overall analysis deadline (`--preparation-timeout`, `--total-timeout`; also flat TOML/YAML keys). Both can be disabled with `0`; an overall execution deadline yields an incomplete report and a nonzero exit.

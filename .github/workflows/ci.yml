@@ -37,6 +37,18 @@ jobs:
       - run: go build ./cmd/mutation-judge
       - run: go test ./... -race
 
+  # Native Windows runtime checks are necessary: cross-compilation cannot
+  # validate suspended-process Job Object assignment or descendant cleanup.
+  windows-process-tree:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - run: go build ./cmd/mutation-judge
+      - run: go test ./internal/proc -run TestWindowsJob -count=1 -v
+
   # cmd/mutation-judge's SIGTERM tests start a real subprocess and poll a
   # wall-clock deadline for it to reach a specific point before signaling
   # it. Sharing a runner with every other package's tests (as in `test`

@@ -109,6 +109,19 @@ lingering output writers is treated as a command failure rather than a
 successful test run. A canceled test remains `UNKNOWN`; an elapsed test
 budget remains `TIMEOUT`, and neither is reusable from cache.
 
+On Windows, the same command wrapper creates a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+Job Object and launches the direct child with `CREATE_SUSPENDED`. It assigns
+the suspended child to the Job Object before resuming execution, avoiding a
+window in which a child could spawn an untracked descendant. Cancellation
+terminates the job; after `Wait`, closing the job terminates remaining
+members even when the direct child exited normally. Windows `WaitDelay`
+retains the same 250ms pipe-cleanup limit. If the OS refuses Job Object
+creation, assignment, or resumption (for example because of nested-job
+restrictions), the runner kills/reaps the child and returns an error instead
+of proceeding without descendant containment. The Windows path uses the
+Windows-native `NtResumeProcess` export to resume the suspended process.
+Windows lifecycle regressions run in a dedicated native CI job.
+
 This group isolation is not a security sandbox: a process deliberately creating
 another process group/session, or external daemons, can escape descendant
 cleanup. On other operating systems, cancellation still terminates the direct

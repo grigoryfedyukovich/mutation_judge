@@ -31,3 +31,5 @@ func cleanup(cmd *exec.Cmd) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
+
+func runManaged(cmd *exec.Cmd) error { return cmd.Run() }

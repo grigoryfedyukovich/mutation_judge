@@ -64,7 +64,7 @@ func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 }
 
 func Run(cmd *exec.Cmd) error {
-	err := cmd.Run()
+	err := runManaged(cmd)
 	cleanup(cmd)
 	return err
 }

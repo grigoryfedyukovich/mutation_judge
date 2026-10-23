@@ -285,7 +285,9 @@ The v0.1 implementation mutates ordinary production Go files returned by `go lis
 - [Correctness and expansion issue list](ISSUES.md)
 
 **Subprocess timeouts:** On Linux/macOS/BSD, canceled or timed-out `go test`
-process groups and their ordinary descendants are terminated; inherited
+process groups and their ordinary descendants are terminated. On Windows,
+subprocesses are suspended until assigned to a kill-on-close Job Object,
+which is terminated on cancellation or closed after execution. Inherited
 output pipes have a 250ms cleanup grace. Preparation commands honor analysis
 cancellation. Preparation additionally has a 2-minute deadline (configurable
 with `--preparation-timeout`). Every preparation subprocess has a 32 MiB

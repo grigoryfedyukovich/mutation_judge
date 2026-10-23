@@ -42,6 +42,12 @@ On Linux/macOS/BSD, the runner and toolchain preparation use independent
 process groups and a 250ms pipe cleanup grace; normal children and their
 descendants cannot indefinitely retain the output pipes after a timeout.
 A deliberately detached daemon or a child that calls `setsid` is outside
-that process group and cannot be guaranteed to terminate. Other operating
-systems have direct-child cancellation and bounded pipe cleanup only. This
+that process group and cannot be guaranteed to terminate. On Windows,
+subprocesses are created suspended and assigned to kill-on-close Job Objects
+before execution; cancellation terminates the job, and normal completion
+closes it so descendants cannot continue running. Job assignment and resume
+fail closed. Windows nested-job or restrictive security policies can reject
+job assignment; such a command returns an error without running the child.
+Other operating systems have direct-child cancellation and bounded pipe
+cleanup only. This
 change does not impose a hard memory/output limit (see F15).
