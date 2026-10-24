@@ -41,7 +41,8 @@ func TestR04PreparationDeadlineBoundsToolchain(t *testing.T) {
 type r04SlowBackend struct{}
 
 func (*r04SlowBackend) Run(ctx context.Context, req runner.Request) runner.Result {
-	if req.CoverageOut != "" {
+	src, err := os.ReadFile(filepath.Join(req.Root, "p.go"))
+	if err == nil && !strings.Contains(string(src), ">=") {
 		return runner.Result{Verdict: model.VerdictSurvived}
 	}
 	<-ctx.Done()

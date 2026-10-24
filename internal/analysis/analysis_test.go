@@ -25,7 +25,7 @@ type sequenceBackend struct{ calls int }
 
 func (s *sequenceBackend) Run(_ context.Context, _ runner.Request) runner.Result {
 	s.calls++
-	if s.calls == 1 {
+	if s.calls <= 2 {
 		return runner.Result{Verdict: model.VerdictSurvived}
 	}
 	return runner.Result{Verdict: model.VerdictKilled, Tests: []string{"TestBoundary"}}
@@ -330,7 +330,7 @@ type cancelBackend struct {
 
 func (b *cancelBackend) Run(_ context.Context, _ runner.Request) runner.Result {
 	b.calls++
-	if b.calls == 1 {
+	if b.calls <= 2 {
 		return runner.Result{Verdict: model.VerdictSurvived}
 	}
 	b.cancel()
@@ -571,11 +571,8 @@ func TestCacheWriteFailureIsReportedAsWarningNotFatal(t *testing.T) {
 	if r.Summary.Generated != 1 || r.Summary.Killed != 1 {
 		t.Fatalf("the mutant result itself must still be correct despite the cache failure: %#v", r.Summary)
 	}
-	if len(r.Warnings) != 1 {
-		t.Fatalf("expected exactly one warning, got %v", r.Warnings)
-	}
-	if !strings.Contains(r.Warnings[0], "cache write failed") {
-		t.Fatalf("warning does not describe a cache write failure: %q", r.Warnings[0])
+	if !strings.Contains(strings.Join(r.Warnings, "\n"), "cache write failed") {
+		t.Fatalf("warnings do not describe a cache write failure: %v", r.Warnings)
 	}
 }
 
@@ -840,7 +837,7 @@ func (b *countingBackend) Run(_ context.Context, _ runner.Request) runner.Result
 	if b.calls > b.maxCalls {
 		b.t.Fatalf("backend.Run called a %dth time; expected at most %d -- an EQUIVALENT-classified mutant must never reach the backend", b.calls, b.maxCalls)
 	}
-	if b.calls == 1 {
+	if b.calls <= 2 {
 		return b.baseline
 	}
 	return b.afterwards
@@ -873,7 +870,7 @@ func Less(a, b Item) bool {
 	cfg := config.Default()
 	cfg.Cache = false
 	cfg.Operators = []string{"boundary"}
-	b := &countingBackend{t: t, maxCalls: 2, baseline: runner.Result{Verdict: model.VerdictSurvived}, afterwards: runner.Result{Verdict: model.VerdictKilled, Tests: []string{"TestLess"}}}
+	b := &countingBackend{t: t, maxCalls: 3, baseline: runner.Result{Verdict: model.VerdictSurvived}, afterwards: runner.Result{Verdict: model.VerdictKilled, Tests: []string{"TestLess"}}}
 	r, err := (Engine{Version: "test", Backend: b}).Analyze(context.Background(), Request{CWD: d, Patterns: []string{"."}, Config: cfg})
 	if err != nil {
 		t.Fatal(err)
@@ -881,11 +878,11 @@ func Less(a, b Item) bool {
 	if r.Summary.Generated != 2 || r.Summary.Equivalent != 1 || r.Summary.Killed != 1 {
 		t.Fatalf("unexpected summary: %#v", r.Summary)
 	}
-	// baseline (1 call) + the one real mutant (1 call) = 2; the
-	// equivalent mutant contributing a 3rd call would have already
+	// normal baseline (1 call) + coverage (1 call) + the real mutant (1 call) = 3; the
+	// equivalent mutant contributing a 4th call would have already
 	// failed the test inside countingBackend.Run above.
-	if b.calls != 2 {
-		t.Fatalf("expected exactly 2 backend calls (baseline + the one real mutant), got %d", b.calls)
+	if b.calls != 3 {
+		t.Fatalf("expected exactly 3 backend calls (baseline + optional coverage + real mutant), got %d", b.calls)
 	}
 
 	var equiv, real *model.Result

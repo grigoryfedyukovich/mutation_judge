@@ -210,7 +210,7 @@ progress = true
 1. Resolve package patterns with `go list`.
 2. Parse production `.go` files and lower mutation candidates to language-neutral source spans plus replacements.
 3. Copy the module into a single stable snapshot; the working tree is never mutated.
-4. Run a clean baseline `go test -count=1` with coverage. Analysis stops if the baseline does not pass.
+4. First run a clean **uninstrumented** baseline matching mutant `go test` execution. Analysis stops if this baseline fails. Then collect optional coverage in a separate clean sandbox; instrumented failures or invalid profiles produce a warning and unknown coverage, not a baseline verdict.
 5. For each mutant, create a fresh sandbox from the snapshot, verify the original source span, apply one atomic replacement, run the selected tests (or a narrower scope if configured), classify the result, and discard the sandbox. The baseline and profiling runs are also isolated.
 6. Render diagnostics and cache compatible backend results.
 

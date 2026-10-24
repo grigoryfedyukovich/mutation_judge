@@ -108,13 +108,17 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 	// complete; the entire analysis deadline (if set) remains active.
 	prepCancel()
 
-	coverage, coverageKnown, baselineMS, err := e.runBaseline(ctx, req, prepared)
+	coverage, coverageKnown, baselineMS, baselineWarning, err := e.runBaseline(ctx, req, prepared)
 	if err != nil {
 		return model.Report{}, err
 	}
 
 	var perTestWarning string
-	if req.Config.CoverageTestSelection {
+	if req.Config.CoverageTestSelection && !coverageKnown {
+		// Missing or failing aggregate coverage cannot justify pruning tests.
+		// Individual instrumented runs may not reflect normal test behavior.
+		perTestWarning = "coverage-test-selection disabled for this run: baseline coverage is unavailable"
+	} else if req.Config.CoverageTestSelection {
 		perTest, ptErr := e.buildPerTestCoverage(ctx, req, prepared)
 		if ptErr != nil {
 			// Never a hard failure: coverage-test selection is purely a
@@ -139,6 +143,9 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 	}
 	if perTestWarning != "" {
 		warnings = append([]string{perTestWarning}, warnings...)
+	}
+	if baselineWarning != "" {
+		warnings = append([]string{baselineWarning}, warnings...)
 	}
 	if prepared.cacheWarning != "" {
 		warnings = append([]string{prepared.cacheWarning}, warnings...)
@@ -390,28 +397,63 @@ func fileOwningPackages(root string, pkgs []workspace.Package) (map[string]strin
 	return out, nil
 }
 
-func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis) (covermap.Map, bool, int64, error) {
+// runBaseline validates the exact uninstrumented test command used to judge
+// mutants. Coverage is auxiliary evidence, not permission to accept a suite
+// which would fail without instrumentation. Both invocations begin from
+// independent clean copies so tests that change fixtures cannot affect each
+// other (F01/R01). The reported baseline time includes both invocations.
+func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis) (covermap.Map, bool, int64, string, error) {
 	started := time.Now()
+	elapsed := func() int64 { return time.Since(started).Milliseconds() }
+	// Match mutant runs: no CoverageOut or other extra go test flags.
 	sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
 	if err != nil {
-		return covermap.Map{}, false, time.Since(started).Milliseconds(), fmt.Errorf("create clean baseline sandbox: %w", err)
+		return covermap.Map{}, false, elapsed(), "", fmt.Errorf("create clean baseline sandbox: %w", err)
+	}
+	baseline := e.Backend.Run(ctx, runner.Request{
+		Root: sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
+		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, Environment: p.environment,
+		GoVersion: p.toolchain.GoVersion,
+	})
+	cleanup()
+	if baseline.Verdict != model.VerdictSurvived {
+		return covermap.Map{}, false, elapsed(), "", fmt.Errorf("uninstrumented baseline tests must pass before mutation analysis (verdict %s):\n%s", baseline.Verdict, baseline.Output)
+	}
+	if err := ctx.Err(); err != nil {
+		return covermap.Map{}, false, elapsed(), "", fmt.Errorf("baseline canceled: %w", err)
+	}
+
+	// Profiling is optional evidence, not the authoritative test command.
+	// Errors and instrumentation-dependent failures cannot establish coverage;
+	// retain normal mutant execution with unknown coverage instead.
+	sandbox, cleanup, err = workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+	if err != nil {
+		if ctx.Err() != nil {
+			return covermap.Map{}, false, elapsed(), "", ctx.Err()
+		}
+		return covermap.Map{}, false, elapsed(), fmt.Sprintf("baseline coverage unavailable: cannot create profiling sandbox: %v", err), nil
 	}
 	defer cleanup()
 	coveragePath := filepath.Join(sandbox, ".mutation-judge", "coverage.out")
 	if err := os.MkdirAll(filepath.Dir(coveragePath), 0o755); err != nil {
-		return covermap.Map{}, false, time.Since(started).Milliseconds(), err
+		return covermap.Map{}, false, elapsed(), fmt.Sprintf("baseline coverage unavailable: %v", err), nil
 	}
-	baseline := e.Backend.Run(ctx, runner.Request{
+	profiled := e.Backend.Run(ctx, runner.Request{
 		Root: sandbox, WorkRel: p.workRel, Patterns: req.Patterns,
 		TestRun: req.Config.TestRun, Timeout: req.Config.Timeout, CoverageOut: coveragePath, Environment: p.environment,
 		GoVersion: p.toolchain.GoVersion,
 	})
-	elapsed := time.Since(started).Milliseconds()
-	if baseline.Verdict != model.VerdictSurvived {
-		return covermap.Map{}, false, elapsed, fmt.Errorf("baseline tests must pass before mutation analysis (verdict %s):\n%s", baseline.Verdict, baseline.Output)
+	if err := ctx.Err(); err != nil {
+		return covermap.Map{}, false, elapsed(), "", fmt.Errorf("baseline coverage canceled: %w", err)
+	}
+	if profiled.Verdict != model.VerdictSurvived {
+		return covermap.Map{}, false, elapsed(), fmt.Sprintf("baseline coverage unavailable: instrumented tests returned %s (uninstrumented baseline passed)", profiled.Verdict), nil
 	}
 	coverage, err := covermap.Parse(coveragePath, sandbox)
-	return coverage, err == nil, elapsed, nil
+	if err != nil {
+		return covermap.Map{}, false, elapsed(), fmt.Sprintf("baseline coverage unavailable: invalid coverage profile: %v", err), nil
+	}
+	return coverage, true, elapsed(), "", nil
 }
 
 // buildPerTestCoverage lists all runnable units, preserves examples and fuzz

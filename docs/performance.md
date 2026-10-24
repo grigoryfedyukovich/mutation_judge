@@ -452,3 +452,7 @@ are still accumulated in memory, though no single subprocess output capture
 can grow without limit. This pass does not implement external result
 checkpointing or incremental export. A 32 MiB capture cap is not a promise
 that process RSS stays below 32 MiB (or any fixed constant).
+
+### R07-C2 — baseline versus coverage semantics
+
+The authoritative baseline uses the same uninstrumented `go test` options as mutant executions; it must pass before any mutant is evaluated. Aggregate coverage is collected separately from a clean sandbox, after the baseline. If optional coverage fails or cannot be parsed, mutant execution continues with coverage marked unknown and an explicit warning. Coverage-based **test selection** is disabled if aggregate profiling was unsuccessful, since incomplete coverage evidence must never justify skipping tests. `timing.baseline_ms` includes the baseline and optional aggregate profiling.

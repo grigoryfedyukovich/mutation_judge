@@ -1,3 +1,7 @@
+## Unreleased — R07-C2 baseline soundness
+
+- Validate an uninstrumented, clean Go test baseline before accepting mutants; collect optional coverage independently and conservatively fall back on profiling errors. Add real Go regressions for tests that change behavior under `testing.CoverMode()` and prevent coverage-based selection when profile evidence is unavailable.
+
 ## Unreleased — R06 integration-suite reliability
 
 - Build the integration CLI once per test process, reuse it across cases, and remove it after the suite. This eliminates redundant builds and reduces Go build-cache contention.
