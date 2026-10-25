@@ -21,7 +21,7 @@ func TestF11CompareAndRecordValidateImportedReport(t *testing.T) {
 		Patterns: []string{"./..."}, EffectiveConfig: map[string]any{"operators": []string{"boundary"}, "test_run": "", "timeout": "30s", "include_generated": false, "changed": "", "narrow_test_scope": false, "coverage_test_selection": false},
 		Bounds: map[string]any{
 			"discovered_before_bound": 1, "retained_after_bound": 1, "completed_mutants": 1,
-			"execution_inputs_complete": true, "backend_name": "go-test", "backend_version": "v1", "operator_semantics": "v15", "test_working_directory": ".", "test_command": "go test ./...", "resolved_test_packages": []string{"example.test/a"}, "goos": "linux", "goarch": "amd64", "cgo_enabled": "1", "goflags": "", "execution_environment_hash": "hash", "per_mutant_timeout": "30s",
+			"execution_inputs_complete": true, "backend_name": "go-test", "backend_version": "v1", "operator_semantics": "v15", "test_working_directory": ".", "test_command": "go test ./...", "resolved_test_packages": []string{"example.test/a"}, "goos": "linux", "goarch": "amd64", "cgo_enabled": "1", "goflags": "", "execution_environment_hash": "hash", "effective_go_config_hash": "go-config-hash", "per_mutant_timeout": "30s",
 		},
 		Semantics: []string{"independent"},
 		Summary:   model.Summary{Generated: 1, Killed: 1, Score: 100, ScoreText: "100.0% excluding invalid/timeout/unknown/unsupported/equivalent"},

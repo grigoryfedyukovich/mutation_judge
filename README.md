@@ -117,6 +117,22 @@ mutation-judge trend
 
 `compare` compares **compatible, complete mutation experiments**. It refuses incomplete, bounded, incremental, or mismatched scopes, test settings, tool semantics, and actual per-mutant commands (exit code 2). `--allow-incompatible` produces an explicitly **exploratory** text/JSON/HTML diff: `not_analyzed` lists IDs missing from a report without evidence of removal/introduction, and `unverified_changes` lists transitions that cannot prove a test repair or regression. A CI gate (`--fail-on-new-survivors`) is not available in exploratory mode. For comparable reports, the original six verdict buckets and conservative `likely_shifted` correlation remain. `record`/`trend` keep an NDJSON score history at `.mutation-judge/history.ndjson` including completeness, bounds, operator semantics, selected test scope, and all verdict counts. See `docs/tutorial.md` §16 and `docs/limitations.md` for ID and compatibility limitations.
 
+### Persistent Go environment and cached results
+
+Mutation Judge fingerprints the effective `go env -json` settings and hashes the
+contents of Go's persistent `GOENV` configuration file. This prevents reusing
+cached mutant verdicts after a `go env -w` change such as `CGO_CFLAGS` even
+when the process environment and source tree are unchanged. The fingerprint
+appears as `bounds.effective_go_config_hash`; configuration contents are not
+included in reports. If the configuration cannot be read, caching is disabled.
+
+This identifies configuration changes **between** analysis runs. A configuration
+file or external compiler changing **during** a run is not a transactional
+snapshot; for reproducible results, keep external build tools and persistent
+configuration fixed during analysis. As before, externally referenced flags
+(`-modfile`, `-overlay`, `-toolexec`) and local module replacements disable
+caching conservatively.
+
 ## Supported mutations
 
 ### Boundary

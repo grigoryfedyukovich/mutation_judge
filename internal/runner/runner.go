@@ -3,10 +3,13 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,12 +108,18 @@ type ToolchainInfo struct {
 	GOARCH     string
 	CgoEnabled string // `go env CGO_ENABLED`: "0" or "1"
 	GoFlags    string // `go env GOFLAGS`, e.g. "-race"
+	// EffectiveConfigHash fingerprints all resolved `go env -json` settings and
+	// the persistent GOENV file contents. It contains no raw configuration.
+	EffectiveConfigHash string
+	// ConfigUnsafeReason is set if a persistent configuration input cannot
+	// be fingerprinted. The caller must then disable result caching.
+	ConfigUnsafeReason string
 }
 
 // Key returns a stable, delimiter-safe encoding of every field above,
 // suitable as one component of a larger cache key.
 func (t ToolchainInfo) Key() string {
-	return strings.Join([]string{t.GoVersion, t.GOOS, t.GOARCH, t.CgoEnabled, t.GoFlags}, "|")
+	return strings.Join([]string{t.GoVersion, t.GOOS, t.GOARCH, t.CgoEnabled, t.GoFlags, t.EffectiveConfigHash}, "|")
 }
 
 // DetectToolchain execs `go env` for exactly the variables that can
@@ -129,7 +138,84 @@ func DetectToolchain(ctx context.Context) (ToolchainInfo, error) {
 	if err != nil {
 		return ToolchainInfo{}, err
 	}
+	// Unlike the five identity fields, effective Go configuration also includes
+	// persistent settings set with `go env -w` (e.g. CGO_CFLAGS, CC, GOTOOLCHAIN).
+	// Their values need not appear in os.Environ, so they must be resolved here.
+	// If this read fails, do not silently claim a cache-safe environment.
+	info.EffectiveConfigHash, info.ConfigUnsafeReason = fingerprintEffectiveGoConfig(ctx)
 	return info, nil
+}
+
+// fingerprintEffectiveGoConfig resolves Go configuration with the actual go
+// binary, and hashes it without exposing paths, flags or credentials in reports.
+// Hash the GOENV file *as well*, since a variable not currently reported by
+// `go env -json` could be read by a future toolchain or subprocess.
+// Missing default GOENV files are normal and unambiguously equivalent to empty.
+func fingerprintEffectiveGoConfig(ctx context.Context) (string, string) {
+	out, err := proc.Output(proc.Command(ctx, "go", "env", "-json"))
+	if err != nil {
+		return "", fmt.Sprintf("cannot resolve effective Go configuration: %v", err)
+	}
+	var effective map[string]json.RawMessage
+	if err := json.Unmarshal(out, &effective); err != nil {
+		return "", fmt.Sprintf("invalid effective Go configuration: %v", err)
+	}
+	var path string
+	if err := json.Unmarshal(effective["GOENV"], &path); err != nil {
+		return "", "effective Go configuration omitted GOENV path"
+	}
+	// GOGCCFLAGS is a derived diagnostic containing a fresh random
+	// -ffile-prefix-map=/tmp/go-buildNNN path on every invocation. Hashing
+	// it would disable all repeat cache hits, even for unchanged inputs.
+	// Its stable inputs (CC, CGO_*, GOOS/GOARCH, toolchain) are separately
+	// represented by the other resolved go env fields.
+	delete(effective, "GOGCCFLAGS")
+	stable, err := json.Marshal(effective)
+	if err != nil {
+		return "", fmt.Sprintf("cannot serialize effective Go configuration: %v", err)
+	}
+	h := sha256.New()
+	h.Write([]byte("go-env-identity/v1\x00"))
+	h.Write(stable)
+	h.Write([]byte{0})
+	if path == "off" {
+		h.Write([]byte("disabled"))
+		return hex.EncodeToString(h.Sum(nil)), ""
+	}
+	if path == "" || !filepath.IsAbs(path) {
+		return "", "GOENV path is empty or not absolute"
+	}
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		h.Write([]byte("absent"))
+		return hex.EncodeToString(h.Sum(nil)), ""
+	}
+	if err != nil {
+		return "", fmt.Sprintf("cannot open GOENV configuration: %v", err)
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil || !stat.Mode().IsRegular() {
+		return "", "GOENV configuration is not a readable regular file"
+	}
+	const maxGoEnvBytes = 16 << 20
+	if stat.Size() > maxGoEnvBytes {
+		return "", "GOENV configuration exceeds fingerprint size limit"
+	}
+	h.Write([]byte("present"))
+	n, err := io.Copy(h, io.LimitReader(f, maxGoEnvBytes+1))
+	if err != nil {
+		return "", fmt.Sprintf("cannot hash GOENV configuration: %v", err)
+	}
+	if n > maxGoEnvBytes {
+		return "", "GOENV configuration exceeds fingerprint size limit"
+	}
+	stat2, err := os.Stat(path)
+	if err != nil || !os.SameFile(stat, stat2) ||
+		stat2.Size() != stat.Size() || !stat2.ModTime().Equal(stat.ModTime()) {
+		return "", "GOENV configuration changed during fingerprinting"
+	}
+	return hex.EncodeToString(h.Sum(nil)), ""
 }
 
 // parseGoEnv splits `go env KEY...` output into ToolchainInfo.

@@ -717,6 +717,7 @@ func TestToolchainInfoKeyDistinguishesEveryField(t *testing.T) {
 		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: "arm64", CgoEnabled: base.CgoEnabled, GoFlags: base.GoFlags},
 		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: "1", GoFlags: base.GoFlags},
 		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: base.CgoEnabled, GoFlags: "-race"},
+		{GoVersion: base.GoVersion, GOOS: base.GOOS, GOARCH: base.GOARCH, CgoEnabled: base.CgoEnabled, GoFlags: base.GoFlags, EffectiveConfigHash: "different"},
 	}
 	baseKey := base.Key()
 	for i, v := range variants {

@@ -346,10 +346,13 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	// GOFLAGS -modfile and -overlay can read arbitrary files outside the
 	// sandbox; their paths alone are not a fingerprint of their contents.
 	untrackedFlags := untrackedGoFlagInputs(toolchain.GoFlags)
-	cacheSafe := !localReplacement && !untrackedFlags
+	cacheSafe := !localReplacement && !untrackedFlags && toolchain.ConfigUnsafeReason == ""
 	var cacheWarning string
 	if req.Config.Cache && !cacheSafe {
-		cacheWarning = "mutation result caching disabled: local replacements or external Go flag files require conservative cache policy"
+		cacheWarning = "mutation result caching disabled: untracked execution configuration (local replacements, external Go flag files, or persistent Go configuration)"
+		if toolchain.ConfigUnsafeReason != "" {
+			cacheWarning += ": " + toolchain.ConfigUnsafeReason
+		}
 	}
 	environment := runner.EffectiveTestEnvironment(os.Environ())
 	environmentHash := digestEnvironment(environment)
@@ -604,9 +607,9 @@ func untrackedGoFlagInputs(flags string) bool {
 }
 
 // cacheExecutionSchema changes whenever the serialized execution identity changes.
-// /v4 invalidates prior coverage-selection cache identities after fixing
-// cross-package instrumentation and conservative observer attribution.
-const cacheExecutionSchema = "mutation-judge-execution/v4"
+// /v5 adds resolved persistent Go environment configuration to cache identity.
+// Older entries omitted GOENV/CGO_* settings and are not safe to reuse.
+const cacheExecutionSchema = "mutation-judge-execution/v5"
 
 // mutantCacheKey binds a verdict to the *resolved execution*, not just the
 // textual patterns. Go interprets ./... relative to WorkRel: the same source
@@ -915,6 +918,7 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 			"test_working_directory":     p.workRel,
 			"resolved_test_packages":     resolved,
 			"execution_environment_hash": p.environmentHash,
+			"effective_go_config_hash":   p.toolchain.EffectiveConfigHash,
 			"execution_inputs_complete":  p.cacheSafe,
 			"goos":                       p.toolchain.GOOS,
 			"goarch":                     p.toolchain.GOARCH,

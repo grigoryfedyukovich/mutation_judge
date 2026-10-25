@@ -1,3 +1,9 @@
+## Unreleased — R07-C1 persistent Go configuration cache identity
+
+- Fingerprint the resolved `go env -json` configuration and persistent `GOENV` file contents without embedding raw values in reports or cache keys; omit volatile derived `GOGCCFLAGS` that contains randomly generated compiler temporary paths.
+- Disable caching conservatively if effective configuration cannot be resolved or the `GOENV` file cannot be read, and invalidate old execution-cache identities (`v5`). Include the private effective configuration fingerprint in comparison provenance.
+- Add real cgo producer/consumer/repeat regression using one stable `GOENV` path and changing persistent `CGO_CFLAGS`: SURVIVED -> fresh KILLED -> cached KILLED.
+
 ## Unreleased — R07-C2 baseline soundness
 
 - Validate an uninstrumented, clean Go test baseline before accepting mutants; collect optional coverage independently and conservatively fall back on profiling errors. Add real Go regressions for tests that change behavior under `testing.CoverMode()` and prevent coverage-based selection when profile evidence is unavailable.
