@@ -1,3 +1,9 @@
+## Unreleased — R07-S1 streaming source digests
+
+- Stream regular-file contents through a reusable 32 KiB buffer in `workspace.Digest`; eliminate whole-file allocations for large embedded assets and fixtures while retaining the exact SHA-256 framing and cache identity.
+- Add a reference-implementation compatibility regression across chunk boundaries, file permissions and symlinks, plus a 64 MiB fixture test that bounds heap allocations independently of input-file size.
+- Keep deterministic sorted entry metadata; this change does not bound total repository-entry metadata or all analysis memory.
+
 ## Unreleased — R07-C1 persistent Go configuration cache identity
 
 - Fingerprint the resolved `go env -json` configuration and persistent `GOENV` file contents without embedding raw values in reports or cache keys; omit volatile derived `GOGCCFLAGS` that contains randomly generated compiler temporary paths.

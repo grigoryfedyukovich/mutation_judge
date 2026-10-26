@@ -115,6 +115,33 @@ is the direct motivation for the next item below.
   end-to-end run. If a future measurement against a real large project
   shows otherwise, that would be the evidence to revisit this.
 
+## R07-S1: bounded memory while hashing large source files
+
+`workspace.Digest` now feeds each regular file into SHA-256 through **one
+reusable 32 KiB buffer**, rather than calling `os.ReadFile` for every file.
+Path, entry-kind, permission, symlink and separator framing is unchanged,
+so a source tree's digest (and existing cache identity) is identical to the
+previous implementation. A compatibility regression compares the old and new
+algorithms across empty files and chunk boundaries, including a mutated byte
+just after a boundary.
+
+`TestR07S1DigestLargeFileUsesBoundedAllocations` hashes a sparse 64 MiB
+fixture and requires under 8 MiB of **total heap allocations** during the
+Digest call. The former `os.ReadFile` implementation allocates at least
+64 MiB for the same input. The memory test uses Go's allocation counters,
+not resident-set measurements, and can be skipped with `go test -short`.
+Reproduce using:
+
+```bash
+go test ./internal/workspace -run TestR07S1 -count=1 -v
+```
+
+This fixes allocation proportional to the **largest file**. `Digest` still
+collects and sorts one metadata entry per included path, so metadata memory
+scales with **entry count**. `CopyModule`, package graphs, mutation results,
+and subprocess execution have separate resource characteristics. Streaming the
+digest is **not** a process-wide RSS limit.
+
 ## Reproducing
 
 ```bash

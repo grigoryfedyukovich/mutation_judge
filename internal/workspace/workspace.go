@@ -762,6 +762,7 @@ func Digest(root, cacheDir string) (string, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
 	h := sha256.New()
+	buf := make([]byte, 32<<10) // reused for every file, independent of source size
 	for _, e := range entries {
 		_, _ = io.WriteString(h, e.rel)
 		_, _ = h.Write([]byte{0})
@@ -773,11 +774,21 @@ func Digest(root, cacheDir string) (string, error) {
 		case "file":
 			_, _ = io.WriteString(h, fmt.Sprintf("%04o", e.mode))
 			_, _ = h.Write([]byte{0})
-			b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(e.rel)))
+			// Hash file contents in bounded chunks instead of allocating the
+			// entire file. The bytes fed to h are identical to os.ReadFile,
+			// preserving existing cache identities for unchanged trees.
+			f, err := os.Open(filepath.Join(root, filepath.FromSlash(e.rel)))
 			if err != nil {
 				return "", err
 			}
-			_, _ = h.Write(b)
+			_, copyErr := io.CopyBuffer(h, f, buf)
+			closeErr := f.Close()
+			if copyErr != nil {
+				return "", fmt.Errorf("hash %s: %w", e.rel, copyErr)
+			}
+			if closeErr != nil {
+				return "", fmt.Errorf("close hashed file %s: %w", e.rel, closeErr)
+			}
 		}
 		_, _ = h.Write([]byte{0})
 	}
