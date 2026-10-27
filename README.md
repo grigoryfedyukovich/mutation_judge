@@ -314,3 +314,10 @@ cancellation and use fixed-size file buffers. An optional `--total-timeout`
 bounds the analysis phase, not final report serialization. Deliberately
 detached processes remain outside the Unix descendant guarantee. These limits
 do not provide a total-RSS bound (results still grow with the mutant count).
+
+
+**Sandbox copy tuning:** Mutation Judge attempts copy-on-write reflinks on
+supported Linux filesystems and otherwise creates independent byte copies.
+`MUTATION_JUDGE_COPY_WORKERS=2` (up to `8`) optionally enables parallel
+file copying; the default is `1` because additional workers can slow down
+some filesystems. See `docs/performance.md` for benchmarks and limitations.

@@ -483,3 +483,37 @@ that process RSS stays below 32 MiB (or any fixed constant).
 ### R07-C2 — baseline versus coverage semantics
 
 The authoritative baseline uses the same uninstrumented `go test` options as mutant executions; it must pass before any mutant is evaluated. Aggregate coverage is collected separately from a clean sandbox, after the baseline. If optional coverage fails or cannot be parsed, mutant execution continues with coverage marked unknown and an explicit warning. Coverage-based **test selection** is disabled if aggregate profiling was unsuccessful, since incomplete coverage evidence must never justify skipping tests. `timing.baseline_ms` includes the baseline and optional aggregate profiling.
+
+
+## R07-S2: safe sandbox-copy tuning
+
+`workspace.CopyModuleContext` already tries Linux `FICLONE` per regular
+file and otherwise writes a private copy, so mutating a sandbox cannot
+modify the immutable snapshot. This revision avoids repeating an
+unsupported clone attempt across all files assigned to the same copy
+worker. Each destination still has an independent inode and the same
+contents and permission bits. For a source tree spanning multiple mount
+points, giving up after an initial failure may forgo later successful
+clones, but never substitutes an unsafe copy.
+
+On fast SSDs, concurrent copies may help with file-open and metadata
+latency. Set `MUTATION_JUDGE_COPY_WORKERS=2` or `4` to opt in; valid values
+are integers from 1 to 8. The default remains `1`: limited, virtualized
+storage in the test environment was **slower** with four parallel workers
+than with serial copying. The bounded queue holds at most twice as many
+file tasks as workers, and every worker completes before a sandbox is
+returned or cleaned up. Copy errors and cancellation fail closed.
+
+Benchmark against your own module and filesystem rather than assuming
+concurrency is faster:
+
+```bash
+go test ./internal/workspace -run '^$' -bench 'BenchmarkCopyModule/files=(2000|8000)$' -benchtime=5x -count=1
+MUTATION_JUDGE_COPY_WORKERS=4 go test ./internal/workspace -run '^$' -bench 'BenchmarkCopyModule/files=(2000|8000)$' -benchtime=5x -count=1
+```
+
+These benchmarks include sandbox construction but exclude cleanup.
+Existing `FICLONE` cloning is Linux-only; on macOS and Windows this
+feature still copies bytes. This is a **bounded copy-path tuning change**,
+not filesystem-wide CoW on unsupported platforms, not a global RSS limit,
+and not a verified end-to-end mutation-analysis speedup.

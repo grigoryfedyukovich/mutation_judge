@@ -1,3 +1,11 @@
+## Unreleased — R07-S2 sandbox-copy tuning
+
+- Preserve the existing Linux `FICLONE` copy-on-write path and byte-for-byte fallback; do not introduce writable hard links or narrow the copied input tree.
+- Stop retrying an unsupported clone for every subsequent file in the same copy worker, avoiding repeated failing ioctls on non-reflink filesystems.
+- Add an opt-in bounded copy pool using `MUTATION_JUDGE_COPY_WORKERS=1..8` (default `1`). The directory walk runs in order and prepares parents before file workers run; queued work is bounded, workers are always joined before cleanup, and cancellation stops copying.
+- Add regression tests for 1/2/4/8 workers, independent writable sandboxes, modes, symlinks, ignored entries, explicit byte-copy fallback, invalid configurations, and cancellation.
+- **No universal speedup is claimed.** Parallel copying was slower on the benchmark container's virtual filesystem; serial copying remains the default. Existing Linux reflink success is not available on this filesystem, and macOS APFS clonefile is still not implemented or tested.
+
 ## Unreleased — R07-S1 streaming source digests
 
 - Stream regular-file contents through a reusable 32 KiB buffer in `workspace.Digest`; eliminate whole-file allocations for large embedded assets and fixtures while retaining the exact SHA-256 framing and cache identity.

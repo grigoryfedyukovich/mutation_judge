@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/example/mutation-judge/internal/proc"
 )
@@ -559,7 +561,28 @@ func CopyModule(root, cacheDir string) (string, func(), error) {
 
 // CopyModuleContext checks cancellation between entries and while copying
 // large files during preparation. Sandboxes are removed on cancellation.
+//
+// Regular files are copied serially by default, or by a bounded opt-in
+// worker pool. The walk creates destination directories before queuing files.
+// Each destination is a private file (never a hard link) using a filesystem
+// copy-on-write clone when supported, otherwise a normal byte copy. Workers
+// finish before the temporary tree is exposed or removed.
 func CopyModuleContext(ctx context.Context, root, cacheDir string) (string, func(), error) {
+	workers := 1 // tested conservative default; parallel I/O can regress on virtual disks.
+	if raw := os.Getenv("MUTATION_JUDGE_COPY_WORKERS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 8 {
+			return "", nil, fmt.Errorf("MUTATION_JUDGE_COPY_WORKERS must be an integer from 1 through 8, got %q", raw)
+		}
+		workers = n
+	}
+	return copyModuleWithWorkers(ctx, root, cacheDir, workers)
+}
+
+func copyModuleWithWorkers(ctx context.Context, root, cacheDir string, workers int) (string, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	tmp, err := os.MkdirTemp("", "mutation-judge-*")
 	if err != nil {
 		return "", nil, err
@@ -570,8 +593,68 @@ func CopyModuleContext(ctx context.Context, root, cacheDir string) (string, func
 		cleanup()
 		return "", nil, err
 	}
-	err = sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
-		if err := ctx.Err(); err != nil {
+
+	type copyTask struct {
+		src, dst string
+		mode     os.FileMode
+	}
+	// The default single-worker path has no queue or goroutine overhead.
+	// Parallel copying is opt-in because it can be slower on some disks.
+	copyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var jobs chan copyTask
+	var firstCopyErr error
+	var copyErrOnce sync.Once
+	var enqueue func(copyTask) error
+	if workers == 1 {
+		clonePossible := true
+		enqueue = func(job copyTask) error {
+			cloned, err := copyFileWithCloneOption(copyCtx, job.src, job.dst, job.mode, clonePossible)
+			if !cloned {
+				clonePossible = false
+			}
+			if err != nil {
+				return fmt.Errorf("copy %s: %w", job.src, err)
+			}
+			return nil
+		}
+	} else {
+		// At most two waiting jobs per worker; memory and descriptors
+		// remain bounded regardless of how many files the tree contains.
+		jobs = make(chan copyTask, workers*2)
+		enqueue = func(job copyTask) error {
+			select {
+			case jobs <- job:
+				return nil
+			case <-copyCtx.Done():
+				return copyCtx.Err()
+			}
+		}
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Stop retrying unsupported CoW clones in this worker.
+				clonePossible := true
+				for job := range jobs {
+					cloned, err := copyFileWithCloneOption(copyCtx, job.src, job.dst, job.mode, clonePossible)
+					if !cloned {
+						clonePossible = false
+					}
+					if err != nil {
+						copyErrOnce.Do(func() {
+							firstCopyErr = fmt.Errorf("copy %s: %w", job.src, err)
+							cancel()
+						})
+						return
+					}
+				}
+			}()
+		}
+	}
+	walkErr := sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
+		if err := copyCtx.Err(); err != nil {
 			return err
 		}
 		dst := filepath.Join(tmp, filepath.FromSlash(rel))
@@ -596,11 +679,25 @@ func CopyModuleContext(ctx context.Context, root, cacheDir string) (string, func
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("unsupported sandbox entry type %s: %s", info.Mode().Type(), rel)
 		}
-		return copyFileContext(ctx, path, dst, info.Mode())
+		return enqueue(copyTask{path, dst, info.Mode()})
 	})
-	if err != nil {
+	// Closing the queue and joining all workers is mandatory even on errors:
+	// never remove a directory while another goroutine can still write it.
+	if jobs != nil {
+		close(jobs)
+		wg.Wait()
+	}
+	if err := ctx.Err(); err != nil {
 		cleanup()
 		return "", nil, err
+	}
+	if firstCopyErr != nil {
+		cleanup()
+		return "", nil, firstCopyErr
+	}
+	if walkErr != nil {
+		cleanup()
+		return "", nil, walkErr
 	}
 	return tmp, cleanup, nil
 }
@@ -840,20 +937,28 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 func copyFileContext(ctx context.Context, src, dst string, mode os.FileMode) error {
+	_, err := copyFileWithCloneOption(ctx, src, dst, mode, true)
+	return err
+}
+
+// copyFileWithCloneOption returns whether a filesystem clone succeeded.
+// This allows a sandbox-copy worker to stop retrying an unsupported clone
+// on every small file, without weakening the byte-copy fallback.
+func copyFileWithCloneOption(ctx context.Context, src, dst string, mode os.FileMode, cloneAllowed bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
-	if tryReflink(dst, src) {
-		return os.Chmod(dst, mode.Perm())
+	if cloneAllowed && tryReflink(dst, src) {
+		return true, os.Chmod(dst, mode.Perm())
 	}
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer in.Close()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 	if err != nil {
-		return err
+		return false, err
 	}
 	buf := make([]byte, 32<<10)
 	var cpErr error
@@ -879,7 +984,7 @@ func copyFileContext(ctx context.Context, src, dst string, mode os.FileMode) err
 	}
 	closeErr := out.Close()
 	if cpErr != nil {
-		return cpErr
+		return false, cpErr
 	}
-	return closeErr
+	return false, closeErr
 }
