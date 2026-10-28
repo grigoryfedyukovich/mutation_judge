@@ -102,6 +102,7 @@ Important flags:
 | `--narrow-test-scope` | Run each mutant only against tests that can observe it, computed from the module's dependency graph, instead of the full pattern set every time; opt-in, see `docs/performance.md` |
 | `--coverage-test-selection` | Select ordinary tests whose baseline coverage reaches the mutation, while retaining all runnable examples and fuzz seeds in observing packages; composes with `--narrow-test-scope`. Opt-in and expensive (profiles top-level ordinary tests individually); see `docs/performance.md` |
 | `--workers N` | Run up to N mutants concurrently; every mutant gets a fresh sandbox copied from the same input snapshot; default 1, see `docs/performance.md` |
+| `--stream-results` | Stream JSON/text results from a temporary on-disk spool instead of retaining all completed mutants; enabled by default for JSON/text. Use `--stream-results=false` to opt out; HTML/SARIF/GitHub formats retain in-memory rendering. |
 
 A successful analysis returns `0` regardless of survivors. Invalid input and baseline failures return `2`; internal failures return `3`; an enabled CI score policy uses its configured code.
 

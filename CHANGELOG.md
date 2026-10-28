@@ -139,3 +139,12 @@
 - Documentation audit: fixed the functional-specification inconsistency that said backend timeouts produce `UNKNOWN` (implementation and rest of the docs already used first-class `TIMEOUT`).
 - Packaging: removed macOS `.DS_Store` metadata from the distribution tree.
 - Confirmed the v0.1.2 review-resolution fixes still hold; all unit and integration tests pass on Go 1.22+.
+
+### R07-S3 — Streaming mutation results
+
+- Stream ordered mutant results to an automatically cleaned disk spool for JSON
+  and text CLI reports (enabled by default; opt out with `--stream-results=false`).
+- Calculate score and verdict totals incrementally; bound parallel out-of-order
+  results to batches of at most twice the worker count.
+- Keep the `Engine.Analyze` in-memory API and non-JSON/text report formats
+  unchanged. Add streaming and empty-report regression coverage.

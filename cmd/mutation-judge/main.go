@@ -18,6 +18,7 @@ import (
 	"github.com/example/mutation-judge/internal/config"
 	"github.com/example/mutation-judge/internal/model"
 	"github.com/example/mutation-judge/internal/report"
+	"github.com/example/mutation-judge/internal/resultspool"
 )
 
 const version = "0.1.3"
@@ -110,6 +111,7 @@ func run() (code int) {
 	ciCode := fs.Int("ci-exit-code", cfg.CIExitCode, "exit code used for CI policy failure")
 	includeGenerated := fs.Bool("include-generated", cfg.IncludeGenerated, "include generated Go source")
 	progress := fs.Bool("progress", cfg.Progress, "emit one progress line per mutant to stderr")
+	streamResults := fs.Bool("stream-results", true, "spool results to disk for JSON/text reports (default on); false retains all results in memory")
 	narrowTestScope := fs.Bool("narrow-test-scope", cfg.NarrowTestScope, "run each mutant only against tests that can observe it, computed from the module's own dependency graph, instead of the full pattern set every time; opt-in, see docs/performance.md")
 	coverageTestSelection := fs.Bool("coverage-test-selection", cfg.CoverageTestSelection, "run each mutant only against the specific tests whose baseline coverage reaches its span, on top of any --narrow-test-scope package narrowing; opt-in and expensive (profiles every top-level test individually up front), see docs/performance.md")
 	workers := fs.Int("workers", cfg.Workers, "run this many mutants concurrently, each in its own sandbox; 0 or 1 (the default) runs sequentially, unchanged from earlier versions; see docs/performance.md")
@@ -207,7 +209,16 @@ func run() (code int) {
 		signal.Stop(sigCh)
 		cancel()
 	}()
-	r, err := engine.Analyze(ctx, analysis.Request{CWD: cwd, Patterns: patterns, Config: cfg})
+	var r model.Report
+	var spool *resultspool.Spool
+	if *streamResults && (cfg.Format == "json" || cfg.Format == "text") {
+		r, spool, err = engine.AnalyzeSpool(ctx, analysis.Request{CWD: cwd, Patterns: patterns, Config: cfg})
+		if spool != nil {
+			defer spool.Close()
+		}
+	} else {
+		r, err = engine.Analyze(ctx, analysis.Request{CWD: cwd, Patterns: patterns, Config: cfg})
+	}
 	interrupted := ctx.Err() != nil
 	var caughtSignal os.Signal
 	if interrupted {
@@ -247,11 +258,17 @@ func run() (code int) {
 		}
 		dst = f
 	}
-	if err := report.RenderMeasured(dst, cfg.Format, &r); err != nil {
+	var renderErr error
+	if spool != nil {
+		renderErr = report.RenderSpoolMeasured(dst, cfg.Format, &r, spool)
+	} else {
+		renderErr = report.RenderMeasured(dst, cfg.Format, &r)
+	}
+	if renderErr != nil {
 		if f != nil {
 			_ = f.Close()
 		}
-		fmt.Fprintln(os.Stderr, "report error:", err)
+		fmt.Fprintln(os.Stderr, "report error:", renderErr)
 		return exitInternal
 	}
 	if f != nil {
@@ -270,7 +287,7 @@ func run() (code int) {
 		if jerr := appendJournalEntry(cwd, journalEntry{
 			Time: time.Now().UTC(), Signal: signalName(caughtSignal), Phase: "mutants",
 			ToolVersion: version, Patterns: patterns, Operators: cfg.Operators, ExitCode: exitInterrupted,
-			CompletedMutants: len(r.Results), RetainedMutants: retainedMutants(r),
+			CompletedMutants: completedMutants(r), RetainedMutants: retainedMutants(r),
 		}); jerr != nil {
 			fmt.Fprintln(os.Stderr, "warning: could not write interruption journal:", jerr)
 		}
@@ -335,4 +352,11 @@ func retainedMutants(r model.Report) int {
 		return v
 	}
 	return 0
+}
+
+func completedMutants(r model.Report) int {
+	if n, ok := r.Bounds["completed_mutants"].(int); ok {
+		return n
+	}
+	return len(r.Results)
 }

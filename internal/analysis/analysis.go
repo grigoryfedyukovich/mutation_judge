@@ -20,6 +20,7 @@ import (
 	"github.com/example/mutation-judge/internal/frontend"
 	"github.com/example/mutation-judge/internal/gitdiff"
 	"github.com/example/mutation-judge/internal/model"
+	"github.com/example/mutation-judge/internal/resultspool"
 	"github.com/example/mutation-judge/internal/runner"
 	"github.com/example/mutation-judge/internal/workspace"
 )
@@ -66,7 +67,28 @@ type preparedAnalysis struct {
 	perTestCoverage covermap.PerTest    // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
 }
 
+// Analyze preserves the in-memory API for integrations requiring direct Results access.
 func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) {
+	return e.analyze(ctx, req, nil)
+}
+
+// AnalyzeSpool persists completed results incrementally and returns report
+// metadata without an in-memory Results slice. Callers must Close the spool.
+// Only the CLI's JSON/text streaming renderers currently consume this form.
+func (e Engine) AnalyzeSpool(ctx context.Context, req Request) (model.Report, *resultspool.Spool, error) {
+	spool, err := resultspool.New()
+	if err != nil {
+		return model.Report{}, nil, err
+	}
+	r, err := e.analyze(ctx, req, spool)
+	if err != nil {
+		_ = spool.Close()
+		return model.Report{}, nil, err
+	}
+	return r, spool, nil
+}
+
+func (e Engine) analyze(ctx context.Context, req Request, spool *resultspool.Spool) (model.Report, error) {
 	started := time.Now()
 	if req.Config.TotalTimeout > 0 {
 		var cancel context.CancelFunc
@@ -137,7 +159,17 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 		}
 	}
 
-	results, complete, executionMS, warnings, err := e.executeMutants(ctx, req, prepared, coverage, coverageKnown)
+	var results []model.Result
+	var streamedCount int
+	var streamedSummary model.Summary
+	var complete bool
+	var executionMS int64
+	var warnings []string
+	if spool == nil {
+		results, complete, executionMS, warnings, err = e.executeMutants(ctx, req, prepared, coverage, coverageKnown)
+	} else {
+		streamedCount, streamedSummary, complete, executionMS, warnings, err = e.executeMutantsSpool(ctx, req, prepared, coverage, coverageKnown, spool)
+	}
 	if err != nil {
 		return model.Report{}, err
 	}
@@ -156,6 +188,11 @@ func (e Engine) Analyze(ctx context.Context, req Request) (model.Report, error) 
 		warnings = append(warnings, "total analysis deadline exceeded; partial results cannot establish complete mutation coverage")
 	}
 	r := buildReport(e.Version, req, prepared, results, complete, baselineMS, executionMS, warnings, started)
+	if spool != nil {
+		r.Results = nil
+		r.Summary = streamedSummary
+		r.Bounds["completed_mutants"] = streamedCount
+	}
 	if deadlineExceeded {
 		r.Bounds["analysis_deadline_exceeded"] = true
 	}

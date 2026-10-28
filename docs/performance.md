@@ -517,3 +517,30 @@ Existing `FICLONE` cloning is Linux-only; on macOS and Windows this
 feature still copies bytes. This is a **bounded copy-path tuning change**,
 not filesystem-wide CoW on unsupported platforms, not a global RSS limit,
 and not a verified end-to-end mutation-analysis speedup.
+
+### Streaming results for large mutation runs (R07-S3)
+
+The CLI now uses an on-disk result spool for **JSON and text output** by
+ default (`--stream-results=true`). Completed mutant results are serialized to
+an automatically removed private temporary file rather than all retained in
+RAM; JSON/text output is then rendered sequentially from that file. This also
+avoids the previous second, full-length parallel results index. The score,
+verdict counts, interruption status and completion bounds are calculated as
+results finish. Results are written in deterministic discovery order even with
+multiple workers; execution advances through batches of at most twice the
+configured worker count to bound out-of-order buffering.
+
+Use `--stream-results=false` to restore the original in-memory execution path.
+For HTML, SARIF and GitHub annotation formats, the existing in-memory renderer
+remains in use regardless of this flag. `Engine.Analyze` also retains its
+existing in-memory `Report.Results` contract; `Engine.AnalyzeSpool` returns
+metadata and a closable spool for callers implementing streamed rendering.
+
+The spool uses temporary disk space approximately proportional to the total
+serialized result size. It is **not** a crash-recovery log or durable cache;
+it is deleted on normal cleanup. An external process kill may leave a temporary
+file, and OS or filesystem errors can still interrupt persistence. Mutation
+*discovery* still retains its mutant list in memory, and result size is bounded
+only by individual evidence limits. This change lowers memory proportional to
+the number of *completed results*, not the entire process RSS, and bounded
+batching may sacrifice some parallel throughput when a worker is slow.

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/example/mutation-judge/internal/model"
+	"github.com/example/mutation-judge/internal/resultspool"
 )
 
 //go:embed report.html.tmpl
@@ -67,13 +69,24 @@ func (w *errorWriter) printf(format string, args ...any) {
 }
 
 func renderText(dst io.Writer, r model.Report) error {
+	return renderTextIter(dst, r, func(fn func(model.Result) error) error {
+		for _, x := range r.Results {
+			if err := fn(x); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func renderTextIter(dst io.Writer, r model.Report, each func(func(model.Result) error) error) error {
 	status := "complete"
 	if !r.Complete {
 		status = "INCOMPLETE"
 	}
 	w := &errorWriter{w: dst}
 	w.printf("mutation-judge %s (%s)\npatterns: %s\nbound: max_mutants=%v, timeout=%v\n\n", r.ToolVersion, status, strings.Join(r.Patterns, " "), r.Bounds["max_mutants"], r.Bounds["per_mutant_timeout"])
-	for _, x := range r.Results {
+	iterErr := each(func(x model.Result) error {
 		cacheMark := ""
 		if x.Cached {
 			cacheMark = " [cached]"
@@ -106,6 +119,10 @@ func renderText(dst io.Writer, r model.Report) error {
 		if x.Verdict == model.VerdictEquivalent {
 			w.printf("  proof: %s\n", x.Mutation.EquivalentReason)
 		}
+		return w.err
+	})
+	if iterErr != nil {
+		return iterErr
 	}
 	if len(r.Warnings) > 0 {
 		w.printf("\nwarnings\n")
@@ -138,4 +155,79 @@ func formatAssertion(a model.Assertion) string {
 	}
 	b.WriteString(a.Message)
 	return b.String()
+}
+
+// RenderSpoolMeasured renders an ordered on-disk result stream without
+// constructing model.Report.Results or allocating a whole report buffer.
+// Only JSON and text have streaming implementations; other formats use
+// the in-memory API until a separate streaming renderer is added.
+func RenderSpoolMeasured(w io.Writer, format string, r *model.Report, spool *resultspool.Spool) error {
+	if format != "json" && format != "text" {
+		return fmt.Errorf("streamed results require json or text format (got %q)", format)
+	}
+	baseTotal := r.Timing.TotalMS
+	started := time.Now()
+	if err := renderSpool(io.Discard, format, *r, spool); err != nil {
+		return err
+	}
+	r.Timing.RenderingMS = time.Since(started).Milliseconds()
+	r.Timing.TotalMS = baseTotal + r.Timing.RenderingMS
+	return renderSpool(w, format, *r, spool)
+}
+
+func renderSpool(w io.Writer, format string, r model.Report, spool *resultspool.Spool) error {
+	if format == "text" {
+		return renderTextIter(w, r, spool.ForEach)
+	}
+	if format != "json" {
+		return fmt.Errorf("unsupported streaming format %q", format)
+	}
+	// Marshal only small report metadata. The empty results array provides a
+	// unique well-formed insertion point without serializing any result twice.
+	r.Results = []model.Result{}
+	metadata, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	marker := []byte("\n  \"results\": []")
+	idx := bytes.Index(metadata, marker)
+	if idx < 0 {
+		return fmt.Errorf("missing results field in report metadata")
+	}
+	split := idx + len(marker) - 2 // replace exactly the empty [] value
+	if _, err := w.Write(metadata[:split]); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "[\n"); err != nil {
+		return err
+	}
+	first := true
+	err = spool.ForEach(func(r model.Result) error {
+		if !first {
+			if _, err := io.WriteString(w, ",\n"); err != nil {
+				return err
+			}
+		}
+		first = false
+		data, err := json.MarshalIndent(r, "    ", "  ")
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, "    "); err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "\n  ]"); err != nil {
+		return err
+	}
+	if _, err := w.Write(metadata[split+2:]); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "\n")
+	return err
 }
