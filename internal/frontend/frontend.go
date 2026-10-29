@@ -43,13 +43,12 @@ func Discover(root string, files []string, opts Options) ([]model.Mutation, erro
 	return mutations, err
 }
 
-// DiscoverLimited examines the complete source universe but retains only the
-// first limit candidates in the same stable order as Discover (file, offset,
-// ID). It returns the full discovery count for accurate report bounds. A zero
-// limit means unlimited. In bounded mode, patches for discarded candidates
-// are never built or retained; only one file's temporary candidates remain
-// live at a time. All files are still parsed and checked for duplicate IDs
-// and syntax errors, even after the retention limit is reached.
+// DiscoverLimited examines the entire source universe and returns the first
+// limit candidates in stable file/offset/ID order. With a positive limit,
+// only O(limit) candidates are retained even if a single file generates
+// millions of mutation sites. A zero limit preserves the full-result API.
+// Every candidate is still counted and checked for duplicate IDs, and every
+// source file is parsed even after the output bound has been reached.
 func DiscoverLimited(root string, files []string, opts Options, limit int) ([]model.Mutation, int, error) {
 	if limit < 0 {
 		return nil, 0, fmt.Errorf("negative discovery limit %d", limit)
@@ -60,8 +59,26 @@ func DiscoverLimited(root string, files []string, opts Options, limit int) ([]mo
 	ordered := append([]string(nil), files...)
 	sort.Strings(ordered)
 	var retained []model.Mutation
-	seenIDs := make(map[string]bool)
+	// IDs are 48-bit hexadecimal digests prefixed with "M-". Using the
+	// decoded integer rather than the 14-byte string avoids one map string
+	// header/allocation for each discarded mutation, without weakening the
+	// existing collision check or changing any external mutation ID.
+	seenIDs := make(map[uint64]struct{})
 	total := 0
+	checkID := func(id string) error {
+		if len(id) != 14 || !strings.HasPrefix(id, "M-") {
+			return fmt.Errorf("internal invariant: malformed mutation ID %q", id)
+		}
+		key, err := strconv.ParseUint(id[2:], 16, 48)
+		if err != nil {
+			return fmt.Errorf("internal invariant: malformed mutation ID %q: %w", id, err)
+		}
+		if _, ok := seenIDs[key]; ok {
+			return fmt.Errorf("internal invariant: duplicate mutation ID %s", id)
+		}
+		seenIDs[key] = struct{}{}
+		return nil
+	}
 	for _, rel := range ordered {
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		src, err := os.ReadFile(path)
@@ -71,52 +88,86 @@ func DiscoverLimited(root string, files []string, opts Options, limit int) ([]mo
 		if !opts.IncludeGenerated && isGenerated(src) {
 			continue
 		}
-		ms, err := discoverFile(rel, src, opts)
+		if limit == 0 {
+			// The historical public API returns every mutant. Emit into the
+			// final result slice directly, sorting just the appended region;
+			// this avoids keeping a redundant per-file candidate array alive
+			// alongside the final result slice for large unbounded runs.
+			start := len(retained)
+			if err := discoverFileEmit(rel, src, opts, func(m model.Mutation) {
+				retained = append(retained, m)
+			}); err != nil {
+				return nil, 0, err
+			}
+			ms := retained[start:]
+			sort.Slice(ms, func(i, j int) bool { return mutationLess(ms[i], ms[j]) })
+			for _, m := range ms {
+				if err := checkID(m.ID); err != nil {
+					return nil, 0, err
+				}
+			}
+			total += len(ms)
+			continue
+		}
+
+		// The AST visitor emits candidates as they are discovered (which is
+		// *not* source order for all operators). Maintain a maximum heap of
+		// only the first remaining slots in the desired total order. Even
+		// when no slots remain, visit every candidate for counting and
+		// duplicate-ID validation; no per-file candidate slice is built.
+		selection := boundedSelection{limit: limit - len(retained)}
+		var visitErr error
+		err = discoverFileEmit(rel, src, opts, func(m model.Mutation) {
+			if visitErr != nil {
+				return
+			}
+			if visitErr = checkID(m.ID); visitErr != nil {
+				return
+			}
+			total++
+			selection.offer(m)
+		})
 		if err != nil {
 			return nil, 0, err
 		}
-		sort.Slice(ms, func(i, j int) bool {
-			if ms[i].Span.StartByte != ms[j].Span.StartByte {
-				return ms[i].Span.StartByte < ms[j].Span.StartByte
-			}
-			return ms[i].ID < ms[j].ID
-		})
-		for _, m := range ms {
-			if seenIDs[m.ID] {
-				return nil, 0, fmt.Errorf("internal invariant: duplicate mutation ID %s", m.ID)
-			}
-			seenIDs[m.ID] = true
+		if visitErr != nil {
+			return nil, 0, visitErr
 		}
-		total += len(ms)
-		take := len(ms)
-		if limit > 0 && take > limit-len(retained) {
-			take = limit - len(retained)
-		}
-		if take > 0 {
-			if opts.deferDiff {
-				lines := newLineIndex(src)
-				for i := 0; i < take; i++ {
-					m := &ms[i]
-					m.Diff = unifiedDiff(rel, src, lines, m.Span.StartByte, m.Span.EndByte, m.Replacement)
-				}
+		ms := selection.sorted()
+		if len(ms) != 0 {
+			lines := newLineIndex(src)
+			for i := range ms {
+				m := &ms[i]
+				m.Diff = unifiedDiff(rel, src, lines, m.Span.StartByte, m.Span.EndByte, m.Replacement)
 			}
-			retained = append(retained, ms[:take]...)
+			retained = append(retained, ms...)
 		}
 	}
 	return retained, total, nil
 }
 
 func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error) {
+	var out []model.Mutation
+	err := discoverFileEmit(rel, src, opts, func(m model.Mutation) { out = append(out, m) })
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// discoverFileEmit yields mutations synchronously without accumulating a
+// per-file candidate slice. The visitor itself is intentionally unchanged,
+// preserving all operator safeguards and the existing ID derivation.
+func discoverFileEmit(rel string, src []byte, opts Options, emit func(model.Mutation)) error {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, rel, src, parser.ParseComments)
 	if err != nil {
-		return nil, fmt.Errorf("%s: parse error: %w; run gofmt or fix the reported syntax before mutation analysis", rel, err)
+		return fmt.Errorf("%s: parse error: %w; run gofmt or fix the reported syntax before mutation analysis", rel, err)
 	}
 	var lineIndex lineOffsets
 	if !opts.deferDiff {
 		lineIndex = newLineIndex(src)
 	}
-	var out []model.Mutation
 	add := func(op, rule string, start, end token.Pos, replacement, description, suggestion, equivalentReason string) {
 		sp := span(fset, rel, start, end)
 		if !overlapsChanged(sp, opts.ChangedLines) {
@@ -139,7 +190,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 		if !opts.deferDiff {
 			m.Diff = unifiedDiff(rel, src, lineIndex, sp.StartByte, sp.EndByte, replacement)
 		}
-		out = append(out, m)
+		emit(m)
 	}
 	// equivalentGuard maps a comparison's *ast.BinaryExpr node to the
 	// human-readable reason it's provably equivalent under boundary
@@ -596,7 +647,7 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 		}
 		return true
 	})
-	return out, nil
+	return nil
 }
 
 func booleanDeletionSuggestion(op token.Token, kept, dropped string) string {

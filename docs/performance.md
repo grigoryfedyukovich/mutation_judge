@@ -574,3 +574,34 @@ filesystem. The improvements apply when a positive `--max-mutants` bound is
 used and are not a universal peak-RSS guarantee: individual files still
 materialize their local candidates, the module-wide ID set remains in memory
 for duplicate checking, and Go AST/package data have separate memory costs.
+
+### R07-S5: bounded candidates within large source files
+
+Bounded discovery (`--max-mutants N` where N > 0) now emits candidates
+from the AST visitor into a maximum heap holding at most the **remaining N**
+retained candidates. This avoids constructing a complete per-file mutation
+slice even when a single large Go file contains thousands of candidate sites.
+The heap is sorted only after visiting the entire file, preserving historical
+file/byte-offset/ID ordering and exact mutation patches. Every candidate is
+still counted and checked for duplicate IDs, and later files are still parsed
+for errors. Discarded candidate patches are never materialized.
+
+Unbounded discovery now appends directly to the final result slice and sorts
+only the current file's appended region. Both paths use compact numeric
+48-bit mutation IDs for duplicate detection, avoiding a second map of string
+keys for all discovered mutants. The 48-bit identity and collision behavior
+are unchanged; the representation is internal only.
+
+A controlled Go benchmark on one source file containing 2,000 functions,
+with the same operator set and `--max-mutants 20`, measured **17.10 MB/op**
+and **43.3 ms/op** before R07-S5 versus **8.77 MB/op** and **34.0 ms/op**
+after R07-S5 (5 runs per configuration on Linux amd64). These are discovery
+allocation and timing measurements, not process peak-RSS or full-analysis
+benchmarks; results depend on hardware and workload.
+
+**Limitations:** Parsing a Go file still requires the full source bytes and
+an AST in memory; exact duplicate detection still needs one compact key per
+discovered ID. The unbounded public `Discover` API returns all candidates and
+patches, so its retained result memory necessarily scales with the total
+number of mutations. Truly out-of-core unlimited discovery would require a
+disk-backed mutation iterator and changes to analysis scheduling and APIs.

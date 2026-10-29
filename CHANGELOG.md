@@ -1,3 +1,10 @@
+## Unreleased — R07-S5 discovery memory improvements
+
+- Stream per-file mutation candidates into a bounded max heap when `--max-mutants` is set, preserving IDs, ordering, and patches without retaining discarded candidates.
+- Append unbounded discovery directly into its final result slice, avoiding a redundant per-file candidate slice.
+- Represent duplicate-check keys as compact 48-bit integers without changing external mutation IDs or collision detection.
+- Add large-single-file regression tests, heap ordering tests, and allocation benchmarks.
+
 ## Unreleased — R07-S4 bounded mutation discovery
 
 - Use per-file sorted mutation discovery to retain only the first `--max-mutants N` candidates, instead of building and retaining the entire module's mutation/diff list before truncating it.
