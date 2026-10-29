@@ -605,3 +605,36 @@ discovered ID. The unbounded public `Discover` API returns all candidates and
 patches, so its retained result memory necessarily scales with the total
 number of mutations. Truly out-of-core unlimited discovery would require a
 disk-backed mutation iterator and changes to analysis scheduling and APIs.
+
+### R07-S6 — disk-backed unlimited discovery for streaming reports
+
+For default JSON/text runs (`--stream-results=true`) with `--max-mutants 0`,
+mutation discovery now uses an ordered temporary disk spool instead of a
+`[]Mutation` containing every candidate. An AST visitor emits candidates into
+512-item sorted runs. A bounded 16-way external merge reconstructs the existing
+file/offset/ID ordering; patches are materialized only when candidates are
+written to the final spool. Run compaction bounds the number of pending chunk
+handles and metadata across extremely large source files.
+
+Mutation ID collision checking is also disk-backed: IDs are stored as compact
+integers, externally sorted in 8,192-key chunks, then checked globally for
+duplicates before mutant execution. The execution phase reads at most two times
+the configured worker count of candidates and uses the existing ordered result
+spool; verdicts, scores, and full report output retain their previous meaning.
+Temporary discovery and ID-sort files are removed on completion, error, or
+cooperative cancellation. Failure to spool or read candidates is a hard error,
+not a silent partial analysis.
+
+`Engine.Analyze` and `frontend.Discover` remain intentionally in-memory APIs,
+so callers explicitly requesting all mutation objects can still see memory
+scale with their count. The bounded `--max-mutants N` path continues using the
+R07-S5 in-memory heap, avoiding unnecessary disk I/O for small limits. JSON/text
+streaming is still controlled by `--stream-results`; HTML, SARIF, and GitHub
+rendering remain in-memory. Disk consumption grows with candidate count, and
+Go parsing/AST storage still scales with the size of the largest source file.
+This is not a system-wide peak-RSS guarantee.
+
+Regression coverage includes 8,800 candidates in one file (requiring multiple
+merge passes), comparison with the unlimited `Discover` output, duplicate-ID
+validation across sort chunks, cancellation/parse-error cleanup, and analysis
+results with both sequential and parallel workers.

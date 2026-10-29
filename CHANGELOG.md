@@ -162,3 +162,13 @@
   results to batches of at most twice the worker count.
 - Keep the `Engine.Analyze` in-memory API and non-JSON/text report formats
   unchanged. Add streaming and empty-report regression coverage.
+
+### R07-S6 — Unlimited discovery spooling
+
+- Stream unlimited mutation discovery into a temporary disk spool for default
+  JSON/text CLI runs; preserve the historical ordering, patches, and IDs.
+- Externally merge bounded 512-candidate runs with 16-way compaction; validate
+  all IDs via disk-backed sorting without keeping a global map in memory.
+- Feed discovery spools directly into bounded execution batches and existing
+  incremental result scoring/rendering; remove temporary files on all paths.
+- Keep in-memory API, capped discovery, and nonstreaming report formats intact.

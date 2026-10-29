@@ -20,6 +20,7 @@ import (
 	"github.com/example/mutation-judge/internal/frontend"
 	"github.com/example/mutation-judge/internal/gitdiff"
 	"github.com/example/mutation-judge/internal/model"
+	"github.com/example/mutation-judge/internal/mutantspool"
 	"github.com/example/mutation-judge/internal/resultspool"
 	"github.com/example/mutation-judge/internal/runner"
 	"github.com/example/mutation-judge/internal/workspace"
@@ -51,6 +52,7 @@ type preparedAnalysis struct {
 	sandbox         string
 	cleanup         func()
 	mutants         []model.Mutation
+	mutationSpool   *mutantspool.Spool // non-nil for disk-backed unlimited discovery
 	discovered      int
 	parsingMS       int64
 	sourceDigest    string
@@ -65,6 +67,13 @@ type preparedAnalysis struct {
 	testScopes      map[string][]string // package import path -> observing test packages; resolved for scope/coverage selection
 	pkgs            []workspace.Package // resolved go test package universe; also used for per-test coverage and cache identity
 	perTestCoverage covermap.PerTest    // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
+}
+
+func (p preparedAnalysis) mutantCount() int {
+	if p.mutationSpool != nil {
+		return p.mutationSpool.Len()
+	}
+	return len(p.mutants)
 }
 
 // Analyze preserves the in-memory API for integrations requiring direct Results access.
@@ -121,11 +130,16 @@ func (e Engine) analyze(ctx context.Context, req Request, spool *resultspool.Spo
 		return model.Report{}, err
 	}
 
-	prepared, err := e.prepareContext(prepCtx, req, toolchain)
+	prepared, err := e.prepareContextMode(prepCtx, req, toolchain, spool != nil && req.Config.MaxMutants == 0)
 	if err != nil {
 		return model.Report{}, err
 	}
-	defer prepared.cleanup()
+	defer func() {
+		if prepared.mutationSpool != nil {
+			_ = prepared.mutationSpool.Close()
+		}
+		prepared.cleanup()
+	}()
 	// The preparation deadline must not curtail tests once discovery is
 	// complete; the entire analysis deadline (if set) remains active.
 	prepCancel()
@@ -279,6 +293,10 @@ func (e Engine) prepare(req Request, toolchain runner.ToolchainInfo) (preparedAn
 }
 
 func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runner.ToolchainInfo) (preparedAnalysis, error) {
+	return e.prepareContextMode(ctx, req, toolchain, false)
+}
+
+func (e Engine) prepareContextMode(ctx context.Context, req Request, toolchain runner.ToolchainInfo, diskDiscovery bool) (preparedAnalysis, error) {
 	root, err := workspace.ModuleRootContext(ctx, req.CWD)
 	if err != nil {
 		return preparedAnalysis{}, err
@@ -361,11 +379,26 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	for _, op := range req.Config.Operators {
 		opset[op] = true
 	}
-	mutants, discovered, err := frontend.DiscoverLimited(snapshot, files, frontend.Options{
+	opts := frontend.Options{
 		Operators:        opset,
 		IncludeGenerated: req.Config.IncludeGenerated,
 		ChangedLines:     changed,
-	}, req.Config.MaxMutants)
+	}
+	var mutants []model.Mutation
+	var mutationSpool *mutantspool.Spool
+	var discovered int
+	if diskDiscovery {
+		mutationSpool, discovered, err = frontend.DiscoverToDisk(ctx, snapshot, files, opts)
+		if mutationSpool != nil {
+			defer func() {
+				if !preparedOK {
+					_ = mutationSpool.Close()
+				}
+			}()
+		}
+	} else {
+		mutants, discovered, err = frontend.DiscoverLimited(snapshot, files, opts, req.Config.MaxMutants)
+	}
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
@@ -402,7 +435,7 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	preparedOK = true
 	return preparedAnalysis{
 		root: root, workRel: filepath.ToSlash(workRel), sandbox: snapshot, cleanup: cleanup,
-		mutants: mutants, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
+		mutants: mutants, mutationSpool: mutationSpool, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
 		environment: environment, environmentHash: environmentHash, cacheSafe: cacheSafe, cacheWarning: cacheWarning,
 		backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
 		filePackage: filePackage, testScopes: testScopes, pkgs: pkgs,
@@ -942,7 +975,7 @@ func buildReport(toolVersion string, req Request, p preparedAnalysis, results []
 			"max_mutants":                req.Config.MaxMutants,
 			"per_mutant_timeout":         req.Config.Timeout.String(),
 			"discovered_before_bound":    p.discovered,
-			"retained_after_bound":       len(p.mutants),
+			"retained_after_bound":       p.mutantCount(),
 			"completed_mutants":          len(results),
 			"backend_name":               p.backendName,
 			"backend_version":            p.backendVersion,

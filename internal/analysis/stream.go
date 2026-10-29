@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"time"
@@ -83,8 +84,9 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 	if workers < 2 {
 		workers = 1
 	}
-	if workers > len(p.mutants) {
-		workers = len(p.mutants)
+	count := p.mutantCount()
+	if workers > count {
+		workers = count
 	}
 	// Batch at most 2*workers mutants. A slow early mutant cannot cause
 	// unbounded later results to accumulate while waiting for ordered output.
@@ -92,14 +94,25 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 	if batchSize < 1 {
 		batchSize = 1
 	}
-	for start := 0; start < len(p.mutants); start += batchSize {
+	var nextMutation func(int) (model.Mutation, error)
+	if p.mutationSpool != nil {
+		reader, err := p.mutationSpool.Reader()
+		if err != nil {
+			return 0, model.Summary{}, false, 0, nil, err
+		}
+		defer reader.Close()
+		nextMutation = func(int) (model.Mutation, error) { return reader.Next() }
+	} else {
+		nextMutation = func(i int) (model.Mutation, error) { return p.mutants[i], nil }
+	}
+	for start := 0; start < count; start += batchSize {
 		if ctx.Err() != nil {
 			complete = false
 			break
 		}
 		end := start + batchSize
-		if end > len(p.mutants) {
-			end = len(p.mutants)
+		if end > count {
+			end = count
 		}
 		type outcome struct {
 			result   model.Result
@@ -109,6 +122,13 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 			present  bool
 		}
 		out := make([]outcome, end-start)
+		batch := make([]model.Mutation, end-start)
+		for i := range batch {
+			batch[i], err = nextMutation(start + i)
+			if err != nil {
+				return 0, model.Summary{}, false, 0, nil, fmt.Errorf("read mutation %d: %w", start+i, err)
+			}
+		}
 		batchCtx, cancel := context.WithCancel(ctx)
 		work := make(chan int)
 		var wg sync.WaitGroup
@@ -123,10 +143,10 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 					if batchCtx.Err() != nil {
 						continue
 					}
-					mut := p.mutants[idx]
+					mut := batch[idx-start]
 					if e.Progress != nil {
 						progressMu.Lock()
-						e.Progress(Progress{Index: idx + 1, Total: len(p.mutants), Mutation: mut})
+						e.Progress(Progress{Index: idx + 1, Total: count, Mutation: mut})
 						progressMu.Unlock()
 					}
 					r, executed, cacheErr, err := e.runOneMutant(batchCtx, req, p, store, cfgJSON, mut, coverage, coverageKnown)
@@ -177,6 +197,14 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 	}
 	if ctx.Err() != nil {
 		complete = false
+	}
+	if complete && p.mutationSpool != nil {
+		if _, tailErr := nextMutation(count); tailErr != io.EOF {
+			if tailErr == nil {
+				tailErr = fmt.Errorf("unexpected mutation after discovery count")
+			}
+			return 0, model.Summary{}, false, 0, nil, fmt.Errorf("validate mutation spool: %w", tailErr)
+		}
 	}
 	var warnings []string
 	if writeFailures > 0 {
