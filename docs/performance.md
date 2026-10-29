@@ -544,3 +544,33 @@ file, and OS or filesystem errors can still interrupt persistence. Mutation
 only by individual evidence limits. This change lowers memory proportional to
 the number of *completed results*, not the entire process RSS, and bounded
 batching may sacrifice some parallel throughput when a worker is slow.
+
+
+### R07-S4 — bounded memory for bounded mutation discovery
+
+`--max-mutants N` previously built and held every candidate's metadata and
+unified patch before taking the first `N`. Discovery now visits files in
+canonical path order, sorts candidates by byte offset and mutation ID per
+file, then retains only the first `N` candidates across files. In bounded
+mode, patches for discarded candidates are **never generated**; patches for
+retained candidates are generated against the same source bytes and preserve
+the exact IDs, ordering, and JSON/text evidence as unlimited discovery. The
+full discovered count remains in `bounds.discovered_before_bound`, and every
+file remains subject to syntax and duplicate-ID checks after the bound is
+reached. `--max-mutants 0` still materializes all candidates.
+
+Run the focused benchmark on your machine:
+
+```bash
+go test ./internal/frontend -run '^$' -bench '^BenchmarkR07S4Discovery' -benchmem -benchtime=3x
+```
+
+For the synthetic 25-file / 1,500-function fixture on the development Linux
+container (three iterations each), allocation fell from approximately
+**25.7 MB/op (unlimited)** to **9.3 MB/op (`max20`)**; measured duration
+fell from about **46 ms/op** to **20 ms/op**. These figures describe
+*discovery only*, not test execution, and are specific to this corpus and
+filesystem. The improvements apply when a positive `--max-mutants` bound is
+used and are not a universal peak-RSS guarantee: individual files still
+materialize their local candidates, the module-wide ID set remains in memory
+for duplicate checking, and Go AST/package data have separate memory costs.

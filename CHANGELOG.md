@@ -1,3 +1,10 @@
+## Unreleased — R07-S4 bounded mutation discovery
+
+- Use per-file sorted mutation discovery to retain only the first `--max-mutants N` candidates, instead of building and retaining the entire module's mutation/diff list before truncating it.
+- Defer contextual unified-diff construction in bounded mode, materializing exact patches only for retained mutants. Continue visiting and validating every source file, preserving the accurate full discovery count, duplicate-ID checks, parsing errors, mutation IDs and ordering.
+- Keep `--max-mutants 0` (unlimited) and the public `frontend.Discover` API unchanged. Add order/patch-equivalence and error-preservation regressions, as well as an allocation benchmark.
+- This reduces bounded-discovery allocations; it does not bound memory for a single large source file, all discovered IDs, module/package graphs, or unlimited discovery.
+
 ## Unreleased — R07-S2 sandbox-copy tuning
 
 - Preserve the existing Linux `FICLONE` copy-on-write path and byte-for-byte fallback; do not introduce writable hard links or narrow the copied input tree.

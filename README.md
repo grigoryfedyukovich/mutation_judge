@@ -92,7 +92,7 @@ Important flags:
 | `--timeout DURATION` | Per-baseline and per-mutant command deadline |
 | `--preparation-timeout DURATION` | Wall-clock budget for toolchain detection and input preparation; default `2m`, `0` disables |
 | `--total-timeout DURATION` | Optional wall-clock budget for the entire analysis; default `0` (off). An expired budget fails and a partial report is emitted if execution had begun |
-| `--max-mutants N` | Deterministic execution bound; `0` is unlimited |
+| `--max-mutants N` | Deterministic discovery/retention and execution bound; only selected mutants retain patches; `0` is unlimited |
 | `--format` | `text`, `json`, `html`, `sarif` (GitHub code scanning), or `github` (inline PR annotations via workflow commands, no upload step) |
 | `--output PATH` | Write the report to a file |
 | `--no-cache` | Disable content-addressed result reuse |

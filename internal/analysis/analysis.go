@@ -361,11 +361,11 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	for _, op := range req.Config.Operators {
 		opset[op] = true
 	}
-	mutants, err := frontend.Discover(snapshot, files, frontend.Options{
+	mutants, discovered, err := frontend.DiscoverLimited(snapshot, files, frontend.Options{
 		Operators:        opset,
 		IncludeGenerated: req.Config.IncludeGenerated,
 		ChangedLines:     changed,
-	})
+	}, req.Config.MaxMutants)
 	if err != nil {
 		return preparedAnalysis{}, err
 	}
@@ -373,10 +373,6 @@ func (e Engine) prepareContext(ctx context.Context, req Request, toolchain runne
 	// its deadline, do not admit the resulting snapshot as a valid run.
 	if err := ctx.Err(); err != nil {
 		return preparedAnalysis{}, fmt.Errorf("preparation deadline or cancellation: %w", err)
-	}
-	discovered := len(mutants)
-	if req.Config.MaxMutants > 0 && len(mutants) > req.Config.MaxMutants {
-		mutants = mutants[:req.Config.MaxMutants]
 	}
 	parsingMS := time.Since(parseStart).Milliseconds()
 

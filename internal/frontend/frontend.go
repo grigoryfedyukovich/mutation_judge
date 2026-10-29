@@ -31,44 +31,79 @@ type Options struct {
 	// cross-file equivalence is ever claimed.
 	root string
 	pkgs *pkgCache
+	// deferDiff omits patch generation until the bounded discoverer knows
+	// which mutations it will retain. Not part of the public options API.
+	deferDiff bool
 }
 
+// Discover returns every candidate with its fully materialized patch. Its
+// order and IDs are part of the report compatibility contract.
 func Discover(root string, files []string, opts Options) ([]model.Mutation, error) {
+	mutations, _, err := DiscoverLimited(root, files, opts, 0)
+	return mutations, err
+}
+
+// DiscoverLimited examines the complete source universe but retains only the
+// first limit candidates in the same stable order as Discover (file, offset,
+// ID). It returns the full discovery count for accurate report bounds. A zero
+// limit means unlimited. In bounded mode, patches for discarded candidates
+// are never built or retained; only one file's temporary candidates remain
+// live at a time. All files are still parsed and checked for duplicate IDs
+// and syntax errors, even after the retention limit is reached.
+func DiscoverLimited(root string, files []string, opts Options, limit int) ([]model.Mutation, int, error) {
+	if limit < 0 {
+		return nil, 0, fmt.Errorf("negative discovery limit %d", limit)
+	}
 	opts.root = root
 	opts.pkgs = newPkgCache(root)
-	var all []model.Mutation
-	for _, rel := range files {
+	opts.deferDiff = limit > 0
+	ordered := append([]string(nil), files...)
+	sort.Strings(ordered)
+	var retained []model.Mutation
+	seenIDs := make(map[string]bool)
+	total := 0
+	for _, rel := range ordered {
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		src, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if !opts.IncludeGenerated && isGenerated(src) {
 			continue
 		}
 		ms, err := discoverFile(rel, src, opts)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		all = append(all, ms...)
+		sort.Slice(ms, func(i, j int) bool {
+			if ms[i].Span.StartByte != ms[j].Span.StartByte {
+				return ms[i].Span.StartByte < ms[j].Span.StartByte
+			}
+			return ms[i].ID < ms[j].ID
+		})
+		for _, m := range ms {
+			if seenIDs[m.ID] {
+				return nil, 0, fmt.Errorf("internal invariant: duplicate mutation ID %s", m.ID)
+			}
+			seenIDs[m.ID] = true
+		}
+		total += len(ms)
+		take := len(ms)
+		if limit > 0 && take > limit-len(retained) {
+			take = limit - len(retained)
+		}
+		if take > 0 {
+			if opts.deferDiff {
+				lines := newLineIndex(src)
+				for i := 0; i < take; i++ {
+					m := &ms[i]
+					m.Diff = unifiedDiff(rel, src, lines, m.Span.StartByte, m.Span.EndByte, m.Replacement)
+				}
+			}
+			retained = append(retained, ms[:take]...)
+		}
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Span.File != all[j].Span.File {
-			return all[i].Span.File < all[j].Span.File
-		}
-		if all[i].Span.StartByte != all[j].Span.StartByte {
-			return all[i].Span.StartByte < all[j].Span.StartByte
-		}
-		return all[i].ID < all[j].ID
-	})
-	seenIDs := make(map[string]bool, len(all))
-	for _, mut := range all {
-		if seenIDs[mut.ID] {
-			return nil, fmt.Errorf("internal invariant: duplicate mutation ID %s", mut.ID)
-		}
-		seenIDs[mut.ID] = true
-	}
-	return all, nil
+	return retained, total, nil
 }
 
 func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error) {
@@ -77,7 +112,10 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 	if err != nil {
 		return nil, fmt.Errorf("%s: parse error: %w; run gofmt or fix the reported syntax before mutation analysis", rel, err)
 	}
-	lineIndex := newLineIndex(src)
+	var lineIndex lineOffsets
+	if !opts.deferDiff {
+		lineIndex = newLineIndex(src)
+	}
 	var out []model.Mutation
 	add := func(op, rule string, start, end token.Pos, replacement, description, suggestion, equivalentReason string) {
 		sp := span(fset, rel, start, end)
@@ -92,13 +130,16 @@ func discoverFile(rel string, src []byte, opts Options) ([]model.Mutation, error
 			return
 		}
 		id := mutationID(rel, sp.StartByte, op, rule, original, replacement)
-		out = append(out, model.Mutation{
+		m := model.Mutation{
 			ID: id, Operator: op, RuleID: rule, Span: sp,
 			Original: original, Replacement: replacement,
 			Description: description, Suggestion: suggestion,
-			Diff:             unifiedDiff(rel, src, lineIndex, sp.StartByte, sp.EndByte, replacement),
 			EquivalentReason: equivalentReason,
-		})
+		}
+		if !opts.deferDiff {
+			m.Diff = unifiedDiff(rel, src, lineIndex, sp.StartByte, sp.EndByte, replacement)
+		}
+		out = append(out, m)
 	}
 	// equivalentGuard maps a comparison's *ast.BinaryExpr node to the
 	// human-readable reason it's provably equivalent under boundary
