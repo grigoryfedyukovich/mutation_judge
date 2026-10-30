@@ -638,3 +638,45 @@ Regression coverage includes 8,800 candidates in one file (requiring multiple
 merge passes), comparison with the unlimited `Discover` output, duplicate-ID
 validation across sort chunks, cancellation/parse-error cleanup, and analysis
 results with both sequential and parallel workers.
+
+### R07-S7 — Bounded sliding-window scheduling and end-to-end RSS measurement
+
+The streaming execution path previously processed independent, fixed batches
+of `2 × workers` mutants. A slow final mutant prevented workers from starting
+any candidate in the next batch even if other workers had already finished.
+The path now schedules an ordered, sliding window containing **at most
+`4 × workers` outstanding mutations**, including queued, executing and
+completed-but-not-persisted mutations. As soon as a contiguous prefix has
+been durably written to the result spool, the coordinator reads and dispatches
+additional candidates. Result writing, score calculations and mutation-spool
+reading stay single-threaded; results are still written in discovery order.
+Cancellation and hard failures stop dispatch and join all workers. This change
+does not affect the existing in-memory API or change any mutation verdict.
+
+The wider window trades additional bounded buffering for fewer idle workers
+when mutants vary substantially in runtime. The focused synthetic benchmark
+(`go test ./internal/analysis -run '^$' -bench '^BenchmarkR07S7BoundarySkew$'
+-benchmem -benchtime=5x`) models ten batches of mixed 2 ms and 22 ms
+operations with four workers. On one Linux amd64 run, fixed batches averaged
+247 ms/iteration and the sliding window averaged 123 ms/iteration. This is a
+*synthetic scheduler* benchmark: it does not predict throughput improvement
+for uniform workloads or guarantee lower peak process RSS. Test coverage
+includes ordered verdict and score preservation, late dispatch across batch
+boundaries, the outstanding-work cap under a blocked head, cancellation,
+errors, and worker counts 1, 2, 3 and 8.
+
+For a reproducible **end-to-end** comparison of streaming and in-memory CLI
+execution on a generated Go module, run:
+
+```bash
+ go build -o /tmp/mutation-judge ./cmd/mutation-judge
+ bash scripts/benchmark-r07-s7.sh /tmp/mutation-judge 64 4 /tmp/mutation-judge-s7-bench
+```
+
+The script writes complete JSON reports and process wall-time/peak-RSS logs
+using GNU `/usr/bin/time` on Linux or BSD `/usr/bin/time -l` on macOS. It
+checks identical mutant IDs, verdicts, order and summary. Measurements include
+Go compilation, test execution, snapshot creation and external-process costs;
+they are workload-, cache- and platform-dependent and do **not** bound total
+process memory. Spool files use disk space proportional to mutation count,
+while file ASTs and package metadata continue to consume memory.

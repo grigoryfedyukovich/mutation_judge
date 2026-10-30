@@ -172,3 +172,5 @@
 - Feed discovery spools directly into bounded execution batches and existing
   incremental result scoring/rendering; remove temporary files on all paths.
 - Keep in-memory API, capped discovery, and nonstreaming report formats intact.
+
+- R07-S7: replace fixed streaming-result batches with a bounded sliding execution window to reduce worker idle time on uneven mutant runtimes; add reproducible end-to-end RSS/throughput benchmark and scheduling regressions.

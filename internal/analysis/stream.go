@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/example/mutation-judge/internal/cache"
@@ -88,12 +87,6 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 	if workers > count {
 		workers = count
 	}
-	// Batch at most 2*workers mutants. A slow early mutant cannot cause
-	// unbounded later results to accumulate while waiting for ordered output.
-	batchSize := workers * 2
-	if batchSize < 1 {
-		batchSize = 1
-	}
 	var nextMutation func(int) (model.Mutation, error)
 	if p.mutationSpool != nil {
 		reader, err := p.mutationSpool.Reader()
@@ -105,95 +98,18 @@ func (e Engine) executeMutantsSpool(ctx context.Context, req Request, p prepared
 	} else {
 		nextMutation = func(i int) (model.Mutation, error) { return p.mutants[i], nil }
 	}
-	for start := 0; start < count; start += batchSize {
-		if ctx.Err() != nil {
-			complete = false
-			break
+	var progress func(int, model.Mutation)
+	if e.Progress != nil {
+		progress = func(i int, mut model.Mutation) {
+			e.Progress(Progress{Index: i + 1, Total: count, Mutation: mut})
 		}
-		end := start + batchSize
-		if end > count {
-			end = count
-		}
-		type outcome struct {
-			result   model.Result
-			executed bool
-			cacheErr error
-			err      error
-			present  bool
-		}
-		out := make([]outcome, end-start)
-		batch := make([]model.Mutation, end-start)
-		for i := range batch {
-			batch[i], err = nextMutation(start + i)
-			if err != nil {
-				return 0, model.Summary{}, false, 0, nil, fmt.Errorf("read mutation %d: %w", start+i, err)
-			}
-		}
-		batchCtx, cancel := context.WithCancel(ctx)
-		work := make(chan int)
-		var wg sync.WaitGroup
-		var progressMu sync.Mutex
-		var errMu sync.Mutex
-		var firstErr error
-		for w := 0; w < workers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for idx := range work {
-					if batchCtx.Err() != nil {
-						continue
-					}
-					mut := batch[idx-start]
-					if e.Progress != nil {
-						progressMu.Lock()
-						e.Progress(Progress{Index: idx + 1, Total: count, Mutation: mut})
-						progressMu.Unlock()
-					}
-					r, executed, cacheErr, err := e.runOneMutant(batchCtx, req, p, store, cfgJSON, mut, coverage, coverageKnown)
-					if err != nil {
-						errMu.Lock()
-						if firstErr == nil {
-							firstErr = err
-						}
-						errMu.Unlock()
-						cancel()
-						continue
-					}
-					out[idx-start] = outcome{result: r, executed: executed, cacheErr: cacheErr, present: true}
-				}
-			}()
-		}
-		dispatchDone := make(chan struct{})
-		go func() {
-			defer close(dispatchDone)
-			defer close(work)
-			for idx := start; idx < end; idx++ {
-				select {
-				case work <- idx:
-				case <-batchCtx.Done():
-					return
-				}
-			}
-		}()
-		wg.Wait()
-		<-dispatchDone
-		cancel()
-		if firstErr != nil {
-			return 0, model.Summary{}, false, 0, nil, firstErr
-		}
-		for _, item := range out {
-			if !item.present {
-				complete = false
-				continue
-			}
-			if err := record(item.result, item.executed, item.cacheErr); err != nil {
-				return 0, model.Summary{}, false, 0, nil, fmt.Errorf("persist mutation result: %w", err)
-			}
-		}
-		if ctx.Err() != nil {
-			complete = false
-			break
-		}
+	}
+	complete, err = orderedWindow(ctx, count, workers, nextMutation, progress,
+		func(inner context.Context, mut model.Mutation) (model.Result, bool, error, error) {
+			return e.runOneMutant(inner, req, p, store, cfgJSON, mut, coverage, coverageKnown)
+		}, record)
+	if err != nil {
+		return 0, model.Summary{}, false, 0, nil, err
 	}
 	if ctx.Err() != nil {
 		complete = false
