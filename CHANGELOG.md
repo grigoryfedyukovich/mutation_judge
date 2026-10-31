@@ -1,3 +1,10 @@
+## Unreleased — R07-S9 adaptive mutation-ID validation
+
+- Keep up to 8,192 discovered mutation IDs in memory and validate them without creating temporary files; spill sorted binary runs only for larger discoveries.
+- Remove the unconditional raw-ID spool and its extra read/sort pass. Merge sorted runs incrementally with bounded 16-way fan-in and O(log N) run metadata, preserving duplicate checks across chunks and levels.
+- Use fixed-width binary I/O and a specialized merge heap to avoid per-ID interface allocations during disk merging. Preserve all external mutation IDs, discovery order, verdicts, and report semantics.
+- Add duplicate, threshold, cancellation, spill-failure, temporary-file cleanup, and large multi-run regression tests plus same-workload ID-validation benchmarks. No end-to-end memory or speedup claim is made.
+
 ## Unreleased — R07-S8 adaptive spooling for small runs
 
 - Buffer at most 64 serialized records and 256 KiB in each mutation/result spool before lazily spilling to a private JSONL file. Small runs avoid temporary files; large runs retain deterministic ordered disk-backed streaming.

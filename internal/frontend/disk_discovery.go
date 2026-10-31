@@ -44,7 +44,7 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 	sort.Strings(ordered)
 	// Write IDs to disk and validate them with an external sort after
 	// discovery, avoiding a heap map proportional to the mutant count.
-	ids, idErr := newDiskIDs()
+	ids, idErr := newDiskIDs(ctx)
 	if idErr != nil {
 		return nil, 0, idErr
 	}

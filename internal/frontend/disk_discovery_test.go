@@ -98,7 +98,7 @@ func TestR07S6DiscoveryCleanupAndCancellation(t *testing.T) {
 func TestR07S6ExternalIDValidation(t *testing.T) {
 	temp := t.TempDir()
 	t.Setenv("TMPDIR", temp)
-	ids, err := newDiskIDs()
+	ids, err := newDiskIDs(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -712,3 +712,37 @@ because the in-memory path encodes and decodes individual records. File I/O
 noise and workload shape can change these numbers, so this is not proof of
 end-to-end speed or RSS improvement. Large runs retain disk-backed streaming,
 and neither discovery ASTs nor test subprocess RSS is globally bounded.
+
+## R07-S9: adaptive mutation-ID validation
+
+The disk-backed discovery path previously wrote **every** 48-bit mutation ID
+as an eight-byte integer to a raw temporary file, even for a handful of
+mutants. After discovery it reread the entire file, sorted 8,192-key chunks,
+created temporary sorted runs, and performed additional merge passes to find
+duplicate IDs.
+
+R07-S9 validates discoveries containing **at most 8,192 IDs** in memory without
+creating ID-validation temporary files. For larger runs, it spills sorted
+chunks directly to private binary files, performs 16-way carry merges, and
+checks all IDs across runs. The raw unsorted spool is eliminated. A merge
+uses fixed-width binary I/O and a specialized min-heap, avoiding avoidable
+per-ID allocations. These changes do not weaken duplicate detection for
+mutants excluded by discovery bounds or alter the order in which candidates
+are executed. Temporary runs are removed on completion, errors, and
+cancellation.
+
+The benchmark is `go test ./internal/frontend -run '^$' -bench
+'^BenchmarkR07S9IDValidation$' -benchmem`. R07-S8 and R07-S9 were compared
+using identical `Add`/`Validate` workloads on Linux amd64; results depend on
+the local filesystem and Go runtime:
+
+| Distinct IDs | R07-S8 time / allocations | R07-S9 time / allocations |
+|---|---:|---:|
+| 128 | 543 µs / 403 KB | 5.4 µs / 2.1 KB |
+| 8,192 | 2.35 ms / 919 KB | 0.21 ms / 259 KB |
+| 16,384 | 7.25 ms / 1.64 MB | 3.20 ms / 0.65 MB |
+| 131,072 | 52.0 ms / 11.7 MB | 24.6 ms / 4.6 MB |
+
+The numbers are **microbenchmarks of ID validation**, not total discovery or
+mutation-run speed. For large inputs, disk I/O and the distribution of IDs
+remain relevant. The outstanding candidate/result spools are unchanged.
