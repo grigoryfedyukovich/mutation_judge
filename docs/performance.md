@@ -520,10 +520,11 @@ and not a verified end-to-end mutation-analysis speedup.
 
 ### Streaming results for large mutation runs (R07-S3)
 
-The CLI now uses an on-disk result spool for **JSON and text output** by
- default (`--stream-results=true`). Completed mutant results are serialized to
-an automatically removed private temporary file rather than all retained in
-RAM; JSON/text output is then rendered sequentially from that file. This also
+The CLI uses an ordered result spool for **JSON and text output** by
+default (`--stream-results=true`). Starting with R07-S8, up to 64 records
+and 256 KiB of serialized JSON stay in memory; larger runs spill to an
+automatically removed private temporary file. JSON/text output is rendered
+by ordered repeated passes without retaining an unbounded result slice. This also
 avoids the previous second, full-length parallel results index. The score,
 verdict counts, interruption status and completion bounds are calculated as
 results finish. Results are written in deterministic discovery order even with
@@ -536,8 +537,8 @@ remains in use regardless of this flag. `Engine.Analyze` also retains its
 existing in-memory `Report.Results` contract; `Engine.AnalyzeSpool` returns
 metadata and a closable spool for callers implementing streamed rendering.
 
-The spool uses temporary disk space approximately proportional to the total
-serialized result size. It is **not** a crash-recovery log or durable cache;
+After exceeding the in-memory threshold, the spool uses temporary disk space
+approximately proportional to the total serialized result size. It is **not** a crash-recovery log or durable cache;
 it is deleted on normal cleanup. An external process kill may leave a temporary
 file, and OS or filesystem errors can still interrupt persistence. Mutation
 *discovery* still retains its mutant list in memory, and result size is bounded
@@ -647,7 +648,7 @@ any candidate in the next batch even if other workers had already finished.
 The path now schedules an ordered, sliding window containing **at most
 `4 × workers` outstanding mutations**, including queued, executing and
 completed-but-not-persisted mutations. As soon as a contiguous prefix has
-been durably written to the result spool, the coordinator reads and dispatches
+been committed to the ordered result spool, the coordinator reads and dispatches
 additional candidates. Result writing, score calculations and mutation-spool
 reading stay single-threaded; results are still written in discovery order.
 Cancellation and hard failures stop dispatch and join all workers. This change
@@ -678,5 +679,36 @@ using GNU `/usr/bin/time` on Linux or BSD `/usr/bin/time -l` on macOS. It
 checks identical mutant IDs, verdicts, order and summary. Measurements include
 Go compilation, test execution, snapshot creation and external-process costs;
 they are workload-, cache- and platform-dependent and do **not** bound total
-process memory. Spool files use disk space proportional to mutation count,
+process memory. Large spool files use disk space proportional to mutation count,
 while file ASTs and package metadata continue to consume memory.
+
+### R07-S8 — Adaptive small-stream buffering
+
+Both `internal/resultspool` and `internal/mutantspool` now retain up to **64
+serialized JSON records / 256 KiB** per spool before creating a file. The
+limits are independent: they prevent *accumulating* unlimited records, not
+allocations required to encode or decode a single large record. An oversized
+first record immediately spills; later records use streaming JSON encoding.
+Readers and the measured JSON/text rendering passes see the same records in
+order, including across a spill. Closing a spool releases its resident buffer
+and removes any spill file. For a small number of mutants, no disk file is
+created by these two spools (other stages, such as ID validation, may still
+create temporary files).
+
+Reproducible small-stream benchmarks (12 records with 512-byte evidence,
+two read passes):
+
+```bash
+go test ./internal/resultspool ./internal/mutantspool \
+  -run '^$' -bench '^BenchmarkR07S8' -benchmem -benchtime=200x
+```
+
+On one Linux amd64 runner, a baseline R07-S7 comparison with exactly the
+same benchmark tests measured approximately **705–809 µs/op** (results)
+and **470–530 µs/op** (mutations); R07-S8 measured **417–429 µs/op** and
+**283–329 µs/op**, respectively. Total heap allocations increased (results:
+~35.7 KiB to ~51.5 KiB per operation; mutations: ~25.9 KiB to ~36.6 KiB)
+because the in-memory path encodes and decodes individual records. File I/O
+noise and workload shape can change these numbers, so this is not proof of
+end-to-end speed or RSS improvement. Large runs retain disk-backed streaming,
+and neither discovery ASTs nor test subprocess RSS is globally bounded.

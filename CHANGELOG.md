@@ -1,3 +1,10 @@
+## Unreleased — R07-S8 adaptive spooling for small runs
+
+- Buffer at most 64 serialized records and 256 KiB in each mutation/result spool before lazily spilling to a private JSONL file. Small runs avoid temporary files; large runs retain deterministic ordered disk-backed streaming.
+- Keep serialized records immutable to callers, preserve repeated readers/report passes, and remove spilled files on Close. Spill failures leave existing buffered records readable and return an explicit error.
+- After spilling, use streaming JSON encoding for subsequent records. Add count/byte threshold, replay, cancellation-adjacent cleanup, and failure-path regressions plus same-workload microbenchmarks.
+- Small-stream microbenchmarks improve in this environment but allocate more total heap bytes; neither an end-to-end speedup nor a global peak-RSS bound is claimed.
+
 ## Unreleased — R07-S5 discovery memory improvements
 
 - Stream per-file mutation candidates into a bounded max heap when `--max-mutants` is set, preserving IDs, ordering, and patches without retaining discarded candidates.

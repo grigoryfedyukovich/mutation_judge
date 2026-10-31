@@ -12,7 +12,7 @@ import (
 )
 
 func TestSpoolRenderEquivalentJSONAndText(t *testing.T) {
-	cases := []int{0, 1, 5}
+	cases := []int{0, 1, 5, 64, 65, 100}
 	for _, n := range cases {
 		t.Run(strings.Repeat("r", n+1), func(t *testing.T) {
 			r := model.Report{SchemaVersion: model.SchemaVersion, ToolVersion: "test", Complete: true, Patterns: []string{"."}, Bounds: map[string]any{"completed_mutants": n}, EffectiveConfig: map[string]any{}, Results: []model.Result{}}

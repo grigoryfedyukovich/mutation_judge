@@ -13,7 +13,6 @@ func TestLargeOrderedSpoolAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	filename := spool.file.Name()
 	// Larger than any single retained evidence buffer. Only one record at
 	// a time is serialized and decoded, even for thousands of mutants.
 	payload := strings.Repeat("evidence", 128)
@@ -24,6 +23,10 @@ func TestLargeOrderedSpoolAndCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if spool.file == nil {
+		t.Fatal("large result spool did not spill to disk")
+	}
+	filename := spool.file.Name()
 	if spool.Len() != count {
 		t.Fatalf("got %d entries", spool.Len())
 	}

@@ -1,5 +1,5 @@
-// Package mutantspool keeps discovery candidates on disk while mutation
-// analysis consumes only a bounded number of candidates at a time.
+// Package mutantspool retains a bounded number of discovery candidates in
+// memory and spills larger candidate streams to disk.
 package mutantspool
 
 import (
@@ -12,18 +12,18 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
+const memoryBytes = 256 << 10
+const memoryRecords = 64
+
 type Spool struct {
-	file  *os.File
-	count int
+	file   *os.File
+	memory [][]byte
+	bytes  int
+	count  int
+	closed bool
 }
 
-func New() (*Spool, error) {
-	f, err := os.CreateTemp("", "mutation-judge-mutants-*.jsonl")
-	if err != nil {
-		return nil, fmt.Errorf("create mutation spool: %w", err)
-	}
-	return &Spool{file: f}, nil
-}
+func New() (*Spool, error) { return &Spool{}, nil }
 
 func (s *Spool) Len() int {
 	if s == nil {
@@ -31,11 +31,53 @@ func (s *Spool) Len() int {
 	}
 	return s.count
 }
+
+func (s *Spool) spill() error {
+	f, err := os.CreateTemp("", "mutation-judge-mutants-*.jsonl")
+	if err != nil {
+		return fmt.Errorf("create mutation spool: %w", err)
+	}
+	for _, data := range s.memory {
+		if _, err := f.Write(data); err != nil {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+			return fmt.Errorf("spill mutation spool: %w", err)
+		}
+	}
+	s.file = f
+	s.memory = nil
+	s.bytes = 0
+	return nil
+}
+
 func (s *Spool) Append(m model.Mutation) error {
-	if s == nil || s.file == nil {
+	if s == nil || s.closed {
 		return errors.New("mutation spool is closed")
 	}
-	if err := json.NewEncoder(s.file).Encode(m); err != nil {
+	if s.file != nil {
+		if err := json.NewEncoder(s.file).Encode(m); err != nil {
+			return fmt.Errorf("append mutation: %w", err)
+		}
+		s.count++
+		return nil
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("append mutation: %w", err)
+	}
+	data = append(data, '\n')
+	if s.file == nil && len(s.memory) < memoryRecords && len(data) <= memoryBytes-s.bytes {
+		s.memory = append(s.memory, data)
+		s.bytes += len(data)
+		s.count++
+		return nil
+	}
+	if s.file == nil {
+		if err := s.spill(); err != nil {
+			return err
+		}
+	}
+	if _, err := s.file.Write(data); err != nil {
 		return fmt.Errorf("append mutation: %w", err)
 	}
 	s.count++
@@ -45,12 +87,18 @@ func (s *Spool) Append(m model.Mutation) error {
 type Reader struct {
 	file      *os.File
 	decoder   *json.Decoder
+	memory    [][]byte
+	index     int
 	remaining int
+	closed    bool
 }
 
 func (s *Spool) Reader() (*Reader, error) {
-	if s == nil || s.file == nil {
+	if s == nil || s.closed {
 		return nil, errors.New("mutation spool is closed")
+	}
+	if s.file == nil {
+		return &Reader{memory: s.memory, remaining: s.count}, nil
 	}
 	f, err := os.Open(s.file.Name())
 	if err != nil {
@@ -60,10 +108,13 @@ func (s *Spool) Reader() (*Reader, error) {
 }
 
 func (r *Reader) Next() (model.Mutation, error) {
-	if r == nil || r.file == nil {
+	if r == nil || r.closed {
 		return model.Mutation{}, errors.New("mutation reader is closed")
 	}
 	if r.remaining == 0 {
+		if r.file == nil {
+			return model.Mutation{}, io.EOF
+		}
 		var extra json.RawMessage
 		err := r.decoder.Decode(&extra)
 		if err == io.EOF {
@@ -75,7 +126,12 @@ func (r *Reader) Next() (model.Mutation, error) {
 		return model.Mutation{}, fmt.Errorf("mutation spool tail: %w", err)
 	}
 	var m model.Mutation
-	if err := r.decoder.Decode(&m); err != nil {
+	if r.file == nil {
+		if err := json.Unmarshal(r.memory[r.index], &m); err != nil {
+			return model.Mutation{}, fmt.Errorf("read mutation: %w", err)
+		}
+		r.index++
+	} else if err := r.decoder.Decode(&m); err != nil {
 		return model.Mutation{}, fmt.Errorf("read mutation: %w", err)
 	}
 	r.remaining--
@@ -83,7 +139,12 @@ func (r *Reader) Next() (model.Mutation, error) {
 }
 
 func (r *Reader) Close() error {
-	if r == nil || r.file == nil {
+	if r == nil || r.closed {
+		return nil
+	}
+	r.closed = true
+	r.memory = nil
+	if r.file == nil {
 		return nil
 	}
 	err := r.file.Close()
@@ -92,7 +153,13 @@ func (r *Reader) Close() error {
 }
 
 func (s *Spool) Close() error {
-	if s == nil || s.file == nil {
+	if s == nil || s.closed {
+		return nil
+	}
+	s.closed = true
+	s.memory = nil
+	s.bytes = 0
+	if s.file == nil {
 		return nil
 	}
 	name := s.file.Name()
