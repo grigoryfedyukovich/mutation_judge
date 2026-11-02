@@ -1,3 +1,10 @@
+## Unreleased — R07-S10 faster disk-discovery merging
+
+- Store only temporary external-sort mutation runs in a compact length-framed binary representation, rather than repeatedly encoding/decoding JSON. Public JSON/text report and final mutation-spool formats are unchanged.
+- Buffer spill writes (64 KiB), flush before opening readers, and reuse bounded decoding buffers. Detect truncated or malformed records rather than silently treating missing mutations as end-of-run.
+- Preserve deterministic order, mutation IDs, patches, score semantics, and cancellation/cleanup behavior. Add round-trip, Unicode, spill, corruption, early-EOF, external-merge, and CLI-equivalence tests plus a reproducible discovery benchmark.
+- The benchmark showed faster discovery with fewer allocation operations, but more total allocated bytes; do not infer an overall RSS improvement.
+
 ## Unreleased — R07-S9 adaptive mutation-ID validation
 
 - Keep up to 8,192 discovered mutation IDs in memory and validate them without creating temporary files; spill sorted binary runs only for larger discoveries.

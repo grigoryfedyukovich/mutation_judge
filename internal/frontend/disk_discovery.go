@@ -70,7 +70,7 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 				return nil
 			}
 			sort.Slice(candidates, func(i, j int) bool { return mutationLess(candidates[i], candidates[j]) })
-			chunk, err := mutantspool.New()
+			chunk, err := mutantspool.NewCompact()
 			if err != nil {
 				return err
 			}
@@ -135,7 +135,7 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 				if end > len(chunks) {
 					end = len(chunks)
 				}
-				merged, e := mutantspool.New()
+				merged, e := mutantspool.NewCompact()
 				if e == nil {
 					e = mergeChunks(ctx, chunks[i:end], merged.Append)
 				}
@@ -256,7 +256,7 @@ func (d *discoveryRuns) add(ctx context.Context, chunk *mutantspool.Spool) error
 		if len(d.levels[level]) < discoveryMergeFanIn {
 			return nil
 		}
-		merged, err := mutantspool.New()
+		merged, err := mutantspool.NewCompact()
 		if err == nil {
 			err = mergeChunks(ctx, d.levels[level], merged.Append)
 		}

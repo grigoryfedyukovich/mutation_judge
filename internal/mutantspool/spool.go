@@ -3,6 +3,7 @@
 package mutantspool
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,14 +17,21 @@ const memoryBytes = 256 << 10
 const memoryRecords = 64
 
 type Spool struct {
-	file   *os.File
-	memory [][]byte
-	bytes  int
-	count  int
-	closed bool
+	file    *os.File
+	writer  *bufio.Writer
+	compact bool
+	memory  [][]byte
+	bytes   int
+	count   int
+	closed  bool
 }
 
 func New() (*Spool, error) { return &Spool{}, nil }
+
+// NewCompact creates a spool for private, temporary discovery merge runs.
+// Public-facing mutation result spools continue using JSON. The compact
+// format is not a persisted interchange format and must never be cached.
+func NewCompact() (*Spool, error) { return &Spool{compact: true}, nil }
 
 func (s *Spool) Len() int {
 	if s == nil {
@@ -33,18 +41,24 @@ func (s *Spool) Len() int {
 }
 
 func (s *Spool) spill() error {
-	f, err := os.CreateTemp("", "mutation-judge-mutants-*.jsonl")
+	suffix := "mutation-judge-mutants-*.jsonl"
+	if s.compact {
+		suffix = "mutation-judge-merge-*.bin"
+	}
+	f, err := os.CreateTemp("", suffix)
 	if err != nil {
 		return fmt.Errorf("create mutation spool: %w", err)
 	}
+	writer := bufio.NewWriterSize(f, 64<<10)
 	for _, data := range s.memory {
-		if _, err := f.Write(data); err != nil {
+		if _, err := writer.Write(data); err != nil {
 			_ = f.Close()
 			_ = os.Remove(f.Name())
 			return fmt.Errorf("spill mutation spool: %w", err)
 		}
 	}
 	s.file = f
+	s.writer = writer
 	s.memory = nil
 	s.bytes = 0
 	return nil
@@ -54,18 +68,17 @@ func (s *Spool) Append(m model.Mutation) error {
 	if s == nil || s.closed {
 		return errors.New("mutation spool is closed")
 	}
-	if s.file != nil {
-		if err := json.NewEncoder(s.file).Encode(m); err != nil {
+	var data []byte
+	var err error
+	if s.compact {
+		data = encodeCompact(m)
+	} else {
+		data, err = json.Marshal(m)
+		if err != nil {
 			return fmt.Errorf("append mutation: %w", err)
 		}
-		s.count++
-		return nil
+		data = append(data, '\n')
 	}
-	data, err := json.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("append mutation: %w", err)
-	}
-	data = append(data, '\n')
 	if s.file == nil && len(s.memory) < memoryRecords && len(data) <= memoryBytes-s.bytes {
 		s.memory = append(s.memory, data)
 		s.bytes += len(data)
@@ -77,7 +90,7 @@ func (s *Spool) Append(m model.Mutation) error {
 			return err
 		}
 	}
-	if _, err := s.file.Write(data); err != nil {
+	if _, err := s.writer.Write(data); err != nil {
 		return fmt.Errorf("append mutation: %w", err)
 	}
 	s.count++
@@ -85,12 +98,14 @@ func (s *Spool) Append(m model.Mutation) error {
 }
 
 type Reader struct {
-	file      *os.File
-	decoder   *json.Decoder
-	memory    [][]byte
-	index     int
-	remaining int
-	closed    bool
+	file          *os.File
+	decoder       *json.Decoder
+	compactReader *bufio.Reader
+	compact       bool
+	memory        [][]byte
+	index         int
+	remaining     int
+	closed        bool
 }
 
 func (s *Spool) Reader() (*Reader, error) {
@@ -98,13 +113,24 @@ func (s *Spool) Reader() (*Reader, error) {
 		return nil, errors.New("mutation spool is closed")
 	}
 	if s.file == nil {
-		return &Reader{memory: s.memory, remaining: s.count}, nil
+		return &Reader{memory: s.memory, compact: s.compact, remaining: s.count}, nil
+	}
+	// A reader may be opened before the spool is closed. Flush pending data
+	// first so every accepted record is visible to independent readers.
+	if err := s.writer.Flush(); err != nil {
+		return nil, fmt.Errorf("flush mutation spool: %w", err)
 	}
 	f, err := os.Open(s.file.Name())
 	if err != nil {
 		return nil, fmt.Errorf("open mutation spool: %w", err)
 	}
-	return &Reader{file: f, decoder: json.NewDecoder(f), remaining: s.count}, nil
+	r := &Reader{file: f, compact: s.compact, remaining: s.count}
+	if s.compact {
+		r.compactReader = bufio.NewReaderSize(f, 64<<10)
+	} else {
+		r.decoder = json.NewDecoder(f)
+	}
+	return r, nil
 }
 
 func (r *Reader) Next() (model.Mutation, error) {
@@ -114,6 +140,14 @@ func (r *Reader) Next() (model.Mutation, error) {
 	if r.remaining == 0 {
 		if r.file == nil {
 			return model.Mutation{}, io.EOF
+		}
+		if r.compact {
+			if _, err := r.compactReader.Peek(1); err == io.EOF {
+				return model.Mutation{}, io.EOF
+			} else if err != nil {
+				return model.Mutation{}, fmt.Errorf("mutation spool tail: %w", err)
+			}
+			return model.Mutation{}, errors.New("mutation spool has unexpected extra record")
 		}
 		var extra json.RawMessage
 		err := r.decoder.Decode(&extra)
@@ -127,11 +161,29 @@ func (r *Reader) Next() (model.Mutation, error) {
 	}
 	var m model.Mutation
 	if r.file == nil {
-		if err := json.Unmarshal(r.memory[r.index], &m); err != nil {
+		var err error
+		if r.compact {
+			m, err = decodeCompact(r.memory[r.index])
+		} else {
+			err = json.Unmarshal(r.memory[r.index], &m)
+		}
+		if err != nil {
 			return model.Mutation{}, fmt.Errorf("read mutation: %w", err)
 		}
 		r.index++
+	} else if r.compact {
+		var err error
+		m, err = readCompact(r.compactReader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return model.Mutation{}, fmt.Errorf("read mutation: %w", err)
+		}
 	} else if err := r.decoder.Decode(&m); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return model.Mutation{}, fmt.Errorf("read mutation: %w", err)
 	}
 	r.remaining--
@@ -163,7 +215,11 @@ func (s *Spool) Close() error {
 		return nil
 	}
 	name := s.file.Name()
+	flushErr := s.writer.Flush()
 	err := s.file.Close()
+	if flushErr != nil {
+		err = flushErr
+	}
 	s.file = nil
 	if rmErr := os.Remove(name); err == nil {
 		err = rmErr

@@ -746,3 +746,33 @@ the local filesystem and Go runtime:
 The numbers are **microbenchmarks of ID validation**, not total discovery or
 mutation-run speed. For large inputs, disk I/O and the distribution of IDs
 remain relevant. The outstanding candidate/result spools are unchanged.
+
+
+## R07-S10: compact temporary discovery runs
+
+Unlimited streaming discovery still externally sorts candidates in 512-record
+chunks and bounded 16-way merges. R07-S10 changes **only the temporary sort
+runs** to an internal, length-framed binary mutation representation. The
+final spool consumed by the engine and user-facing JSON/text output remain
+unchanged. Temporary spills use 64 KiB buffered writes and flush before any
+reader is opened. Decoding checks framing and integer bounds, including an
+explicit error for premature EOF while records remain. Read buffers are
+reused up to 64 KiB; a single unusually large record may allocate more.
+
+A reproducible benchmark exercises 4,600 functions in one Go source file,
+with repeated external-run sorting and merging:
+
+```bash
+go test ./internal/frontend -run '^$' \
+  -bench '^BenchmarkR07S10DiscoveryMerge$' -benchmem -benchtime=5x -count=3
+```
+
+On a Linux amd64 container, an R07-S9 baseline measured **156–178 ms/op**,
+**26.5 MB/op**, and about **475k allocations/op**. R07-S10 measured
+**120–235 ms/op** (median ~124 ms; one large outlier), **31.7 MB/op**,
+and about **414k allocations/op**. The common-case runtime and allocation
+count improved, but total allocated bytes increased by ~20%. This is a
+single discovery-only workload on a shared machine; it does not establish
+end-to-end speedup or a process peak-RSS limit. Disk consumption is still
+proportional to the size of intermediate discovery runs, and a huge individual
+mutation/source file still requires proportional memory.
