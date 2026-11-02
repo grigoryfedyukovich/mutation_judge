@@ -1,9 +1,8 @@
 package frontend
 
 import (
-	"container/heap"
+	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -137,7 +136,7 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 				}
 				merged, e := mutantspool.NewCompact()
 				if e == nil {
-					e = mergeChunks(ctx, chunks[i:end], merged.Append)
+					e = mergeCompactChunks(ctx, chunks[i:end], merged.AppendCompactRecord)
 				}
 				if e != nil {
 					if merged != nil {
@@ -176,24 +175,62 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 	return out, count, nil
 }
 
-type mergeEntry struct {
-	mutant model.Mutation
+// A merge entry contains a borrowed compact record and its originating reader.
+// It avoids decoding/encoding all fields on intermediate merge passes.
+type compactMergeEntry struct {
+	record mutantspool.CompactRecord
 	source int
 }
-type mergeHeap []mergeEntry
+type compactMergeHeap []compactMergeEntry
 
-func (h mergeHeap) Len() int           { return len(h) }
-func (h mergeHeap) Less(i, j int) bool { return mutationLess(h[i].mutant, h[j].mutant) }
-func (h mergeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *mergeHeap) Push(x any)        { *h = append(*h, x.(mergeEntry)) }
-func (h *mergeHeap) Pop() any {
-	n := len(*h)
-	v := (*h)[n-1]
-	(*h)[n-1] = mergeEntry{}
-	*h = (*h)[:n-1]
-	return v
+func compactLess(a, b mutantspool.CompactRecord) bool {
+	if a.StartByte != b.StartByte {
+		return a.StartByte < b.StartByte
+	}
+	return bytes.Compare(a.ID, b.ID) < 0
 }
-func mergeChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(model.Mutation) error) error {
+func (h *compactMergeHeap) push(v compactMergeEntry) {
+	*h = append(*h, v)
+	i := len(*h) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if !compactLess(v.record, (*h)[p].record) {
+			break
+		}
+		(*h)[i] = (*h)[p]
+		i = p
+	}
+	(*h)[i] = v
+}
+func (h *compactMergeHeap) pop() compactMergeEntry {
+	first := (*h)[0]
+	n := len(*h)
+	last := (*h)[n-1]
+	(*h)[n-1] = compactMergeEntry{}
+	*h = (*h)[:n-1]
+	if n == 1 {
+		return first
+	}
+	i := 0
+	for {
+		child := 2*i + 1
+		if child >= n-1 {
+			break
+		}
+		if child+1 < n-1 && compactLess((*h)[child+1].record, (*h)[child].record) {
+			child++
+		}
+		if !compactLess((*h)[child].record, last.record) {
+			break
+		}
+		(*h)[i] = (*h)[child]
+		i = child
+	}
+	(*h)[i] = last
+	return first
+}
+
+func mergeCompactChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(mutantspool.CompactRecord) error) error {
 	readers := make([]*mutantspool.Reader, len(chunks))
 	defer func() {
 		for _, r := range readers {
@@ -202,21 +239,21 @@ func mergeChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(mod
 			}
 		}
 	}()
-	var h mergeHeap
+	var h compactMergeHeap
 	for i, ch := range chunks {
 		r, err := ch.Reader()
 		if err != nil {
 			return err
 		}
 		readers[i] = r
-		m, err := r.Next()
+		rec, err := r.NextCompactRecord()
 		if err == io.EOF {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		heap.Push(&h, mergeEntry{m, i})
+		h.push(compactMergeEntry{rec, i})
 	}
 	emitted := 0
 	for len(h) > 0 {
@@ -225,21 +262,33 @@ func mergeChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(mod
 				return err
 			}
 		}
-		item := heap.Pop(&h).(mergeEntry)
-		if err := emit(item.mutant); err != nil {
+		item := h.pop()
+		if err := emit(item.record); err != nil {
 			return err
 		}
 		emitted++
-		m, err := readers[item.source].Next()
-		if errors.Is(err, io.EOF) {
+		// Only advance the source reader after the borrowed record has been
+		// consumed. Advancing sooner would overwrite its reusable buffer.
+		rec, err := readers[item.source].NextCompactRecord()
+		if err == io.EOF {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		heap.Push(&h, mergeEntry{m, item.source})
+		h.push(compactMergeEntry{rec, item.source})
 	}
 	return nil
+}
+
+func mergeChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(model.Mutation) error) error {
+	return mergeCompactChunks(ctx, chunks, func(rec mutantspool.CompactRecord) error {
+		m, err := rec.Mutation()
+		if err != nil {
+			return err
+		}
+		return emit(m)
+	})
 }
 
 // discoveryRuns uses a base-16 carry structure. Every new sorted chunk is
@@ -258,7 +307,7 @@ func (d *discoveryRuns) add(ctx context.Context, chunk *mutantspool.Spool) error
 		}
 		merged, err := mutantspool.NewCompact()
 		if err == nil {
-			err = mergeChunks(ctx, d.levels[level], merged.Append)
+			err = mergeCompactChunks(ctx, d.levels[level], merged.AppendCompactRecord)
 		}
 		if err != nil {
 			if merged != nil {

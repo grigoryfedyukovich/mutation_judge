@@ -1,3 +1,14 @@
+## Unreleased — R07-S11 low-allocation compact merge passes
+
+- Merge intermediate mutation-sort runs as borrowed, validated compact records
+  instead of repeatedly decoding full mutations and serializing them again.
+- Reuse reader buffers and a specialized merge heap; decode into `Mutation`
+  only when emitting the final ordered candidate and its patch.
+- Fail closed on malformed/truncated records and preserve deterministic sort
+  order, cancellation, spool cleanup, and the public JSON interchange format.
+- Add raw-record forwarding/corruption tests, merge-order regressions, and a
+  24,000-function multi-pass discovery benchmark.
+
 ## Unreleased — R07-S10 faster disk-discovery merging
 
 - Store only temporary external-sort mutation runs in a compact length-framed binary representation, rather than repeatedly encoding/decoding JSON. Public JSON/text report and final mutation-spool formats are unchanged.

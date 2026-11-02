@@ -776,3 +776,40 @@ single discovery-only workload on a shared machine; it does not establish
 end-to-end speedup or a process peak-RSS limit. Disk consumption is still
 proportional to the size of intermediate discovery runs, and a huge individual
 mutation/source file still requires proportional memory.
+
+
+## R07-S11: low-allocation intermediate merge passes
+
+R07-S10 encoded temporary mutation records compactly, but each external
+merge still decoded every record into a full `Mutation` and serialized it
+again for the next merge pass. R07-S11 keeps intermediate records in their
+compact byte format: readers expose borrowed, fully validated record bytes
+and only the offset/ID sort keys, while writers forward those bytes directly.
+Reader storage is reused only after the current record is consumed; the
+final merge alone materializes a `Mutation` for diff generation and the
+public JSON result spool. A specialized bounded min-heap avoids generic
+`container/heap` boxing. The record format and public report format have
+not changed. Malformed lengths, truncated records, integer overflows and
+extra trailing fields remain errors, including in intermediate merges.
+
+Reproduce the benchmarks on the same Go toolchain and filesystem:
+
+```bash
+go test ./internal/frontend -run '^$' -bench   'BenchmarkR07S10DiscoveryMerge|BenchmarkR07S11MultiPass'   -benchmem -benchtime=4x -count=2
+```
+
+Measured on Linux amd64 (R07-S10 archive versus R07-S11, same inputs):
+
+| Workload | R07-S10 | R07-S11 | Observation |
+|---|---:|---:|---|
+| 4,600 functions: time | 121–124 ms | 121–126 ms | No consistent time reduction |
+| 4,600 functions: bytes/op | 31.7 MB | 28.5 MB | ~10% less allocated |
+| 24,000 functions: time | 750–778 ms | 586–611 ms | ~22% faster |
+| 24,000 functions: bytes/op | 208 MB | 142 MB | ~32% less allocated |
+| 24,000 functions: allocs/op | 2.42 M | 2.12 M | ~12% fewer allocations |
+
+These are *discovery-only* measurements, not an end-to-end speedup or RSS
+limit. Memory still scales with the per-file AST and source size, plus the
+bounded number of merge readers and their largest buffered records. Very
+large records or slow storage may change this result; streaming execution
+and the optional in-memory API are otherwise unchanged.

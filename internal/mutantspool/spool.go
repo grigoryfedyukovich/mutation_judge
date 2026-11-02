@@ -105,6 +105,7 @@ type Reader struct {
 	memory        [][]byte
 	index         int
 	remaining     int
+	rawScratch    []byte
 	closed        bool
 }
 
