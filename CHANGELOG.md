@@ -1,3 +1,10 @@
+## Unreleased — R07-S12 bounded size-aware external merge scheduling
+
+- Defer intermediate discovery-run merging until the bounded pending window fills, and feed up to 16 runs directly into final output without rewriting them first.
+- Merge smaller runs first, using the minimum fan-in required to reduce a short tail (for example, 17 pending runs combine only two). Keep at most 48 pending run descriptors and at most 16 open input readers per merge.
+- Preserve existing compact-record forwarding, mutation IDs/order/patches, cancellation and temporary-file cleanup; add fan-in boundary, large multi-run, and record-equivalence regressions.
+- Do not treat discovery-only benchmark changes as guaranteed end-to-end speedups: disk performance varies, and temporary disk usage still grows with the number of discovered mutations.
+
 ## Unreleased — R07-S11 low-allocation compact merge passes
 
 - Merge intermediate mutation-sort runs as borrowed, validated compact records

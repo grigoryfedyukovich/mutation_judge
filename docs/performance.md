@@ -813,3 +813,28 @@ limit. Memory still scales with the per-file AST and source size, plus the
 bounded number of merge readers and their largest buffered records. Very
 large records or slow storage may change this result; streaming execution
 and the optional in-memory API are otherwise unchanged.
+
+## R07-S12: bounded size-aware discovery merges
+
+The disk-backed discovery sorter keeps up to 48 pending compact runs. It
+prioritizes smaller runs for intermediate merges, and reduces to at most 16
+runs before the final merge. Unlike eager base-16 carrying, exactly 16 runs
+are consumed directly by the final merge; with 17 equal-sized runs, only two
+are rewritten before final output (instead of rewriting 16 of them).
+
+This reduces unnecessary intermediate disk I/O near fan-in boundaries, while
+retaining a fixed metadata bound and a maximum of 16 concurrently opened
+merge readers. A per-file source still needs an AST in memory, and total
+temporary disk usage can grow with candidate count. The tests in
+`internal/frontend/r07_s12_merge_schedule_test.go` assert the number of
+intermediate records written, bounded pending runs, deterministic ordering,
+field equivalence, cancellation, and spool cleanup.
+
+Run the discovery benchmark with:
+
+```bash
+go test ./internal/frontend -run '^$' -bench '^BenchmarkR07S11MultiPass$' -benchmem -benchtime=3x
+```
+
+Benchmark results vary across storage environments; measure end-to-end on
+representative projects before inferring overall performance improvements.

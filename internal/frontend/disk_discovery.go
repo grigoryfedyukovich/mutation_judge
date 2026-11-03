@@ -16,9 +16,12 @@ import (
 )
 
 // discoveryChunkSize bounds sorting memory when a single source file contains
-// many mutation sites. Merge fan-in is also bounded to limit open descriptors.
+// many mutation sites. The merge fan-in bounds concurrently opened readers.
+// Retaining a small multiple of the fan-in lets the scheduler avoid premature
+// full-run rewrites, particularly when the final merge needs <= 16 readers.
 const discoveryChunkSize = 512
 const discoveryMergeFanIn = 16
+const discoveryMaxPendingRuns = 3 * discoveryMergeFanIn
 
 // DiscoverToDisk visits every eligible file and writes candidates in the same
 // file/offset/ID order as Discover. Mutants are sorted in bounded-size runs,
@@ -124,38 +127,12 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 			cleanup()
 			return nil, 0, err
 		}
-		// Bounded fan-in multi-pass merge: never open one reader per chunk in
-		// giant source files. Pending-run metadata is O(log candidates).
-		chunks := runs.takeAll()
-		for len(chunks) > discoveryMergeFanIn {
-			var next []*mutantspool.Spool
-			for i := 0; i < len(chunks); i += discoveryMergeFanIn {
-				end := i + discoveryMergeFanIn
-				if end > len(chunks) {
-					end = len(chunks)
-				}
-				merged, e := mutantspool.NewCompact()
-				if e == nil {
-					e = mergeCompactChunks(ctx, chunks[i:end], merged.AppendCompactRecord)
-				}
-				if e != nil {
-					if merged != nil {
-						_ = merged.Close()
-					}
-					for _, ch := range next {
-						_ = ch.Close()
-					}
-					for _, ch := range chunks {
-						_ = ch.Close()
-					}
-					return nil, 0, e
-				}
-				next = append(next, merged)
-			}
-			for _, ch := range chunks {
-				_ = ch.Close()
-			}
-			chunks = next
+		// Reduce to at most one final fan-in. Unlike eager base-16 carrying,
+		// this does not rewrite records that can go straight to final output.
+		chunks, e := runs.finish(ctx)
+		if e != nil {
+			runs.close()
+			return nil, 0, e
 		}
 		lines := newLineIndex(src)
 		err = mergeChunks(ctx, chunks, func(m model.Mutation) error {
@@ -291,50 +268,89 @@ func mergeChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(mod
 	})
 }
 
-// discoveryRuns uses a base-16 carry structure. Every new sorted chunk is
-// merged into higher levels as needed, limiting retained descriptors and
-// chunk metadata to O(log(number of candidates)) rather than O(candidates).
-type discoveryRuns struct{ levels [][]*mutantspool.Spool }
+// discoveryRuns retains only a bounded window of sorted runs. A size-aware
+// partial external merge prefers the smallest runs and merges no more runs
+// than necessary to stay within the final 16-reader fan-in. This avoids the
+// extra full merge pass that eager base-16 carrying performed for exactly
+// 16, 256, ... input runs. Only at most discoveryMaxPendingRuns descriptors
+// are retained, and merges open at most discoveryMergeFanIn readers.
+type discoveryRuns struct {
+	pending []*mutantspool.Spool
+	// These counts are useful for regression tests and profiling of the
+	// private merge schedule; they are not stored in public reports.
+	intermediateRecords int
+	mergeCalls          int
+	maxPending          int
+}
+
+// mergeSmallest combines k smallest runs; all run ownership remains with d
+// on error so d.close can safely release it. On success d owns the merged
+// run and the inputs are closed (including their temporary files).
+func (d *discoveryRuns) mergeSmallest(ctx context.Context, k int) error {
+	if k < 2 || k > discoveryMergeFanIn || k > len(d.pending) {
+		return fmt.Errorf("invalid discovery merge width %d for %d runs", k, len(d.pending))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Stable order breaks equal-size ties reproducibly. The final sort key
+	// (source offset, mutation ID) does not depend on run merge order.
+	sort.SliceStable(d.pending, func(i, j int) bool {
+		return d.pending[i].Len() < d.pending[j].Len()
+	})
+	inputs := d.pending[:k]
+	merged, err := mutantspool.NewCompact()
+	if err != nil {
+		return err
+	}
+	if err = mergeCompactChunks(ctx, inputs, merged.AppendCompactRecord); err != nil {
+		_ = merged.Close()
+		return err
+	}
+	// Mutate ownership only after the complete merge succeeds.
+	remaining := append([]*mutantspool.Spool(nil), d.pending[k:]...)
+	d.pending = append(remaining, merged)
+	d.intermediateRecords += merged.Len()
+	d.mergeCalls++
+	for _, input := range inputs {
+		_ = input.Close()
+	}
+	return nil
+}
 
 func (d *discoveryRuns) add(ctx context.Context, chunk *mutantspool.Spool) error {
-	for level := 0; ; level++ {
-		for len(d.levels) <= level {
-			d.levels = append(d.levels, nil)
-		}
-		d.levels[level] = append(d.levels[level], chunk)
-		if len(d.levels[level]) < discoveryMergeFanIn {
-			return nil
-		}
-		merged, err := mutantspool.NewCompact()
-		if err == nil {
-			err = mergeCompactChunks(ctx, d.levels[level], merged.AppendCompactRecord)
-		}
-		if err != nil {
-			if merged != nil {
-				_ = merged.Close()
-			}
-			return err
-		}
-		for _, old := range d.levels[level] {
-			_ = old.Close()
-		}
-		d.levels[level] = nil
-		chunk = merged
+	d.pending = append(d.pending, chunk)
+	if len(d.pending) > d.maxPending {
+		d.maxPending = len(d.pending)
 	}
+	// Collapse the smallest fan-in when the pending window fills, leaving
+	// space for new small chunks. No final output ever opens >16 readers.
+	if len(d.pending) >= discoveryMaxPendingRuns {
+		return d.mergeSmallest(ctx, discoveryMergeFanIn)
+	}
+	return nil
 }
+
+func (d *discoveryRuns) finish(ctx context.Context) ([]*mutantspool.Spool, error) {
+	for len(d.pending) > discoveryMergeFanIn {
+		// Reduce to exactly the final fan-in when only a short tail remains.
+		// E.g. 17 runs merge two, not an entire 16-run group.
+		width := len(d.pending) - discoveryMergeFanIn + 1
+		if width > discoveryMergeFanIn {
+			width = discoveryMergeFanIn
+		}
+		if err := d.mergeSmallest(ctx, width); err != nil {
+			return nil, err
+		}
+	}
+	out := d.pending
+	d.pending = nil
+	return out, nil
+}
+
 func (d *discoveryRuns) close() {
-	for _, level := range d.levels {
-		for _, ch := range level {
-			_ = ch.Close()
-		}
+	for _, ch := range d.pending {
+		_ = ch.Close()
 	}
-	d.levels = nil
-}
-func (d *discoveryRuns) takeAll() []*mutantspool.Spool {
-	var out []*mutantspool.Spool
-	for _, level := range d.levels {
-		out = append(out, level...)
-	}
-	d.levels = nil
-	return out
+	d.pending = nil
 }
