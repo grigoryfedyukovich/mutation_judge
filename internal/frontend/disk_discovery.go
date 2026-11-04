@@ -120,6 +120,34 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 		if err == nil {
 			err = visitErr
 		}
+		if err != nil {
+			cleanup()
+			return nil, 0, err
+		}
+		// Most source files contain fewer than one sorting chunk of mutants.
+		// The visitor is not necessarily ordered, but sorting that bounded
+		// slice lets us emit directly without encoding, spilling, merging,
+		// then decoding an unnecessary temporary compact run. In particular,
+		// this fast path retains at most discoveryChunkSize-1 candidates.
+		if len(runs.pending) == 0 {
+			sort.Slice(candidates, func(i, j int) bool { return mutationLess(candidates[i], candidates[j]) })
+			if len(candidates) != 0 {
+				lines := newLineIndex(src)
+				for i := range candidates {
+					if i&255 == 0 {
+						if err = ctx.Err(); err != nil {
+							return nil, 0, err
+						}
+					}
+					m := candidates[i]
+					m.Diff = unifiedDiff(rel, src, lines, m.Span.StartByte, m.Span.EndByte, m.Replacement)
+					if err = out.Append(m); err != nil {
+						return nil, 0, err
+					}
+				}
+			}
+			continue
+		}
 		if err == nil {
 			err = flush()
 		}

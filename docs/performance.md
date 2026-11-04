@@ -838,3 +838,45 @@ go test ./internal/frontend -run '^$' -bench '^BenchmarkR07S11MultiPass$' -bench
 
 Benchmark results vary across storage environments; measure end-to-end on
 representative projects before inferring overall performance improvements.
+
+
+## R07-S13: direct output for small source files
+
+In the disk-backed unlimited-discovery path, earlier versions created a
+private compact temporary sorting run for **every** source file containing a
+mutation, even if the file contained just one candidate. Those records were
+encoded, optionally spilled, read back, decoded, and then written into the
+final mutation spool. R07-S13 bypasses that redundant run whenever a file
+finishes with fewer than 512 candidates: it sorts the existing bounded
+candidate slice by the same offset/ID comparison, constructs the same diffs,
+and appends directly to the ordered output. Other files still use the
+unchanged 512-candidate chunk size and bounded external merge.
+
+Reproduce the discovery-only many-file benchmark:
+
+```bash
+go test ./internal/frontend -run '^$' \
+  -bench '^BenchmarkR07S13ManySmallFiles$' -benchmem -benchtime=30x -count=4 -cpu=1
+```
+
+On this Linux amd64 runner with 80 Go source files and one small function
+per file, identical benchmark code in the R07-S12 and R07-S13 checkouts
+produced:
+
+| Metric | R07-S12 (4 runs) | R07-S13 (4 runs) |
+|---|---:|---:|
+| Discovery time (median) | 1.51 ms/op | 1.25 ms/op |
+| Bytes allocated | ~716 KB/op | ~647 KB/op |
+| Allocation operations | 10,572/op | 9,931/op |
+
+This measures discovery time and total allocations, not peak RSS.
+`internal/frontend/r07_s13_test.go` checks the exact mutation output on
+small files and on both sides of the chunk boundary; it also verifies that
+a small discovery can succeed when temporary-file creation is unavailable.
+Use `bash scripts/benchmark-r07-s13.sh BASELINE_CLI UPDATED_CLI` for a
+repeatable **end-to-end** CLI comparison (same source module, mutation IDs,
+patches, verdicts and scores). An initial 80-file/12-mutant/4-worker run
+measured 1.85 s versus 1.49 s, but Go caches and process scheduling can
+swamp the discovery change; do not interpret that as a stable end-to-end
+speedup. Larger source files still require disk-backed sorting and merging,
+and output/result spooling retains its existing resource limits.

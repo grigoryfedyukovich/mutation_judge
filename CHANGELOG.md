@@ -1,3 +1,10 @@
+## Unreleased — R07-S13 direct emission for small-file discovery
+
+- Avoid creating and merging a temporary compact sorting run when all candidates in a source file fit below one 512-candidate discovery chunk. Sort the bounded in-memory slice, materialize patches, and append directly to the ordered output spool.
+- Leave multi-chunk external sorting, disk-backed ID validation, final JSON spooling, ordering, and error/cancellation handling unchanged. No increase in peak retained candidate count is needed.
+- Add small-file, chunk-boundary, cancellation, and malformed-source regressions, a many-small-files benchmark, and a reproducible end-to-end comparison script.
+- On a single-core 80-file discovery fixture, observed median runtime fell from ~1.51 ms to ~1.25 ms and allocated bytes from ~716 KB to ~647 KB. End-to-end results may be dominated by Go tests and compilation; do not claim a universal speedup.
+
 ## Unreleased — R07-S12 bounded size-aware external merge scheduling
 
 - Defer intermediate discovery-run merging until the bounded pending window fills, and feed up to 16 runs directly into final output without rewriting them first.
