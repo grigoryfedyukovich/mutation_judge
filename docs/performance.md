@@ -880,3 +880,24 @@ measured 1.85 s versus 1.49 s, but Go caches and process scheduling can
 swamp the discovery change; do not interpret that as a stable end-to-end
 speedup. Larger source files still require disk-backed sorting and merging,
 and output/result spooling retains its existing resource limits.
+
+## R07-S14 — final discovery spool serialization
+
+Unlimited streaming discovery writes sorted mutations to a private spool for
+execution. Previously each mutation was serialized as JSON and decoded before
+execution, even though the spool is a disposable internal file. R07-S14 uses
+the same length-framed compact record format already used by external sort runs
+for the **private final discovery spool**. It contains the complete mutation,
+including generated patches and equivalence reasons. `mutantspool.New()` still
+provides the original JSON-backed spool for other callers, while CLI JSON/text
+reports are unchanged.
+
+The final spool retains the adaptive in-memory threshold (64 records / 256 KiB)
+and 64 KiB buffered spill writes. Corrupted/truncated records and unexpected
+trailing data fail closed when read. Disk space still grows with discovered
+mutants, and large individual mutation records may require proportionally large
+allocations; this is not a peak-RSS bound.
+
+Benchmark with `go test ./internal/mutantspool -run '^$' -bench BenchmarkR07S14FinalSpool -benchmem`.
+The benchmark exercises append, full read, and cleanup on the same mutations
+for JSON and compact modes; it is **not** an end-to-end Go-test benchmark.

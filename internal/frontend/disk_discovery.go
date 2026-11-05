@@ -28,7 +28,7 @@ const discoveryMaxPendingRuns = 3 * discoveryMergeFanIn
 // merged externally, and their patches are generated only as they are emitted.
 // The returned spool is owned by the caller, including on later cancellation.
 func DiscoverToDisk(ctx context.Context, root string, files []string, opts Options) (out *mutantspool.Spool, count int, err error) {
-	out, err = mutantspool.New()
+	out, err = mutantspool.NewFinalCompact()
 	if err != nil {
 		return nil, 0, err
 	}

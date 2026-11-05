@@ -1,3 +1,10 @@
+## Unreleased — R07-S14 compact final mutation spooling
+
+- Use the already-tested, length-framed compact mutation codec for the private final discovery spool, removing JSON marshal/unmarshal overhead for each mutation before execution.
+- Retain the JSON-backed `mutantspool.New()` API for existing callers and leave public JSON/text reports, mutation IDs, metadata, scores, and order unchanged. Private compact spool files are ephemeral, never cached or exposed as interchange files.
+- Keep the adaptive in-memory threshold (64 records / 256 KiB) and bounded buffered disk spill; validate truncation and unexpected tail bytes before accepting stored discovery records.
+- Add full-field, Unicode, replay, overflow transition, cleanup, and corruption regressions and a same-workload JSON-vs-compact append/read benchmark. Streaming end-to-end throughput also depends on test execution and filesystem behavior.
+
 ## Unreleased — R07-S13 direct emission for small-file discovery
 
 - Avoid creating and merging a temporary compact sorting run when all candidates in a source file fit below one 512-candidate discovery chunk. Sort the bounded in-memory slice, materialize patches, and append directly to the ordered output spool.

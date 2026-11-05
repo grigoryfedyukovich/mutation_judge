@@ -20,6 +20,7 @@ type Spool struct {
 	file    *os.File
 	writer  *bufio.Writer
 	compact bool
+	final   bool // private final discovery spool (distinct from intermediate merge runs)
 	memory  [][]byte
 	bytes   int
 	count   int
@@ -29,9 +30,16 @@ type Spool struct {
 func New() (*Spool, error) { return &Spool{}, nil }
 
 // NewCompact creates a spool for private, temporary discovery merge runs.
-// Public-facing mutation result spools continue using JSON. The compact
-// format is not a persisted interchange format and must never be cached.
+// The compact format is not a persisted interchange format and must never be
+// cached or exposed as a public report.
 func NewCompact() (*Spool, error) { return &Spool{compact: true}, nil }
+
+// NewFinalCompact creates the private final mutation-discovery spool in the
+// same version-local compact format as intermediate runs. Discovery produces
+// Mutation values (including generated diffs), so the standard Reader can
+// reconstruct every field. New() remains JSON-backed for existing callers.
+// Neither format is a persistent cache or external report interchange format.
+func NewFinalCompact() (*Spool, error) { return &Spool{compact: true, final: true}, nil }
 
 func (s *Spool) Len() int {
 	if s == nil {
@@ -44,6 +52,9 @@ func (s *Spool) spill() error {
 	suffix := "mutation-judge-mutants-*.jsonl"
 	if s.compact {
 		suffix = "mutation-judge-merge-*.bin"
+		if s.final {
+			suffix = "mutation-judge-mutants-*.bin"
+		}
 	}
 	f, err := os.CreateTemp("", suffix)
 	if err != nil {
