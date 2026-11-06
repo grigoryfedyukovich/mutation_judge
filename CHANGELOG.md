@@ -1,3 +1,10 @@
+## Unreleased — R07-S15 allocation-aware compact spool decoding
+
+- Read length-framed compact final-spool records directly from the buffered reader into an owned, immutable string: the common <=32 KiB record uses `Peek` and a single copy; larger records use a bounded Peek/write loop into a pre-grown string builder. This avoids a temporary read buffer and redundant payload copy.
+- Decode all ten string fields as slices of the same immutable string while preserving their lifetime across later reader operations. Do not expose borrowed buffers through `Reader.Next`, and retain strict length, truncation and trailing-data validation.
+- Add ownership, repeated-read, large-record, truncated-record, 32 KiB boundary and 131,072-mutation RSS fixture tests, plus a platform-aware `scripts/benchmark-r07-s15.sh`.
+- Under Go 1.23.2/Linux, a focused 32,768-record decoding benchmark allocated ~65,543 times versus ~98,336 previously (33% fewer allocations), while elapsed times varied across repetitions. Peak RSS measured with the large-run fixture was similarly variable; no guaranteed RSS improvement or full end-to-end acceleration is claimed.
+
 ## Unreleased — R07-S14 compact final mutation spooling
 
 - Use the already-tested, length-framed compact mutation codec for the private final discovery spool, removing JSON marshal/unmarshal overhead for each mutation before execution.

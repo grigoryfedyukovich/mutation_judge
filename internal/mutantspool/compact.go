@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sync"
+	"strings"
 
 	"github.com/example/mutation-judge/internal/model"
 )
@@ -17,11 +17,6 @@ import (
 // Length framing permits detecting truncated/corrupt records without silently
 // returning an incorrect mutation. Nothing in this format is persisted.
 const maxCompactRecord = 512 << 20
-const maxPooledCompactRecord = 64 << 10
-
-// The decoded mutation owns an immutable copy of its record strings, so this
-// temporary read buffer can be reused immediately after decoding.
-var compactReadBuffers = sync.Pool{New: func() any { return make([]byte, 0, 4096) }}
 
 func encodeCompact(m model.Mutation) []byte {
 	// Reserve the maximum varint prefix in one allocation. Once the payload
@@ -53,15 +48,19 @@ func decodeCompact(record []byte) (model.Mutation, error) {
 }
 
 func decodeCompactBody(data []byte) (model.Mutation, error) {
+	// Once decoded, the mutation owns its strings independently of its source.
+	return decodeCompactString(string(data))
+}
+
+// decodeCompactString slices a single immutable allocation into the ten
+// mutation strings. No individual field needs a new allocation, and it is
+// safe for the caller to retain the result after the reader advances.
+func decodeCompactString(blob string) (model.Mutation, error) {
 	var m model.Mutation
-	// One immutable allocation backs all strings in this record. Slices keep
-	// their bytes alive until the merged mutation has been consumed, avoiding
-	// ten independently allocated strings per deserialized candidate.
-	blob := string(data)
 	pos := 0
 	nextString := func() (string, error) {
-		n, count := binary.Uvarint(data[pos:])
-		if count <= 0 || n > uint64(len(data)-pos-count) {
+		n, count := binary.Uvarint([]byte(blob[pos:]))
+		if count <= 0 || n > uint64(len(blob)-pos-count) {
 			return "", errors.New("truncated compact mutation string")
 		}
 		pos += count
@@ -70,7 +69,7 @@ func decodeCompactBody(data []byte) (model.Mutation, error) {
 		return s, nil
 	}
 	nextInt := func() (int, error) {
-		v, count := binary.Varint(data[pos:])
+		v, count := binary.Varint([]byte(blob[pos:]))
 		if count <= 0 {
 			return 0, errors.New("truncated compact mutation integer")
 		}
@@ -96,12 +95,15 @@ func decodeCompactBody(data []byte) (model.Mutation, error) {
 			return model.Mutation{}, err
 		}
 	}
-	if pos != len(data) {
+	if pos != len(blob) {
 		return model.Mutation{}, errors.New("compact mutation record has trailing data")
 	}
 	return m, nil
 }
 
+// readCompact consumes framed bytes directly into their final owned string
+// allocation. Using a builder and Peek avoids the temporary read buffer plus
+// a second whole-record copy while retaining ownership across future reads.
 func readCompact(r *bufio.Reader) (model.Mutation, error) {
 	n, err := binary.ReadUvarint(r)
 	if err != nil {
@@ -110,21 +112,35 @@ func readCompact(r *bufio.Reader) (model.Mutation, error) {
 	if n > maxCompactRecord || n > uint64(math.MaxInt)-binary.MaxVarintLen64 {
 		return model.Mutation{}, fmt.Errorf("compact mutation record too large: %d bytes", n)
 	}
-	record := compactReadBuffers.Get().([]byte)
-	if cap(record) < int(n) {
-		record = make([]byte, int(n))
-	} else {
-		record = record[:int(n)]
+	// Most records fit in the buffered reader. Copy directly from Peek's
+	// borrowed bytes into a single owned string, without a builder or scratch.
+	if n <= 32<<10 {
+		chunk, err := r.Peek(int(n))
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return model.Mutation{}, fmt.Errorf("read compact mutation record: %w", err)
+		}
+		blob := string(chunk)
+		_, _ = r.Discard(int(n))
+		return decodeCompactString(blob)
 	}
-	_, err = io.ReadFull(r, record)
-	var m model.Mutation
-	if err == nil {
-		m, err = decodeCompactBody(record)
-	} else {
-		err = fmt.Errorf("truncated compact mutation record: %w", err)
+	var owned strings.Builder
+	owned.Grow(int(n))
+	left := int(n)
+	for left > 0 {
+		chunkSize := min(left, 32<<10) // smaller than the 64 KiB reader buffer
+		chunk, err := r.Peek(chunkSize)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return model.Mutation{}, fmt.Errorf("read compact mutation record: %w", err)
+		}
+		_, _ = owned.Write(chunk) // Grow above guarantees capacity.
+		_, _ = r.Discard(len(chunk))
+		left -= len(chunk)
 	}
-	if cap(record) <= maxPooledCompactRecord {
-		compactReadBuffers.Put(record[:0])
-	}
-	return m, err
+	return decodeCompactString(owned.String())
 }

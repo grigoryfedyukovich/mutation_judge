@@ -901,3 +901,36 @@ allocations; this is not a peak-RSS bound.
 Benchmark with `go test ./internal/mutantspool -run '^$' -bench BenchmarkR07S14FinalSpool -benchmem`.
 The benchmark exercises append, full read, and cleanup on the same mutations
 for JSON and compact modes; it is **not** an end-to-end Go-test benchmark.
+
+## R07-S15: decoding the final compact mutation spool
+
+`mutantspool.Reader.Next` reads private final-spool compact records directly
+from a buffered file reader. Most records fit inside one 32 KiB `Peek`, and
+can be copied directly into their final immutable string backing allocation.
+Larger records use a pre-sized `strings.Builder` in 32 KiB chunks, without
+allocating an additional whole-record scratch buffer. Decoded field strings
+remain valid after subsequent reader operations; intermediate external-merge
+`CompactRecord` values remain borrowed and must still be consumed before the
+next read. The serialized format and public report formats are unchanged.
+
+The opt-in test `TestR07S15LargeSpoolRSSFixture` writes **131,072 mutation
+records**, then reads the entire spool twice, checking IDs, spans and patches.
+`scripts/benchmark-r07-s15.sh` compiles the benchmark test executable and
+reports decode throughput and peak RSS using platform-specific `/usr/bin/time`.
+The fixture measures internal spool I/O and decoding, **not** compilation,
+mutant test execution, or total mutation-analysis peak RSS.
+
+Example measurements (Go 1.23.2, Linux amd64, local container):
+
+| Measurement | R07-S14 | R07-S15 |
+|---|---:|---:|
+| 32,768-record read: allocations per cycle | 98,336–98,339 | 65,542–65,543 |
+| 32,768-record read: bytes allocated | ~28.66 MB | ~27.85 MB |
+| 32,768-record read: runtime, three repetitions | 13.9–19.8 ms | 13.1–15.0 ms |
+| 131,072-record fixture: peak RSS (two processes each) | 9.4 / 15.5 MB | 9.2 / 12.2 MB |
+
+RSS and wall-clock variability are considerable at these durations and are
+not evidence of a stable end-to-end memory or runtime improvement. The
+repeatable conclusion is the reduced per-record allocation count. Retained
+mutant results, source parsing, compiler children, and filesystem caches are
+outside this benchmark's scope.
