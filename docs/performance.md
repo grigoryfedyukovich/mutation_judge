@@ -934,3 +934,38 @@ not evidence of a stable end-to-end memory or runtime improvement. The
 repeatable conclusion is the reduced per-record allocation count. Retained
 mutant results, source parsing, compiler children, and filesystem caches are
 outside this benchmark's scope.
+
+
+## R07-S16: allocation-aware compact spool writing
+
+After the 64-record / 256 KiB adaptive threshold is crossed, the final and
+intermediate compact spools write length-framed mutations to a buffered file.
+Previously every append encoded into a newly allocated byte slice. R07-S16
+reuses a private scratch slice for subsequent disk-backed appends and reserves
+an upper-bound capacity for the encoded fields to avoid repeated slice growth.
+The buffered writer consumes the slice synchronously, so the scratch remains
+safe to reuse; no scratch alias is stored in the spool's in-memory records.
+The retained scratch capacity is capped at 256 KiB. A larger mutation is
+encoded and written normally, then its large temporary buffer is released.
+JSON-backed mutation spools (`New()`) are unaffected.
+
+Reproduce the focused append/close benchmark:
+
+```bash
+go test ./internal/mutantspool -run '^$' \
+  -bench '^BenchmarkR07S16CompactAppend/' -benchmem -benchtime=4x -count=3
+```
+
+With 4,096 compact mutations on this Linux amd64/Go 1.23.2 runner:
+
+| Measurement | R07-S15 | R07-S16 |
+|---|---:|---:|
+| Allocations per append/close cycle | 4,111 | 82 |
+| Allocated bytes | ~4.26 MB | ~0.13 MB |
+| Observed wall time across 3 short runs | 2.8–3.6 ms | 0.77–0.88 ms |
+
+Short microbenchmarks are sensitive to filesystem caching and scheduling.
+The stable change is a large reduction in allocations for disk-backed writes;
+this does not establish an end-to-end runtime or peak-RSS improvement.
+The original compact wire bytes, deterministic ordering, reader behavior,
+and public report schemas are unchanged.

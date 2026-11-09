@@ -1,3 +1,10 @@
+## Unreleased — R07-S16 allocation-efficient compact spool encoding
+
+- Reuse a private encoding buffer after compact mutation spools spill to disk, instead of allocating a serialized `[]byte` for every subsequently written record. Buffered file writes copy the bytes before the buffer is reused; in-memory records retain separately owned storage.
+- Reserve enough space for all ten strings and six integer fields to prevent repeated buffer growth. Release oversized scratch buffers instead of retaining memory proportional to a rare large mutation.
+- Preserve the private compact wire format and public report formats. Add regression tests for exact historical byte equivalence, repeated reads, spill transitions, large records, and the unaffected JSON spool.
+- On a Go 1.23.2/Linux local 4,096-record append/close microbenchmark, allocations fell from 4,111 to 82 and allocated bytes from ~4.26 MB to ~0.13 MB. This measures internal spool writing only, not end-to-end test execution or peak process RSS.
+
 ## Unreleased — R07-S15 allocation-aware compact spool decoding
 
 - Read length-framed compact final-spool records directly from the buffered reader into an owned, immutable string: the common <=32 KiB record uses `Peek` and a single copy; larger records use a bounded Peek/write loop into a pre-grown string builder. This avoids a temporary read buffer and redundant payload copy.

@@ -18,10 +18,28 @@ import (
 // returning an incorrect mutation. Nothing in this format is persisted.
 const maxCompactRecord = 512 << 20
 
-func encodeCompact(m model.Mutation) []byte {
+// encodeCompact retains its historical byte-for-byte framing. Callers that
+// keep the encoded bytes can use it directly; spilled spools use
+// encodeCompactInto with an exclusive reusable scratch buffer instead.
+func encodeCompact(m model.Mutation) []byte { return encodeCompactInto(nil, m) }
+
+func encodeCompactInto(dst []byte, m model.Mutation) []byte {
 	// Reserve the maximum varint prefix in one allocation. Once the payload
 	// length is known, slide the bytes down to the actual prefix width.
-	b := make([]byte, binary.MaxVarintLen64, len(m.ID)+len(m.Original)+len(m.Replacement)+len(m.Description)+len(m.Suggestion)+len(m.Diff)+len(m.EquivalentReason)+256)
+	// The payload contains ten length-prefixed strings and six varints.
+	// Reserving an upper bound avoids repeated growth on the in-memory path
+	// and amortizes disk-backed appends when the scratch buffer is reusable.
+	// Each varint is at most ten bytes (including signed values).
+	capacity := binary.MaxVarintLen64 + 16*binary.MaxVarintLen64 +
+		len(m.ID) + len(m.Operator) + len(m.RuleID) + len(m.Span.File) +
+		len(m.Original) + len(m.Replacement) + len(m.Description) +
+		len(m.Suggestion) + len(m.Diff) + len(m.EquivalentReason)
+	if cap(dst) < capacity {
+		dst = make([]byte, 0, capacity)
+	}
+	b := dst[:0]
+	var zeroPrefix [binary.MaxVarintLen64]byte
+	b = append(b, zeroPrefix[:]...)
 	for _, s := range []string{m.ID, m.Operator, m.RuleID, m.Span.File} {
 		b = binary.AppendUvarint(b, uint64(len(s)))
 		b = append(b, s...)

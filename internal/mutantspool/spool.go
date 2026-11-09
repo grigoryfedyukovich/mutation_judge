@@ -16,15 +16,20 @@ import (
 const memoryBytes = 256 << 10
 const memoryRecords = 64
 
+// Retain only modest encoding scratch buffers for disk-backed compact spools.
+// A single unusually large mutation must not permanently raise resident memory.
+const maxCompactWriteScratch = 256 << 10
+
 type Spool struct {
-	file    *os.File
-	writer  *bufio.Writer
-	compact bool
-	final   bool // private final discovery spool (distinct from intermediate merge runs)
-	memory  [][]byte
-	bytes   int
-	count   int
-	closed  bool
+	file                *os.File
+	writer              *bufio.Writer
+	compact             bool
+	final               bool // private final discovery spool (distinct from intermediate merge runs)
+	memory              [][]byte
+	compactWriteScratch []byte // private to the writer; never aliases retained in-memory records
+	bytes               int
+	count               int
+	closed              bool
 }
 
 func New() (*Spool, error) { return &Spool{}, nil }
@@ -82,7 +87,13 @@ func (s *Spool) Append(m model.Mutation) error {
 	var data []byte
 	var err error
 	if s.compact {
-		data = encodeCompact(m)
+		if s.file != nil {
+			data = encodeCompactInto(s.compactWriteScratch, m)
+		} else {
+			// In-memory records must own their bytes independently: they may be
+			// read multiple times after subsequent appends.
+			data = encodeCompact(m)
+		}
 	} else {
 		data, err = json.Marshal(m)
 		if err != nil {
@@ -103,6 +114,16 @@ func (s *Spool) Append(m model.Mutation) error {
 	}
 	if _, err := s.writer.Write(data); err != nil {
 		return fmt.Errorf("append mutation: %w", err)
+	}
+	// bufio.Writer.Write consumes the source synchronously. Only disk-backed
+	// compact spools may reuse its encoded record bytes. Oversized scratch is
+	// released immediately rather than held for the lifetime of the spool.
+	if s.compact {
+		if cap(data) <= maxCompactWriteScratch {
+			s.compactWriteScratch = data[:0]
+		} else {
+			s.compactWriteScratch = nil
+		}
 	}
 	s.count++
 	return nil
@@ -222,6 +243,7 @@ func (s *Spool) Close() error {
 	}
 	s.closed = true
 	s.memory = nil
+	s.compactWriteScratch = nil
 	s.bytes = 0
 	if s.file == nil {
 		return nil
