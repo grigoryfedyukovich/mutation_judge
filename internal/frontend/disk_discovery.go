@@ -1,7 +1,6 @@
 package frontend
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -183,16 +182,13 @@ func DiscoverToDisk(ctx context.Context, root string, files []string, opts Optio
 // A merge entry contains a borrowed compact record and its originating reader.
 // It avoids decoding/encoding all fields on intermediate merge passes.
 type compactMergeEntry struct {
-	record mutantspool.CompactRecord
+	record mutantspool.CheckedCompactRecord
 	source int
 }
 type compactMergeHeap []compactMergeEntry
 
-func compactLess(a, b mutantspool.CompactRecord) bool {
-	if a.StartByte != b.StartByte {
-		return a.StartByte < b.StartByte
-	}
-	return bytes.Compare(a.ID, b.ID) < 0
+func compactLess(a, b mutantspool.CheckedCompactRecord) bool {
+	return a.Less(b)
 }
 func (h *compactMergeHeap) push(v compactMergeEntry) {
 	*h = append(*h, v)
@@ -235,7 +231,7 @@ func (h *compactMergeHeap) pop() compactMergeEntry {
 	return first
 }
 
-func mergeCompactChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(mutantspool.CompactRecord) error) error {
+func mergeCompactChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(mutantspool.CheckedCompactRecord) error) error {
 	readers := make([]*mutantspool.Reader, len(chunks))
 	defer func() {
 		for _, r := range readers {
@@ -251,7 +247,7 @@ func mergeCompactChunks(ctx context.Context, chunks []*mutantspool.Spool, emit f
 			return err
 		}
 		readers[i] = r
-		rec, err := r.NextCompactRecord()
+		rec, err := r.NextCheckedCompactRecord()
 		if err == io.EOF {
 			continue
 		}
@@ -274,7 +270,7 @@ func mergeCompactChunks(ctx context.Context, chunks []*mutantspool.Spool, emit f
 		emitted++
 		// Only advance the source reader after the borrowed record has been
 		// consumed. Advancing sooner would overwrite its reusable buffer.
-		rec, err := readers[item.source].NextCompactRecord()
+		rec, err := readers[item.source].NextCheckedCompactRecord()
 		if err == io.EOF {
 			continue
 		}
@@ -287,7 +283,7 @@ func mergeCompactChunks(ctx context.Context, chunks []*mutantspool.Spool, emit f
 }
 
 func mergeChunks(ctx context.Context, chunks []*mutantspool.Spool, emit func(model.Mutation) error) error {
-	return mergeCompactChunks(ctx, chunks, func(rec mutantspool.CompactRecord) error {
+	return mergeCompactChunks(ctx, chunks, func(rec mutantspool.CheckedCompactRecord) error {
 		m, err := rec.Mutation()
 		if err != nil {
 			return err
@@ -331,7 +327,7 @@ func (d *discoveryRuns) mergeSmallest(ctx context.Context, k int) error {
 	if err != nil {
 		return err
 	}
-	if err = mergeCompactChunks(ctx, inputs, merged.AppendCompactRecord); err != nil {
+	if err = mergeCompactChunks(ctx, inputs, merged.AppendCheckedCompactRecord); err != nil {
 		_ = merged.Close()
 		return err
 	}

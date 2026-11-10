@@ -42,7 +42,7 @@ func TestR07S11CompactMergePreservesOrderAndAllFields(t *testing.T) {
 	}
 	merged, _ := mutantspool.NewCompact()
 	defer merged.Close()
-	if err := mergeCompactChunks(context.Background(), chunks, merged.AppendCompactRecord); err != nil {
+	if err := mergeCompactChunks(context.Background(), chunks, merged.AppendCheckedCompactRecord); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := merged.Reader()
@@ -67,7 +67,7 @@ func TestR07S11CompactMergeCancellation(t *testing.T) {
 	_ = s.Append(model.Mutation{ID: "M-000000000001"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := mergeCompactChunks(ctx, []*mutantspool.Spool{s}, func(_ mutantspool.CompactRecord) error { return nil }); err == nil {
+	if err := mergeCompactChunks(ctx, []*mutantspool.Spool{s}, func(_ mutantspool.CheckedCompactRecord) error { return nil }); err == nil {
 		t.Fatal("ignored canceled context")
 	}
 }

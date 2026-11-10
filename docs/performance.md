@@ -969,3 +969,34 @@ The stable change is a large reduction in allocations for disk-backed writes;
 this does not establish an end-to-end runtime or peak-RSS improvement.
 The original compact wire bytes, deterministic ordering, reader behavior,
 and public report schemas are unchanged.
+
+
+## R07-S17: single-validation compact external merges
+
+Each intermediate external-merge record was previously fully parsed twice:
+first by `Reader.NextCompactRecord` to validate its framing, fields and sort
+key, and again by `Spool.AppendCompactRecord` to verify the same payload before
+copying it. R07-S17 introduces `Reader.NextCheckedCompactRecord` and
+`Spool.AppendCheckedCompactRecord`. The checked record is opaque and borrowed:
+the originating reader must not advance or close until it is consumed. An
+explicit reader-position check rejects stale or fabricated checked records.
+This lets intermediate merges scan each record only once. The original
+`AppendCompactRecord` continues to validate all arbitrary caller-supplied
+compact bytes and remains unchanged as a fail-closed API.
+
+The wire format, reader corruption checks, merge sort order, and full mutation
+decoding for final report output remain unchanged. The checked forwarding path
+is only used after successful validation by the compact reader.
+
+Reproduce the focused merge-forwarding benchmark:
+
+```bash
+go test ./internal/mutantspool -run '^$' \
+  -bench '^BenchmarkR07S17IntermediateCompactForward/' -benchmem -count=3
+```
+
+On a Linux amd64 runner, 4,096 records took 1.28–1.39 ms per iteration using
+the previous double-validation API and 1.05–1.07 ms using the checked path.
+Allocations were identical (~4,185/op) and bytes allocated were essentially
+unchanged (~220 KiB/op). The fixture benchmarks internal record forwarding,
+not the full Go test or mutation-analysis process.

@@ -1,3 +1,10 @@
+## Unreleased — R07-S17 single-validation compact merge forwarding
+
+- Intermediate external merge readers validate complete compact records once, then pass opaque checked records to the destination spool without validating the same payload again.
+- Preserve the strict existing `AppendCompactRecord` path for caller-supplied, untrusted bytes. Checked records cannot be constructed with valid contents outside the spool package and are rejected after the originating reader advances or closes.
+- Preserve on-disk bytes, deterministic ordering, final mutation decoding, corruption rejection and bounded reader/write buffers; add byte-identity, stale-record, forgery, malformed-input and race regressions.
+- In a Linux amd64 / Go local 4,096-record append/read/close microbenchmark, validated forwarding took roughly 1.05 ms versus 1.28–1.39 ms for double validation. Allocations were unchanged (~4,185 per cycle). This does not imply end-to-end speedup or lower peak RSS.
+
 ## Unreleased — R07-S16 allocation-efficient compact spool encoding
 
 - Reuse a private encoding buffer after compact mutation spools spill to disk, instead of allocating a serialized `[]byte` for every subsequently written record. Buffered file writes copy the bytes before the buffer is reused; in-memory records retain separately owned storage.

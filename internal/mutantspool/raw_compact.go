@@ -1,6 +1,7 @@
 package mutantspool
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -141,6 +142,71 @@ func (r *Reader) NextCompactRecord() (CompactRecord, error) {
 	return rec, nil
 }
 
+// CheckedCompactRecord is an opaque, borrowed record that was fully validated
+// by Reader.NextCheckedCompactRecord. Its payload cannot be mutated by callers
+// outside this package. The origin and remaining-count guard ensure that the
+// reader has not been advanced or closed since the record was checked.
+//
+// The checked forwarding path avoids rescanning all fields at every external
+// merge level. Arbitrarily constructed CompactRecord values still use the
+// original strict validation in AppendCompactRecord.
+type CheckedCompactRecord struct {
+	payload   []byte
+	id        []byte
+	startByte int
+	origin    *Reader
+	remaining int
+	checked   bool
+}
+
+// NextCheckedCompactRecord checks framing and every compact field once.
+// Consume or append its result before advancing the originating reader.
+func (r *Reader) NextCheckedCompactRecord() (CheckedCompactRecord, error) {
+	rec, err := r.NextCompactRecord()
+	if err != nil {
+		return CheckedCompactRecord{}, err
+	}
+	return CheckedCompactRecord{
+		payload: rec.Payload, id: rec.ID, startByte: rec.StartByte,
+		origin: r, remaining: r.remaining, checked: true,
+	}, nil
+}
+
+// Less compares mutation sort keys without allocating strings or exposing
+// the borrowed payload to callers. External sorting also breaks ties by ID.
+func (rec CheckedCompactRecord) Less(other CheckedCompactRecord) bool {
+	if rec.startByte != other.startByte {
+		return rec.startByte < other.startByte
+	}
+	return bytes.Compare(rec.id, other.id) < 0
+}
+
+// Mutation materializes an owned mutation at final output, not on intermediate
+// merge passes. A stale borrowed buffer is never decoded.
+func (rec CheckedCompactRecord) Mutation() (model.Mutation, error) {
+	if err := rec.checkCurrent(); err != nil {
+		return model.Mutation{}, err
+	}
+	return decodeCompactBody(rec.payload)
+}
+
+func (rec CheckedCompactRecord) checkCurrent() error {
+	if !rec.checked || rec.origin == nil || rec.origin.closed || rec.origin.remaining != rec.remaining {
+		return errors.New("invalid or stale checked compact mutation record")
+	}
+	return nil
+}
+
+// AppendCheckedCompactRecord forwards a reader-validated record without a
+// second full-field scan. The opaque record must still belong to an active
+// reader at its current position. Copying happens synchronously before return.
+func (s *Spool) AppendCheckedCompactRecord(rec CheckedCompactRecord) error {
+	if err := rec.checkCurrent(); err != nil {
+		return err
+	}
+	return s.appendCompactPayload(rec.payload)
+}
+
 // AppendCompactRecord forwards a validated record without encoding the
 // Mutation again. Its payload is consumed synchronously (never retained by
 // reference), so the caller can safely advance its Reader immediately.
@@ -151,17 +217,30 @@ func (s *Spool) AppendCompactRecord(rec CompactRecord) error {
 	if len(rec.Payload) > maxCompactRecord {
 		return fmt.Errorf("compact mutation record too large: %d bytes", len(rec.Payload))
 	}
-	// Keep the same fail-closed guarantees as normal compact serialization.
+	// Untrusted callers must continue receiving full validation.
 	if _, err := compactKey(rec.Payload); err != nil {
 		return err
 	}
+	return s.appendCompactPayload(rec.Payload)
+}
+
+// appendCompactPayload accepts only a payload already verified by compactKey
+// or read through the opaque CheckedCompactRecord path.
+func (s *Spool) appendCompactPayload(payload []byte) error {
+	if s == nil || s.closed || !s.compact {
+		return errors.New("compact mutation spool is unavailable")
+	}
+	if len(payload) > maxCompactRecord {
+		return fmt.Errorf("compact mutation record too large: %d bytes", len(payload))
+	}
+
 	var header [binary.MaxVarintLen64]byte
-	prefixLen := binary.PutUvarint(header[:], uint64(len(rec.Payload)))
-	length := prefixLen + len(rec.Payload)
+	prefixLen := binary.PutUvarint(header[:], uint64(len(payload)))
+	length := prefixLen + len(payload)
 	if s.file == nil && len(s.memory) < memoryRecords && length <= memoryBytes-s.bytes {
 		data := make([]byte, length)
 		copy(data, header[:prefixLen])
-		copy(data[prefixLen:], rec.Payload)
+		copy(data[prefixLen:], payload)
 		s.memory = append(s.memory, data)
 		s.bytes += length
 		s.count++
@@ -175,7 +254,7 @@ func (s *Spool) AppendCompactRecord(rec CompactRecord) error {
 	if _, err := s.writer.Write(header[:prefixLen]); err != nil {
 		return fmt.Errorf("append compact record: %w", err)
 	}
-	if _, err := s.writer.Write(rec.Payload); err != nil {
+	if _, err := s.writer.Write(payload); err != nil {
 		return fmt.Errorf("append compact record: %w", err)
 	}
 	s.count++
