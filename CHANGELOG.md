@@ -1,3 +1,10 @@
+## Unreleased — R07-S18 borrowed-buffer compact merge reads
+
+- Read disk-backed compact records that fit the 64 KiB buffered reader using `Peek`/`Discard`, exposing a borrowed payload directly from the reader buffer instead of copying every record into scratch storage.
+- Preserve the checked-record lifetime contract: the origin reader cannot advance or close before the record is consumed. Oversized records continue to use the existing scratch-buffer fallback.
+- Maintain strict framing, full-field validation, deterministic merge order, wire bytes, report output and corruption/truncation rejection. Add mixed small/large record, buffer boundary and early-EOF regressions.
+- On the same Linux amd64 / Go 1.23.2 4,096-record forwarding benchmark, the median of four 100-iteration samples fell from ~1.27 ms to ~1.13 ms (about 11%). A 4,600-function discovery-only benchmark fell from ~45.1 ms to ~37.8 ms. These are local measurements; full mutation-analysis runtime depends heavily on compilation and tests.
+
 ## Unreleased — R07-S17 single-validation compact merge forwarding
 
 - Intermediate external merge readers validate complete compact records once, then pass opaque checked records to the destination spool without validating the same payload again.

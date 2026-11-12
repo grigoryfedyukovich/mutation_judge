@@ -1000,3 +1000,46 @@ the previous double-validation API and 1.05–1.07 ms using the checked path.
 Allocations were identical (~4,185/op) and bytes allocated were essentially
 unchanged (~220 KiB/op). The fixture benchmarks internal record forwarding,
 not the full Go test or mutation-analysis process.
+
+
+## R07-S18: borrow small compact records directly from the merge reader
+
+Intermediate merge readers previously copied *every* disk-backed compact
+record from the `bufio.Reader` into a separate reusable `rawScratch` buffer
+before validating and forwarding it. When a record fits in the existing
+64 KiB reader buffer, the merge now uses `Peek` followed by `Discard` and
+validates the borrowed view in place. It does not retain that view after the
+source reader advances. Larger records still use the original `io.ReadFull`
+scratch path to avoid enlarging the buffering budget. The opaque checked
+record from R07-S17 retains its origin/position validity checks and is
+consumed synchronously before the next read.
+
+This removes one per-record memory copy without weakening corruption checks,
+changing the private compact wire format, or changing public reports. Tests
+cover mixed large/small records, buffer refills, truncation, checked-record
+lifetimes, and full mutation reconstruction.
+
+Reproduce the same-workload comparison against the R07-S17 checkout:
+
+```bash
+go test ./internal/mutantspool -run '^$' \
+  -bench '^BenchmarkR07S17IntermediateCompactForward/checked-once$' \
+  -benchtime=100x -count=4 -benchmem
+go test ./internal/frontend -run '^$' \
+  -bench '^BenchmarkR07S10DiscoveryMerge$' -benchtime=3x -count=3 -benchmem
+```
+
+Observed on Linux amd64 / Go 1.23.2:
+
+| Benchmark | R07-S17 median | R07-S18 median |
+|---|---:|---:|
+| 4,096-record checked forwarding (4 samples) | 1.269 ms | 1.132 ms |
+| 4,600-function discovery (3 samples) | 45.118 ms | 37.838 ms |
+
+The forwarding benchmark allocated 4,185 versus 4,181 times per iteration;
+the discovery benchmark's allocated bytes and allocations were essentially
+unchanged. An additional 80-file/12-mutant CLI fixture produced identical
+ordered results, patches, verdicts, and scores, with single-run wall/RSS
+measurements of 1.46 s / 73,708 KiB (before) and 1.43 s / 71,816 KiB
+(after). These small end-to-end differences are within normal measurement
+noise and are **not** evidence of a repeatable CLI-level acceleration.

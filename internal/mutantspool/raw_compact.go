@@ -125,12 +125,32 @@ func (r *Reader) NextCompactRecord() (CompactRecord, error) {
 		if n > maxCompactRecord || n > uint64(math.MaxInt) {
 			return CompactRecord{}, fmt.Errorf("compact mutation record too large: %d bytes", n)
 		}
-		if cap(r.rawScratch) < int(n) {
-			r.rawScratch = make([]byte, int(n))
-		}
-		payload = r.rawScratch[:int(n)]
-		if _, err := io.ReadFull(r.compactReader, payload); err != nil {
-			return CompactRecord{}, fmt.Errorf("truncated compact mutation record: %w", err)
+		// For records that fit in the reader buffer, Peek gives us a
+		// validated, borrowed view directly into that buffer. Discard only
+		// advances its cursor; the bytes remain valid until the next read
+		// from this Reader. Merge forwarding consumes the record before
+		// advancing its source reader, so no intermediate payload copy is
+		// necessary for the common case.
+		if n <= uint64(r.compactReader.Size()) {
+			payload, err = r.compactReader.Peek(int(n))
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					err = io.ErrUnexpectedEOF
+				}
+				return CompactRecord{}, fmt.Errorf("truncated compact mutation record: %w", err)
+			}
+			_, _ = r.compactReader.Discard(int(n))
+		} else {
+			// Oversized records can cross buffer boundaries. Preserve the
+			// existing bounded chunked reader and borrow its scratch until
+			// the next call, rather than allocating an unbounded Peek buffer.
+			if cap(r.rawScratch) < int(n) {
+				r.rawScratch = make([]byte, int(n))
+			}
+			payload = r.rawScratch[:int(n)]
+			if _, err := io.ReadFull(r.compactReader, payload); err != nil {
+				return CompactRecord{}, fmt.Errorf("truncated compact mutation record: %w", err)
+			}
 		}
 	}
 	rec, err := compactKey(payload)
