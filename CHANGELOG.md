@@ -1,3 +1,10 @@
+## Unreleased — R07-S19 end-to-end-profiled patch-generation allocation reduction
+
+- Profile the 24,000-function disk-backed discovery path. Unified-diff creation, especially per-hunk line-slice allocation and repeated string-builder growth, was a significant source of allocated bytes.
+- Count and write patch lines directly from source spans instead of allocating four per-hunk `[][]byte` slices. Pre-size the patch builder while retaining exact Git-compatible hunk framing, no-final-newline markers, CRLF bytes, and unusual filename quoting.
+- Add a deterministic comparison with the original formatter over 1,600 source/path/span variants, plus the existing independent `git apply` patch-replay regressions.
+- Same-workload Go 1.23.2/Linux 24,000-function discovery benchmark: allocated bytes decreased from ~106.6 MB to ~85.7 MB (~20%) and allocations from ~2.03M to ~1.75M (~14%); median discovery time improved from ~229 ms to ~211 ms across three runs (~8%). CLI run with 160 files/16 mutants preserved full results, but repeated runtime differences were small and inconclusive.
+
 ## Unreleased — R07-S18 borrowed-buffer compact merge reads
 
 - Read disk-backed compact records that fit the 64 KiB buffered reader using `Peek`/`Discard`, exposing a borrowed payload directly from the reader buffer instead of copying every record into scratch storage.

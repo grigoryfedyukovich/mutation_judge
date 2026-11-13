@@ -1043,3 +1043,45 @@ ordered results, patches, verdicts, and scores, with single-run wall/RSS
 measurements of 1.46 s / 73,708 KiB (before) and 1.43 s / 71,816 KiB
 (after). These small end-to-end differences are within normal measurement
 noise and are **not** evidence of a repeatable CLI-level acceleration.
+
+## R07-S19 — full-discovery allocation profiling and patch generation
+
+A CPU and allocation profile of `BenchmarkR07S11MultiPass` (one Go file with
+24,000 functions, disk-backed unlimited discovery) identified unified patch
+construction as a major source of allocation volume. Patch production is part
+of discovery even if the analyzer evaluates only a small subset of mutants.
+R07-S19 removes temporary line-slice allocations and pre-sizes the final diff
+builder. Output bytes and all mutation decisions remain unchanged.
+
+Reproduce the focused comparisons with the tests and benchmarks built into the
+frontend package:
+
+```bash
+go test ./internal/frontend -run 'TestR07S19UnifiedDiffEquivalence|TestMutationDiffGitApply|TestEveryDiscoveredMutationPatchReplays' -count=1
+go test ./internal/frontend -run '^$' -bench '^BenchmarkR07S19UnifiedDiff$' -benchtime=200ms -count=3 -benchmem
+go test ./internal/frontend -run '^$' -bench '^BenchmarkR07S11MultiPass$' -benchtime=3x -count=3 -benchmem
+```
+
+The same-workload 24,000-function measurements (Go 1.23.2, Linux amd64) were
+approximately 106.66 MB and 2.03 million allocations before, versus 85.65 MB
+and 1.75 million allocations afterward (roughly 20% fewer allocated bytes and
+14% fewer allocations). In three identically configured runs, median discovery
+time was about 229 ms before and 211 ms after (~8% faster on this workload).
+The microbenchmark also reduced allocations for a small three-line diff from
+13 to 7. Execution times fluctuate across runs; the allocation reduction is
+the more reliable finding.
+
+For end-to-end comparisons build the previous and current CLIs separately and
+reuse the existing reproducible fixture:
+
+```bash
+bash scripts/benchmark-r07-s13.sh /path/to/previous-cli /path/to/current-cli 160 16 4 /tmp/mj-r07s19
+```
+
+In an A/B/B/A run on this fixture the previous and updated versions both took
+roughly 2.3–2.5 seconds and around 71–74 MiB peak RSS. All 16 executed
+mutants, discovery counts, patches, verdicts and scores were identical.
+This does **not** demonstrate a reliable CLI throughput or RSS improvement:
+compiling and executing tests dominates this modest mutation count. The
+optimization does not change the AST parser or the resource cost of sandbox
+creation, and no general peak-RSS bound is asserted.

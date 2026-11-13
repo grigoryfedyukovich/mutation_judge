@@ -1996,12 +1996,32 @@ func diffPath(prefix, file string) string {
 	return b.String()
 }
 
-func writeDiffLines(b *strings.Builder, prefix byte, lines [][]byte) {
-	for _, line := range lines {
+// patchLineCount counts real lines without treating a final newline as an
+// additional empty line. This matches diffLines but avoids allocating a slice
+// for every hunk and every individual context line.
+func patchLineCount(block []byte) int {
+	if len(block) == 0 {
+		return 0
+	}
+	count := bytes.Count(block, []byte{'\n'})
+	if block[len(block)-1] != '\n' {
+		count++
+	}
+	return count
+}
+
+// writeDiffBlock writes directly from source bytes. It retains original CRLF
+// bytes and emits an EOF marker only for an unterminated final line.
+func writeDiffBlock(b *strings.Builder, prefix byte, block []byte) {
+	for len(block) > 0 {
 		b.WriteByte(prefix)
-		b.Write(line)
-		if line[len(line)-1] != '\n' {
+		if end := bytes.IndexByte(block, '\n'); end >= 0 {
+			b.Write(block[:end+1])
+			block = block[end+1:]
+		} else {
+			b.Write(block)
 			b.WriteString("\n\\ No newline at end of file\n")
+			return
 		}
 	}
 }
@@ -2041,19 +2061,25 @@ func unifiedDiff(file string, src []byte, lines lineOffsets, start, end int, rep
 	if ctxEndLine < len(lines) {
 		ctxEnd = lines[ctxEndLine]
 	}
-	prefixLines := diffLines(src[ctxStart:lineStart])
-	oldLines := diffLines(oldBlock)
-	newLines := diffLines(newBlock)
-	suffixLines := diffLines(src[lineEnd:ctxEnd])
+	prefix := src[ctxStart:lineStart]
+	suffix := src[lineEnd:ctxEnd]
+	contextCount := patchLineCount(prefix) + patchLineCount(suffix)
+	oldCount := patchLineCount(oldBlock) + contextCount
+	newCount := patchLineCount(newBlock) + contextCount
 
 	var b strings.Builder
+	// One allocation for the final patch string is sufficient in the common
+	// case. Each real line adds one prefix byte; reserve a small allowance
+	// for the header, path quoting, and at most four no-newline markers.
+	lineCount := contextCount + patchLineCount(oldBlock) + patchLineCount(newBlock)
+	b.Grow(8*len(file) + len(prefix) + len(suffix) + len(oldBlock) + len(newBlock) +
+		lineCount + 4*len("\n\\ No newline at end of file\n") + 128)
 	fmt.Fprintf(&b, "--- %s\n+++ %s\n@@ -%d,%d +%d,%d @@\n",
 		diffPath("a/", file), diffPath("b/", file), ctxStartLine+1,
-		len(prefixLines)+len(oldLines)+len(suffixLines), ctxStartLine+1,
-		len(prefixLines)+len(newLines)+len(suffixLines))
-	writeDiffLines(&b, ' ', prefixLines)
-	writeDiffLines(&b, '-', oldLines)
-	writeDiffLines(&b, '+', newLines)
-	writeDiffLines(&b, ' ', suffixLines)
+		oldCount, ctxStartLine+1, newCount)
+	writeDiffBlock(&b, ' ', prefix)
+	writeDiffBlock(&b, '-', oldBlock)
+	writeDiffBlock(&b, '+', newBlock)
+	writeDiffBlock(&b, ' ', suffix)
 	return b.String()
 }
