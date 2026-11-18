@@ -50,6 +50,7 @@ type preparedAnalysis struct {
 	root            string
 	workRel         string
 	sandbox         string
+	copyPlan        *workspace.CopyPlan
 	cleanup         func()
 	mutants         []model.Mutation
 	mutationSpool   *mutantspool.Spool // non-nil for disk-backed unlimited discovery
@@ -67,6 +68,15 @@ type preparedAnalysis struct {
 	testScopes      map[string][]string // package import path -> observing test packages; resolved for scope/coverage selection
 	pkgs            []workspace.Package // resolved go test package universe; also used for per-test coverage and cache identity
 	perTestCoverage covermap.PerTest    // zero value (Len()==0) unless CoverageTestSelection is on and succeeded
+}
+
+// freshSandbox gives every execution an independent private tree. Test
+// fixtures constructing preparedAnalysis directly may lack a copy plan.
+func (p preparedAnalysis) freshSandbox(ctx context.Context, cacheDir string) (string, func(), error) {
+	if p.copyPlan != nil {
+		return p.copyPlan.Copy(ctx)
+	}
+	return workspace.CopyModuleContext(ctx, p.sandbox, cacheDir)
 }
 
 func (p preparedAnalysis) mutantCount() int {
@@ -429,12 +439,20 @@ func (e Engine) prepareContextMode(ctx context.Context, req Request, toolchain r
 	if err := ctx.Err(); err != nil {
 		return preparedAnalysis{}, fmt.Errorf("preparation deadline or cancellation: %w", err)
 	}
+	// Build the copy manifest only after local replacements and all Go
+	// preparation commands have finished modifying the private snapshot.
+	// Reuse immutable metadata for every later baseline, profiling, and
+	// mutant sandbox instead of walking/re-statting the tree per execution.
+	copyPlan, err := workspace.NewCopyPlan(ctx, snapshot, req.Config.CacheDir)
+	if err != nil {
+		return preparedAnalysis{}, fmt.Errorf("prepare sandbox copy manifest: %w", err)
+	}
 	// The snapshot is a template, never a runnable workspace. A test may
 	// write anywhere in its sandbox, so no sandbox is reused.
 	backendName, backendVersion := backendIdentity(e.Backend)
 	preparedOK = true
 	return preparedAnalysis{
-		root: root, workRel: filepath.ToSlash(workRel), sandbox: snapshot, cleanup: cleanup,
+		root: root, workRel: filepath.ToSlash(workRel), sandbox: snapshot, copyPlan: copyPlan, cleanup: cleanup,
 		mutants: mutants, mutationSpool: mutationSpool, discovered: discovered, parsingMS: parsingMS, sourceDigest: sourceDigest,
 		environment: environment, environmentHash: environmentHash, cacheSafe: cacheSafe, cacheWarning: cacheWarning,
 		backendName: backendName, backendVersion: backendVersion, toolchain: toolchain,
@@ -475,7 +493,7 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	started := time.Now()
 	elapsed := func() int64 { return time.Since(started).Milliseconds() }
 	// Match mutant runs: no CoverageOut or other extra go test flags.
-	sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+	sandbox, cleanup, err := p.freshSandbox(ctx, req.Config.CacheDir)
 	if err != nil {
 		return covermap.Map{}, false, elapsed(), "", fmt.Errorf("create clean baseline sandbox: %w", err)
 	}
@@ -495,7 +513,7 @@ func (e Engine) runBaseline(ctx context.Context, req Request, p preparedAnalysis
 	// Profiling is optional evidence, not the authoritative test command.
 	// Errors and instrumentation-dependent failures cannot establish coverage;
 	// retain normal mutant execution with unknown coverage instead.
-	sandbox, cleanup, err = workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+	sandbox, cleanup, err = p.freshSandbox(ctx, req.Config.CacheDir)
 	if err != nil {
 		if ctx.Err() != nil {
 			return covermap.Map{}, false, elapsed(), "", ctx.Err()
@@ -567,7 +585,7 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 		}
 		// Test initialization during enumeration may also write fixtures.
 		// Never let that change the inputs of an individual test.
-		listing, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+		listing, cleanup, err := p.freshSandbox(ctx, req.Config.CacheDir)
 		if err != nil {
 			return covermap.PerTest{}, fmt.Errorf("create listing sandbox for %s: %w", pkg.ImportPath, err)
 		}
@@ -583,7 +601,7 @@ func (e Engine) buildPerTestCoverage(ctx context.Context, req Request, p prepare
 			if err := ctx.Err(); err != nil {
 				return covermap.PerTest{}, err
 			}
-			sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+			sandbox, cleanup, err := p.freshSandbox(ctx, req.Config.CacheDir)
 			if err != nil {
 				return covermap.PerTest{}, fmt.Errorf("create profiling sandbox for %s: %w", name, err)
 			}
@@ -748,8 +766,19 @@ func (e Engine) runOneMutant(ctx context.Context, req Request, p preparedAnalysi
 	if !hit {
 		// Every mutant starts from the same pristine snapshot, including
 		// when multiple jobs pass through the same worker goroutine.
-		sandbox, cleanup, err := workspace.CopyModule(p.sandbox, req.Config.CacheDir)
+		sandbox, cleanup, err := p.freshSandbox(ctx, req.Config.CacheDir)
 		if err != nil {
+			// A parent interruption during snapshot copying is an
+			// incomplete mutant, not a preparation/baseline failure.
+			// Returning UNKNOWN keeps the partial report and interruption
+			// journal intact; it is never written to the verdict cache.
+			if ctx.Err() != nil {
+				backendResult = runner.Result{Verdict: model.VerdictUnknown, Output: "sandbox creation interrupted", GoVersion: p.toolchain.GoVersion}
+				result = makeResult(mut, backendResult, false, covered, known)
+				result.Diagnostic.Evidence["test_working_directory"] = p.workRel
+				result.Diagnostic.Evidence["test_command"] = testCommandForRun(req.Config.Timeout, testRun, scope)
+				return result, false, nil, nil
+			}
 			return model.Result{}, false, nil, fmt.Errorf("create clean sandbox for %s: %w", mut.ID, err)
 		}
 		defer cleanup()

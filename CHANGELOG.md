@@ -1,3 +1,12 @@
+## Unreleased — R07-S20 reusable immutable sandbox copy manifests
+
+- Profile the complete mutant execution path and identify per-mutant sandbox copying as repeated metadata traversal overhead, separate from Go compilation and test execution.
+- After capturing and finalizing the immutable module snapshot (including local replacement rewriting), build one ordered copy manifest of directories, regular files and symlinks. Reuse it for uninstrumented baseline, optional coverage, test enumeration, per-test profiling and every mutant, without rewalking or restatting the template on each run.
+- Continue creating independent writable files per sandbox, with existing safe clone/copy fallback, canceled-copy handling, link rewriting, and per-worker queue bounds. Never use hard links or reuse a sandbox across mutations. Preserve `CopyModule` for independent source acquisition and tests.
+- On a 2,000-file fixture, measured allocations per sandbox decreased from ~29,652 / 1.98 MB to ~16,327 / 0.88 MB; wall-time measurements were noisy and sometimes *slower* (~94–98 ms versus ~100–107 ms). No universal end-to-end speedup or peak-RSS reduction is claimed. The one-time manifest increases preparation metadata memory in exchange for reducing per-copy allocation churn.
+- Add per-copy parity, filesystem isolation, in-tree and outbound symlink, permission, cancellation and allocation benchmarks.
+- Preserve mutation-phase interruption evidence when cancellation occurs during a context-aware sandbox copy: return an uncached UNKNOWN result rather than treating the cancellation as an analysis-preparation error. The existing SIGTERM journal regression verifies the behavior.
+
 ## Unreleased — R07-S19 end-to-end-profiled patch-generation allocation reduction
 
 - Profile the 24,000-function disk-backed discovery path. Unified-diff creation, especially per-hunk line-slice allocation and repeated string-builder growth, was a significant source of allocated bytes.

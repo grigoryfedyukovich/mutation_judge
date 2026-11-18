@@ -580,6 +580,38 @@ func CopyModuleContext(ctx context.Context, root, cacheDir string) (string, func
 }
 
 func copyModuleWithWorkers(ctx context.Context, root, cacheDir string, workers int) (string, func(), error) {
+	return copyModuleEntries(ctx, root, workers, func(emit func(copyEntry) error) error {
+		return sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
+			entry := copyEntry{rel: rel}
+			if d.IsDir() {
+				entry.kind = copyDirectory
+			} else if d.Type()&os.ModeSymlink != 0 {
+				entry.kind = copySymlink
+				target, err := os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				entry.target = target
+			} else {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("unsupported sandbox entry type %s: %s", info.Mode().Type(), rel)
+				}
+				entry.kind = copyRegular
+				entry.mode = info.Mode()
+			}
+			return emit(entry)
+		})
+	})
+}
+
+// copyModuleEntries shares the same private-file copy and bounded worker
+// machinery for both a fresh filesystem walk and a prevalidated immutable
+// snapshot manifest. Only the source enumeration strategy differs.
+func copyModuleEntries(ctx context.Context, root string, workers int, walk func(func(copyEntry) error) error) (string, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
@@ -653,33 +685,27 @@ func copyModuleWithWorkers(ctx context.Context, root, cacheDir string, workers i
 			}()
 		}
 	}
-	walkErr := sandboxEntries(root, cacheDir, func(path, rel string, d fs.DirEntry) error {
+	walkErr := walk(func(entry copyEntry) error {
 		if err := copyCtx.Err(); err != nil {
 			return err
 		}
-		dst := filepath.Join(tmp, filepath.FromSlash(rel))
-		if d.IsDir() {
-			return os.MkdirAll(dst, 0o755)
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			rewritten, err := sandboxSymlinkTarget(rootAbs, tmp, dst, target)
+		path := filepath.Join(rootAbs, filepath.FromSlash(entry.rel))
+		dst := filepath.Join(tmp, filepath.FromSlash(entry.rel))
+		switch entry.kind {
+		case copyDirectory:
+			// Parents precede children in both WalkDir and CopyPlan entries.
+			return os.Mkdir(dst, 0o755)
+		case copySymlink:
+			rewritten, err := sandboxSymlinkTarget(rootAbs, tmp, dst, entry.target)
 			if err != nil {
 				return err
 			}
 			return os.Symlink(rewritten, dst)
+		case copyRegular:
+			return enqueue(copyTask{path, dst, entry.mode})
+		default:
+			return fmt.Errorf("unrecognized snapshot entry %s", entry.rel)
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("unsupported sandbox entry type %s: %s", info.Mode().Type(), rel)
-		}
-		return enqueue(copyTask{path, dst, info.Mode()})
 	})
 	// Closing the queue and joining all workers is mandatory even on errors:
 	// never remove a directory while another goroutine can still write it.

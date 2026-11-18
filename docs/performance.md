@@ -1085,3 +1085,36 @@ This does **not** demonstrate a reliable CLI throughput or RSS improvement:
 compiling and executing tests dominates this modest mutation count. The
 optimization does not change the AST parser or the resource cost of sandbox
 creation, and no general peak-RSS bound is asserted.
+
+
+## R07-S20: reuse an immutable sandbox copy manifest
+
+Preparation now records the sandbox entries **once**, after module replacement
+isolation and package discovery have completed. Every subsequent baseline,
+coverage run, test listing, profiling run, or mutant uses that same manifest
+to materialize an **independent** writable sandbox. The manifest stores only
+relative paths, file permissions and symlink targets, never file contents;
+source bytes remain in the private snapshot until each copy is performed.
+Temporary sandbox files are never hard-linked to the snapshot. Filesystem
+CoW clones remain acceptable because writes do not affect the source.
+
+The manifest deliberately does *not* replace the initial source acquisition
+walk or the source digest. It is valid only for the immutable internal
+snapshot and is prepared after all changes to that snapshot. An independent
+`CopyModule` call still enumerates current source entries each time.
+
+Reproduce the copy-only benchmark:
+
+```bash
+go test ./internal/workspace -run '^$' \
+  -bench '^BenchmarkR07S20SandboxCopy' -benchtime=5x -count=2 -benchmem
+```
+
+On Go 1.23.2/Linux x86-64 with 2,000 files, the benchmark observed legacy
+copy ~1.98 MB/29,652 allocations versus manifest copy ~0.88 MB/16,327
+allocations. Elapsed times varied (~94–107 ms) with no established gain,
+and can regress because the filesystem's write path dominates. The plan
+itself consumes memory proportional to the number of snapshot entries, so
+this change improves *per-sandbox allocation churn*, not a proven global
+resident-memory bound. Profiling and Go compilation continue to dominate
+some end-to-end workloads.
