@@ -19,7 +19,7 @@ import (
 	"github.com/example/mutation-judge/internal/model"
 )
 
-const SemanticsVersion = "mutation-judge-operators/v15"
+const SemanticsVersion = "mutation-judge-operators/v16"
 
 type Options struct {
 	Operators        map[string]bool
@@ -351,7 +351,12 @@ func discoverFileEmit(rel string, src []byte, opts Options, emit func(model.Muta
 					"delete boolean negation", "add paired true/false cases that make the negation observable", "")
 			}
 		case *ast.Ident:
-			if opts.Operators["boolean"] && (x.Name == "true" || x.Name == "false") {
+			// Spelling is not enough: Go lets true and false be shadowed.
+			// Only a use of the predeclared constant, whose flip is also
+			// that other predeclared constant, is MJ-BOOL-LITERAL. The
+			// dead-store proof is attached only in that case; a shadowed
+			// name can change the inferred type of a := declaration.
+			if opts.Operators["boolean"] && (x.Name == "true" || x.Name == "false") && predeclaredBoolFlip(opts, rel, f.Name.Name, fset, x) {
 				repl := "true"
 				if x.Name == "true" {
 					repl = "false"
@@ -870,7 +875,11 @@ func unwrapParen(e ast.Expr) ast.Expr {
 //
 //   - The declaration must be `:=` with exactly one identifier on the
 //     left (not `_`) and a bare `true`/`false` identifier as the whole
-//     right-hand side.
+//     right-hand side. The caller emits the proof only when that
+//     identifier and its flip both resolve to the predeclared universe
+//     boolean constants (see predeclaredBoolFlip). A shadowed name is
+//     not a boolean literal: flipping it can change the inferred type
+//     of the declaration, which stays observable after the overwrite.
 //   - The overwrite must be the immediately following statement of the
 //     same statement list, so nothing can run, and no label or goto
 //     target can intervene, between the declaration and it.

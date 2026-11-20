@@ -59,6 +59,7 @@ type pkgCache struct {
 	linknameScanned  bool
 	linknameComplete bool
 	linknameDecls    []linknameDecl
+	boolFlips        map[string]*boolFlipIndex
 }
 
 func newPkgCache(root string) *pkgCache {
@@ -220,6 +221,7 @@ func (c *pkgCache) mayBeLinked(dir, name string) bool {
 
 // pkgInfo is every parsed same-package file in one directory.
 type pkgInfo struct {
+	fset  *token.FileSet
 	files []*ast.File
 	asm   string
 	bad   bool
@@ -239,6 +241,7 @@ func (c *pkgCache) load(dir, pkgName string) *pkgInfo {
 		return info
 	}
 	fset := token.NewFileSet()
+	info.fset = fset
 	for _, e := range entries {
 		if e.IsDir() {
 			continue

@@ -1,3 +1,8 @@
+## Unreleased — boolean literals require predeclared constants
+
+- `MJ-BOOL-LITERAL` is emitted only when both the identifier and its flip resolve to the predeclared universe `true` and `false`. Package-level shadows (other files, generated files, internal tests), import names, type parameters, parameters, and local declarations are not mutated as boolean constants, and the dead-store proof is not applied to them. A shadowed name can change the inferred type of a `:=` declaration, so the old spelling-only proof marked killable mutants `EQUIVALENT` without running them.
+- An unparsable sibling in the same package directory suppresses boolean-literal mutants instead of claiming the constants are unshadowed. Bumped `SemanticsVersion` to `v16`.
+
 ## Unreleased — R07-S20 reusable immutable sandbox copy manifests
 
 - Profile the complete mutant execution path and identify per-mutant sandbox copying as repeated metadata traversal overhead, separate from Go compilation and test execution.
