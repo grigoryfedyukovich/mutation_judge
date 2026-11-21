@@ -1,3 +1,9 @@
+## Unreleased — audit D01–D04
+
+- Boolean literals require predeclared true/false (`v16`).
+- Length-framed sandbox digests (`mutation-judge-digest/v2`, execution cache `v6`).
+- Symlink admission follows directory links before `..`; nested Go packages under root `bin/` are retained.
+
 ## Unreleased — boolean literals require predeclared constants
 
 - `MJ-BOOL-LITERAL` is emitted only when both the identifier and its flip resolve to the predeclared universe `true` and `false`. Package-level shadows (other files, generated files, internal tests), import names, type parameters, parameters, and local declarations are not mutated as boolean constants, and the dead-store proof is not applied to them. A shadowed name can change the inferred type of a `:=` declaration, so the old spelling-only proof marked killable mutants `EQUIVALENT` without running them.

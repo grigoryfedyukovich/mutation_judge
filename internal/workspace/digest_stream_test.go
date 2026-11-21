@@ -2,9 +2,9 @@ package workspace
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,7 +16,7 @@ import (
 // oldDigestReference intentionally retains the pre-R07-S1 os.ReadFile path.
 // This is an independent compatibility oracle for the byte stream hashed by
 // Digest, including path/kind/mode framing, directory entries, and symlinks.
-func oldDigestReference(root, cacheDir string) (string, error) {
+func framedDigestReference(root, cacheDir string) (string, error) {
 	type entry struct {
 		rel, kind, target string
 		mode              os.FileMode
@@ -54,24 +54,24 @@ func oldDigestReference(root, cacheDir string) (string, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
 	h := sha256.New()
+	writeDigestFrame(h, []byte(digestVersion))
 	for _, e := range entries {
-		_, _ = io.WriteString(h, e.rel)
-		_, _ = h.Write([]byte{0})
-		_, _ = io.WriteString(h, e.kind)
-		_, _ = h.Write([]byte{0})
+		writeDigestFrame(h, []byte(e.rel))
+		writeDigestFrame(h, []byte(e.kind))
 		switch e.kind {
 		case "symlink":
-			_, _ = io.WriteString(h, e.target)
+			writeDigestFrame(h, []byte(e.target))
 		case "file":
-			_, _ = io.WriteString(h, fmt.Sprintf("%04o", e.mode))
-			_, _ = h.Write([]byte{0})
+			writeDigestFrame(h, []byte(fmt.Sprintf("%04o", e.mode)))
 			b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(e.rel)))
 			if err != nil {
 				return "", err
 			}
+			var hdr [binary.MaxVarintLen64]byte
+			n := binary.PutUvarint(hdr[:], uint64(len(b)))
+			_, _ = h.Write(hdr[:n])
 			_, _ = h.Write(b)
 		}
-		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -98,7 +98,7 @@ func TestR07S1DigestMatchesPreviousHashAcrossChunkBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := oldDigestReference(root, "cache")
+	want, err := framedDigestReference(root, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestR07S1DigestMatchesPreviousHashAcrossChunkBoundaries(t *testing.T) {
 	if changed == got {
 		t.Fatal("changing bytes after a chunk boundary did not invalidate the digest")
 	}
-	want, err = oldDigestReference(root, "cache")
+	want, err = framedDigestReference(root, "cache")
 	if err != nil || changed != want {
 		t.Fatalf("changed digest is incompatible with historical implementation: %s vs %s (%v)", changed, want, err)
 	}

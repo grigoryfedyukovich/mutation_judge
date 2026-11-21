@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -481,40 +482,135 @@ func skipSandboxDir(rootAbs, cacheAbs, path, name string) bool {
 	return false
 }
 
-// dirContainsGoFiles reports whether any direct child of dir is a *.go
-// file (non-recursive). Used only to decide whether root-level bin/ is
-// a Go package vs a directory of built binaries.
+// dirContainsGoFiles reports whether any descendant of dir is a regular
+// *.go file. Root bin/ is omitted only when it holds no Go source; a
+// package nested at bin/tool/*.go must still be copied. Direct-child
+// checks dropped that package while go list ./... on the host still saw it.
 func dirContainsGoFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
-			return true
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return fs.SkipAll
 		}
-	}
-	return false
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".go") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
-// symlinkTargetInsideRoot reports whether a symlink at linkPath with
-// the given target string would resolve under rootAbs. The target need
-// not exist (dangling links whose path would still lie inside the
-// module are kept). Absolute targets and relative targets that climb
-// out of the module are rejected so the sandbox never re-creates a
-// host-escape link.
+// symlinkTargetInsideRoot reports whether a symlink at linkPath with the
+// given target string resolves under rootAbs. Components are walked
+// without lexical Clean, and each existing symlink is read before ".."
+// is applied, so a link such as d/../outside is rejected when d itself
+// is a symlink. The final path need not exist. Cycles and unreadable
+// links are rejected: containment cannot be proved.
 func symlinkTargetInsideRoot(rootAbs, linkPath, target string) bool {
-	var abs string
-	if filepath.IsAbs(target) {
-		abs = filepath.Clean(target)
-	} else {
-		abs = filepath.Clean(filepath.Join(filepath.Dir(linkPath), target))
-	}
-	rel, err := filepath.Rel(rootAbs, abs)
+	hops := 0
+	resolved, ok := resolveLink(rootAbs, linkPath, target, &hops)
+	return ok && pathInsideRoot(rootAbs, resolved)
+}
+
+const maxSymlinkHops = 40
+
+func pathInsideRoot(rootAbs, abs string) bool {
+	rel, err := filepath.Rel(filepath.Clean(rootAbs), filepath.Clean(abs))
 	if err != nil {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func resolveLink(rootAbs, linkPath, target string, hops *int) (string, bool) {
+	current := filepath.Dir(linkPath)
+	parts := strings.Split(target, string(filepath.Separator))
+	if filepath.IsAbs(target) {
+		current = filepath.VolumeName(target) + string(filepath.Separator)
+	}
+	return walkLink(rootAbs, current, parts, hops)
+}
+
+func walkLink(rootAbs, current string, parts []string, hops *int) (string, bool) {
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			if !pathInsideRoot(rootAbs, current) {
+				return "", false
+			}
+			current = filepath.Dir(filepath.Clean(current))
+			if !pathInsideRoot(rootAbs, current) {
+				return "", false
+			}
+			continue
+		}
+		next := filepath.Join(current, part)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return "", false
+			}
+			return lexicalRemainder(rootAbs, current, parts[i:])
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			current = next
+			continue
+		}
+		*hops++
+		if *hops > maxSymlinkHops {
+			return "", false
+		}
+		tgt, err := os.Readlink(next)
+		if err != nil {
+			return "", false
+		}
+		base := current
+		tgtParts := strings.Split(tgt, string(filepath.Separator))
+		if filepath.IsAbs(tgt) {
+			base = filepath.VolumeName(tgt) + string(filepath.Separator)
+		}
+		resolved, ok := walkLink(rootAbs, base, tgtParts, hops)
+		if !ok {
+			return "", false
+		}
+		return walkLink(rootAbs, resolved, parts[i+1:], hops)
+	}
+	if !pathInsideRoot(rootAbs, current) {
+		return "", false
+	}
+	return current, true
+}
+
+// lexicalRemainder appends components that do not exist yet. No further
+// symlink can change their meaning, so ".." is ordinary lexical cleanup.
+func lexicalRemainder(rootAbs, current string, parts []string) (string, bool) {
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			if !pathInsideRoot(rootAbs, current) {
+				return "", false
+			}
+			current = filepath.Dir(filepath.Clean(current))
+			if !pathInsideRoot(rootAbs, current) {
+				return "", false
+			}
+			continue
+		}
+		current = filepath.Join(current, part)
+	}
+	if !pathInsideRoot(rootAbs, current) {
+		return "", false
+	}
+	return current, true
 }
 
 // sandboxSymlinkTarget is the target string CopyModule writes into the
@@ -553,6 +649,35 @@ func fingerprintSymlinkTarget(rootAbs, target string) string {
 		return target
 	}
 	return "abs:" + filepath.ToSlash(rel)
+}
+
+// assertSnapshotLinksContained re-checks every symlink in the materialized
+// tree. Admission used the source; this uses the sandbox's own link graph.
+func assertSnapshotLinksContained(root string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(rootAbs, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		if !symlinkTargetInsideRoot(rootAbs, path, target) {
+			rel, relErr := filepath.Rel(rootAbs, path)
+			if relErr != nil {
+				rel = path
+			}
+			return fmt.Errorf("symlink %s escapes the snapshot", filepath.ToSlash(rel))
+		}
+		return nil
+	})
 }
 
 func CopyModule(root, cacheDir string) (string, func(), error) {
@@ -725,6 +850,10 @@ func copyModuleEntries(ctx context.Context, root string, workers int, walk func(
 		cleanup()
 		return "", nil, walkErr
 	}
+	if err := assertSnapshotLinksContained(tmp); err != nil {
+		cleanup()
+		return "", nil, err
+	}
 	return tmp, cleanup, nil
 }
 
@@ -844,6 +973,21 @@ func writeFileAtomicWithRename(path string, data []byte, mode os.FileMode, renam
 // rewrite CopyModule applies -- so a different checkout prefix does
 // not churn the cache, and retargeting still does. Outbound
 // symlinks are omitted by sandboxEntries on both paths.
+// digestVersion is mixed into every sandbox fingerprint. v1 concatenated
+// path, kind, mode, and raw file bytes with NUL separators. File contents
+// may themselves contain those separators, so two different trees could
+// hash identically and reuse a cached verdict. v2 length-frames every
+// field, including the file payload, so the encoding is injective.
+// Historical v1 digests must not be reused.
+const digestVersion = "mutation-judge-digest/v2"
+
+func writeDigestFrame(h io.Writer, b []byte) {
+	var hdr [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(hdr[:], uint64(len(b)))
+	_, _ = h.Write(hdr[:n])
+	_, _ = h.Write(b)
+}
+
 func Digest(root, cacheDir string) (string, error) {
 	type entry struct {
 		rel    string
@@ -885,35 +1029,45 @@ func Digest(root, cacheDir string) (string, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
 	h := sha256.New()
+	writeDigestFrame(h, []byte(digestVersion))
 	buf := make([]byte, 32<<10) // reused for every file, independent of source size
 	for _, e := range entries {
-		_, _ = io.WriteString(h, e.rel)
-		_, _ = h.Write([]byte{0})
-		_, _ = io.WriteString(h, e.kind)
-		_, _ = h.Write([]byte{0})
+		writeDigestFrame(h, []byte(e.rel))
+		writeDigestFrame(h, []byte(e.kind))
 		switch e.kind {
 		case "symlink":
-			_, _ = io.WriteString(h, e.target)
+			writeDigestFrame(h, []byte(e.target))
 		case "file":
-			_, _ = io.WriteString(h, fmt.Sprintf("%04o", e.mode))
-			_, _ = h.Write([]byte{0})
-			// Hash file contents in bounded chunks instead of allocating the
-			// entire file. The bytes fed to h are identical to os.ReadFile,
-			// preserving existing cache identities for unchanged trees.
+			writeDigestFrame(h, []byte(fmt.Sprintf("%04o", e.mode)))
 			f, err := os.Open(filepath.Join(root, filepath.FromSlash(e.rel)))
 			if err != nil {
 				return "", err
 			}
-			_, copyErr := io.CopyBuffer(h, f, buf)
+			info, err := f.Stat()
+			if err != nil {
+				_ = f.Close()
+				return "", fmt.Errorf("stat %s: %w", e.rel, err)
+			}
+			size := info.Size()
+			if size < 0 {
+				_ = f.Close()
+				return "", fmt.Errorf("hash %s: negative size", e.rel)
+			}
+			var hdr [binary.MaxVarintLen64]byte
+			n := binary.PutUvarint(hdr[:], uint64(size))
+			_, _ = h.Write(hdr[:n])
+			written, copyErr := io.CopyBuffer(h, io.LimitReader(f, size), buf)
 			closeErr := f.Close()
 			if copyErr != nil {
 				return "", fmt.Errorf("hash %s: %w", e.rel, copyErr)
+			}
+			if written != size {
+				return "", fmt.Errorf("hash %s: size changed during digest (%d != %d)", e.rel, written, size)
 			}
 			if closeErr != nil {
 				return "", fmt.Errorf("close hashed file %s: %w", e.rel, closeErr)
 			}
 		}
-		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

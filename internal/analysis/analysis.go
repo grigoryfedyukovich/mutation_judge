@@ -691,9 +691,9 @@ func untrackedGoFlagInputs(flags string) bool {
 }
 
 // cacheExecutionSchema changes whenever the serialized execution identity changes.
-// /v5 adds resolved persistent Go environment configuration to cache identity.
-// Older entries omitted GOENV/CGO_* settings and are not safe to reuse.
-const cacheExecutionSchema = "mutation-judge-execution/v5"
+// /v6 rejects digests from the ambiguous NUL-framed sandbox fingerprint (v5 and
+// earlier). Two different input trees could share that digest and a cached verdict.
+const cacheExecutionSchema = "mutation-judge-execution/v6"
 
 // mutantCacheKey binds a verdict to the *resolved execution*, not just the
 // textual patterns. Go interprets ./... relative to WorkRel: the same source
