@@ -1,13 +1,12 @@
 # ADR 0001: keep the strict flat config parser; do not adopt full TOML/YAML libraries
 
-**Status:** Decided (2026-08-18). Closes the open question tracked in
-`ISSUES.md` and referenced from `docs/limitations.md` and
-`docs/spec-conformance.md`.
+**Status:** Decided (2026-08-18). See the current
+[configuration contract](../../SPECIFICATION.md#12-configuration).
 
 ## Context
 
 `internal/config` accepts a deliberately strict, flat subset of TOML/YAML
-(`docs/spec-conformance.md`): one `key = value` (TOML) or `key: value`
+at the time of this decision: one `key = value` (TOML) or `key: value`
 (YAML) pair per line, scalars and single-level `[a, b, c]` lists only,
 double/single-quoted strings with backslash escaping, `#` comments outside
 quotes. Tables, nested maps, YAML anchors/aliases, multiline strings, and
@@ -89,8 +88,6 @@ adopt.
 - `docs/limitations.md`'s "Replace the strict flat configuration subset
   with full TOML/YAML libraries if dependency policy permits" is removed;
   this decision is that policy call, made.
-- `docs/spec-conformance.md`'s "remains a publication/distribution
-  decision" is updated to point here.
 - Future contributors proposing a TOML/YAML dependency should treat this
   as the decision to revisit, not a blank slate — specifically, they
   should identify what nested schema need has actually arisen, since "more

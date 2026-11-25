@@ -1,47 +1,4 @@
 # Specification conformance
 
-This document maps the repository to [the functional specification](../SPECIFICATION.md). It is intentionally explicit about implementation choices and remaining work.
-
-## Implemented vertical slice
-
-| Specification area | Status | Evidence |
-|---|---|---|
-| Curated Go AST mutations | Implemented | Boundary, boolean deletion/negation/literal, opt-in arithmetic, and twelve further opt-in operators (`errorreturn`, `switch`, `loop`, `channel`, `assignment`, `relational`, `literal`, `statement`, `condition`, `returnvalue`, `connective`, `bounds`) in `internal/frontend`. |
-| One mutant at a time | Implemented | Atomic apply/run/restore per sandbox; `--workers N` uses one independent sandbox per concurrent mutant. |
-| Test classification | Implemented | `KILLED`, `SURVIVED`, `INVALID`, `TIMEOUT`, `UNKNOWN`, `UNSUPPORTED`, and `EQUIVALENT` model values. |
-| Responsible tests and assertions | Implemented with documented limits | Failed test names from `go test -json` events; assertion log text from the same stream's indented `file.go:N:` Output lines as `responsible_assertions`. |
-| Exact survivor diff and suggestion | Implemented | Every surviving result carries a unified diff and operator-specific scenario. |
-| Git diff mode | Implemented | Zero-context changed-line mapping with deleted-file and zero-count handling. |
-| Coverage explanation | Implemented | Baseline statement coverage annotates each mutation span. |
-| Text, JSON, HTML, SARIF, GitHub annotations | Implemented | JSON schema `mutation-judge.report/v1`; embedded maintainable HTML template; SARIF 2.1.0 (`internal/report/sarif.go`) and GitHub workflow-command annotations (`internal/report/github.go`) for `SURVIVED`/`TIMEOUT`/`UNKNOWN` verdicts. |
-| Strict project configuration | Implemented as a documented subset | Flat scalar/list TOML or YAML syntax, strict unknown-key rejection, CLI overrides, `--print-config`. |
-| Content-addressed cache | Implemented | Tool version, operator-semantics version, source digest, effective config, backend identity/version, and mutant identity. |
-| Deterministic bounds | Implemented | Reports distinguish candidates discovered before and retained after `max_mutants`. |
-| Backend abstraction | Implemented | Narrow `runner.Backend`, optional backend name/version descriptor, deterministic fakes in tests. |
-| Local/privacy boundary | Implemented | No shell interpolation or source upload; normal execution requires no network. |
-| CI policy exit | Implemented | Successful analysis returns zero unless an explicit score policy fails. |
-| Three running examples | Exceeded | Twenty-two example directories plus `examples/run-all.sh`. |
-| Real-world evaluation | Implemented, bounded | Self-hosting slice in `docs/evaluation.md`. |
-| Cross-run comparison and score trend | Implemented | `compare` (`internal/compare`) diffs two reports by mutant ID into six buckets -- new survivors, fixed survivors (present and now KILLED), still-open (still actionable, different inconclusive verdict), reclassified (actionable in baseline but now INVALID/EQUIVALENT/UNSUPPORTED), removed mutants (absent from current), and an unchanged count -- with `--format json` giving those fields as clean, always-present values for CI, plus a conservative `likely_shifted` correlation (`internal/compare.findLikelyShifts`) when an unrelated earlier edit shifts a mutant's byte-offset-based ID. `--format html` (`internal/compare.RenderHTML`) renders the same six buckets and shift correlations as a self-contained, browsable page. `record`/`trend` (`internal/history`) keep an NDJSON score-history log. See `docs/limitations.md` limitation 12 for exactly what `likely_shifted` does and does not claim. |
-| Conservative equivalent-mutant suppression | Implemented, narrow by design | The frontend recognizes two exact, locally provable patterns -- a boundary comparison dominated by an `if X != Y { return X < Y }`-shaped guard on the same two operands (`internal/frontend.detectGuardedComparison`), and a boolean-literal `:=` initializer whose very next statement overwrites the variable without reading it (`internal/frontend.detectDeadStoreLiteral`), and only when both names are the predeclared boolean constants rather than shadowed bindings — plus, for the `returnvalue` operator, a result discarded at every call site of an unexported function (`internal/frontend/discarded.go`), and marks each `EQUIVALENT`, skipping execution, rather than generating an ordinary mutant. Confirmed against this project's own previously-documented case (`docs/evaluation.md`, "Guarded sort comparisons"): the real `sort.Slice` comparator in `internal/frontend.Discover` is now correctly suppressed. See `docs/limitations.md` limitation 7 for exactly what this does and does not claim. |
-
-## Clarifications
-
-### Timeout wording
-
-Section 13 of the functional specification was aligned with the rest of the document and the implementation: backend timeouts produce the first-class `TIMEOUT` verdict. Timeouts are never counted as kills or survivors and are excluded from the score.
-
-### Runtime panics
-
-A valid mutant that causes a selected test to panic is `KILLED`: the test suite distinguished the mutant. `INVALID` is reserved for source mutations that do not compile or type-check. Operational failures that cannot be classified are `UNKNOWN`.
-
-### Configuration syntax
-
-The dependency-free v0.1 series accepts a strict, flat subset of TOML and YAML, plus YAML's native block-list style for list-valued keys. Unsupported tables, nested maps, anchors, and multiline strings fail with a diagnostic instead of being silently approximated. This is a permanent design decision, not an open publication question — see `docs/decisions/0001-config-parser-scope.md`.
-
-## Not yet implemented
-
-- Distributed CI execution (shard mutants across jobs and merge reports; distinct from in-process `--workers`).
-- Contract attribution, or naming the assertion in the test source (testing.T log lines from failed tests are already captured; test-file AST is not).
-- General equivalent-mutant proofs (only the three narrow cases above are implemented; most equivalence remains undecided by design -- see `docs/limitations.md` limitation 7).
-- Full TOML and YAML language support (permanent non-goal for the flat subset parser).
+See [Implementation status](../SPECIFICATION.md#implementation-status) in the
+functional specification.

@@ -38,6 +38,20 @@ func TestR03FrozenDiffInNestedGoModule(t *testing.T) {
 	gitFixtureCmd(t, repo, "-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "first")
 	write("a.go", "package inner\nfunc F(x int)bool{return x>=0}\n")
 	write("new.go", "package inner\nfunc G(x int)bool{return x>1}\n")
+	t.Run("symlinked worktree path", func(t *testing.T) {
+		alias := filepath.Join(t.TempDir(), "repo")
+		if err := os.Symlink(repo, alias); err != nil {
+			t.Skipf("directory symlinks unavailable: %v", err)
+		}
+		base, err := CaptureSnapshotBase(context.Background(), filepath.Join(alias, "inner"), "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer base.Close()
+		if base.prefix != "inner" {
+			t.Fatalf("worktree prefix = %q, want inner", base.prefix)
+		}
+	})
 	base, err := CaptureSnapshotBase(context.Background(), module, "HEAD")
 	if err != nil {
 		t.Fatal(err)

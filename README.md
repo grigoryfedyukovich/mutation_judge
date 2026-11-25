@@ -7,7 +7,6 @@ It is intentionally not a high-volume mutation fuzzer. The goal is a readable re
 ## Two-minute demo
 
 ```bash
-go test ./...
 mkdir -p ./bin
 go build -o ./bin/mutation-judge ./cmd/mutation-judge
 
@@ -56,7 +55,6 @@ The [full tutorial](docs/tutorial.md) follows this survivor through test repair,
 From a local checkout:
 
 ```bash
-go test ./...
 mkdir -p ./bin
 go build -o ./bin/mutation-judge ./cmd/mutation-judge
 ./bin/mutation-judge --version
@@ -117,22 +115,6 @@ mutation-judge trend
 ```
 
 `compare` compares **compatible, complete mutation experiments**. It refuses incomplete, bounded, incremental, or mismatched scopes, test settings, tool semantics, and actual per-mutant commands (exit code 2). `--allow-incompatible` produces an explicitly **exploratory** text/JSON/HTML diff: `not_analyzed` lists IDs missing from a report without evidence of removal/introduction, and `unverified_changes` lists transitions that cannot prove a test repair or regression. A CI gate (`--fail-on-new-survivors`) is not available in exploratory mode. For comparable reports, the original six verdict buckets and conservative `likely_shifted` correlation remain. `record`/`trend` keep an NDJSON score history at `.mutation-judge/history.ndjson` including completeness, bounds, operator semantics, selected test scope, and all verdict counts. See `docs/tutorial.md` §16 and `docs/limitations.md` for ID and compatibility limitations.
-
-### Persistent Go environment and cached results
-
-Mutation Judge fingerprints the effective `go env -json` settings and hashes the
-contents of Go's persistent `GOENV` configuration file. This prevents reusing
-cached mutant verdicts after a `go env -w` change such as `CGO_CFLAGS` even
-when the process environment and source tree are unchanged. The fingerprint
-appears as `bounds.effective_go_config_hash`; configuration contents are not
-included in reports. If the configuration cannot be read, caching is disabled.
-
-This identifies configuration changes **between** analysis runs. A configuration
-file or external compiler changing **during** a run is not a transactional
-snapshot; for reproducible results, keep external build tools and persistent
-configuration fixed during analysis. As before, externally referenced flags
-(`-modfile`, `-overlay`, `-toolexec`) and local module replacements disable
-caching conservatively.
 
 ## Supported mutations
 
@@ -231,7 +213,10 @@ progress = true
 5. For each mutant, create a fresh sandbox from the snapshot, verify the original source span, apply one atomic replacement, run the selected tests (or a narrower scope if configured), classify the result, and discard the sandbox. The baseline and profiling runs are also isolated.
 6. Render diagnostics and cache compatible backend results.
 
-Cache keys include the tool version, independently versioned operator semantics, all Go/test source content, module files, effective configuration, backend name/version, and mutant identity. They also bind the **module-relative execution directory**, actual per-mutant test patterns, `-run` selector, and resolved test package universe (so a relative `./...` in two different directories cannot reuse a stale verdict). Cache entries also account for sandbox entry types, executable/file permissions, and a SHA-256 digest of the frozen effective test environment (environment values are not written to reports). Any main-module local `replace` dependency or `GOFLAGS` with `-modfile`, `-overlay`, or `-toolexec` disables caching with a report warning, because inputs outside the snapshot cannot be fingerprinted reliably. Cache entries use a versioned schema, and older unsafe execution keys are not reused. Reports record the execution working directory and effective command with each executed or cached mutant.
+Cache entries are keyed by the sandbox inputs, Go toolchain and effective
+test command. Local module replacements and externally referenced Go flag
+files disable caching. See the [cache key](docs/architecture.md#cache-key)
+for the full contract and [performance](docs/performance.md) for sandbox copy tuning.
 
 ### Race-enabled Go tests and coverage
 
@@ -275,50 +260,25 @@ otherwise valid v1 report are tolerated.
 
 ## Development
 
+Run formatting, compilation, vet, the full module test suite, and the
+packaged CLI examples with one command.
+
 ```bash
-gofmt -w .
-go vet ./...
-go test ./...
-go build ./cmd/mutation-judge
+./scripts/verify-new-work.sh
 ```
 
-The integration test runs the boundary example through the actual CLI. Unit tests cover mutation discovery, strict configuration, Git diff parsing, result rendering, generated-source selection, mechanically distinguishing boolean suggestions, and the backend boundary through a fake runner. The packaged examples can be exercised with `./examples/run-all.sh`.
-
-## Honest limitations
-
-The v0.1 implementation mutates ordinary production Go files returned by `go list`; it does not mutate tests, generated files by default, assembly, templates, or code generated during tests. It runs package patterns as one selected test command and infers responsible tests and assertion log text from standard `go test` failure output. Coverage is baseline statement coverage, not mutant-specific dynamic slicing. See [docs/limitations.md](docs/limitations.md).
+See [integration-suite reliability](docs/testing-reliability.md) for test
+harness timeouts and commands for reproducing individual integration failures.
 
 ## Documentation
 
 - [Semantic model and trust boundary](docs/semantics.md)
 - [Architecture](docs/architecture.md)
-- [Limitations and next work](docs/limitations.md)
+- [Performance and resource limits](docs/performance.md)
+- [Limitations](docs/limitations.md)
 - [Step-by-step tutorial](docs/tutorial.md)
 - [Runnable example matrix](examples/README.md)
 - [Bounded self-hosting evaluation](docs/evaluation.md)
 - [Functional specification](SPECIFICATION.md)
-- [Specification conformance](docs/spec-conformance.md)
 - [2026-07-18 review resolution](docs/reviews/review-resolution-v0.1.2.md)
 - [Correctness and expansion issue list](ISSUES.md)
-
-**Subprocess timeouts:** On Linux/macOS/BSD, canceled or timed-out `go test`
-process groups and their ordinary descendants are terminated. On Windows,
-subprocesses are suspended until assigned to a kill-on-close Job Object,
-which is terminated on cancellation or closed after execution. Inherited
-output pipes have a 250ms cleanup grace. Preparation commands honor analysis
-cancellation. Preparation additionally has a 2-minute deadline (configurable
-with `--preparation-timeout`). Every preparation subprocess has a 32 MiB
-stdout/combined-output capture budget; stderr captured separately is limited
-to 64 KiB. Overflow is an explicit error, never silently parsed as truncated
-Go JSON, a Git diff, or a test list. Snapshot copy/verification observe
-cancellation and use fixed-size file buffers. An optional `--total-timeout`
-bounds the analysis phase, not final report serialization. Deliberately
-detached processes remain outside the Unix descendant guarantee. These limits
-do not provide a total-RSS bound (results still grow with the mutant count).
-
-
-**Sandbox copy tuning:** Mutation Judge attempts copy-on-write reflinks on
-supported Linux filesystems and otherwise creates independent byte copies.
-`MUTATION_JUDGE_COPY_WORKERS=2` (up to `8`) optionally enables parallel
-file copying; the default is `1` because additional workers can slow down
-some filesystems. See `docs/performance.md` for benchmarks and limitations.

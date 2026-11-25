@@ -905,7 +905,8 @@ See [examples/README.md](../examples/README.md) for the example matrix and focus
 
 Sections 3 to 6 used operators that change a value or a comparison. A second family answers a different question: *does any test notice that this line did something?* These are all opt-in (add them with `--operators`), and each skips the shapes that would just hang the run or fail to compile; `docs/semantics.md` lists the exclusions for each.
 
-> **Status note.** The expected results below were derived by hand from the code and the example sources. Run `./scripts/verify-new-work.sh` to confirm them on your machine before relying on them. Lines are shown abbreviated (`...` stands for the mutant ID and path), and your suggested-test wording may differ slightly.
+The excerpts abbreviate mutant IDs and paths with `...`. Run the
+[packaged examples](#20-run-all-packaged-examples) to see complete reports.
 
 ### Covered is not asserted: statement deletion
 

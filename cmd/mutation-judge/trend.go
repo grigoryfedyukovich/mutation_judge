@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/example/mutation-judge/internal/history"
@@ -32,36 +33,22 @@ func runTrend(args []string) int {
 		return exitInput
 	}
 
-	dst := os.Stdout
-	var f *os.File
-	if *output != "" {
-		if err := os.MkdirAll(parentDir(*output), 0o755); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return exitInput
+	openErr, writeErr := writeOutput(*output, func(dst io.Writer) error {
+		switch *format {
+		case "text":
+			return history.RenderTrend(dst, entries)
+		case "json":
+			return history.RenderTrendJSON(dst, entries)
+		default:
+			return fmt.Errorf("unsupported format %q", *format)
 		}
-		f, err = os.Create(*output)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return exitInput
-		}
-		dst = f
+	})
+	if openErr != nil {
+		fmt.Fprintln(os.Stderr, openErr)
+		return exitInput
 	}
-	var renderErr error
-	switch *format {
-	case "text":
-		renderErr = history.RenderTrend(dst, entries)
-	case "json":
-		renderErr = history.RenderTrendJSON(dst, entries)
-	default:
-		renderErr = fmt.Errorf("unsupported format %q", *format)
-	}
-	if f != nil {
-		if closeErr := f.Close(); renderErr == nil {
-			renderErr = closeErr
-		}
-	}
-	if renderErr != nil {
-		fmt.Fprintln(os.Stderr, "trend:", renderErr)
+	if writeErr != nil {
+		fmt.Fprintln(os.Stderr, "trend:", writeErr)
 		return exitInternal
 	}
 	return exitOK

@@ -10,13 +10,17 @@ only; CLI command timeouts are tested separately.
 To check the entire repository without Go package build contention:
 
 ```sh
-go test -p 1 ./... -count=1 -timeout=240s
+go test -p 1 -count=1 ./...
 ```
+
+The [local qualification script](../README.md#development) also resolves
+`TMPDIR` to a physical path so workspace fixtures and subprocesses use the
+same absolute path spelling on macOS.
 
 For diagnostic detail while inspecting integration behavior:
 
 ```sh
-go test ./tests/integration -count=1 -v -timeout=180s
+go test ./tests/integration -count=1 -v
 ```
 
 Coverage/package-selection tests no longer assert on elapsed wall-clock time.

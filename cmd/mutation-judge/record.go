@@ -16,8 +16,8 @@ func runRecord(args []string) int {
 	label := fs.String("label", "", "label for this entry (a PR number, branch, or commit SHA); required")
 	historyPath := fs.String("history-file", history.DefaultPath, "NDJSON history log to append to")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: mutation-judge record <report.json> --label <label> [flags]")
-		fmt.Fprintln(fs.Output(), "Appends one entry to the score-history log for later use by `mutation-judge\ntrend`. Run once per CI job, right after the normal analysis command,\npointing at the --format json report it just wrote:\n\n  mutation-judge --format json --output report.json ./...\n  mutation-judge record report.json --label \"PR #104\"")
+		fmt.Fprintln(fs.Output(), "Usage: mutation-judge record --label <label> [flags] <report.json>")
+		fmt.Fprintln(fs.Output(), "Appends one entry to the score-history log for later use by `mutation-judge\ntrend`. Run once per CI job, right after the normal analysis command,\npointing at the --format json report it just wrote:\n\n  mutation-judge --format json --output report.json ./...\n  mutation-judge record --label \"PR #104\" report.json")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

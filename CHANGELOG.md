@@ -1,3 +1,9 @@
+## Unreleased — repository maintenance
+
+- Consolidate the specification and documentation for cache identity, runtime limits, and local qualification.
+- Share CLI output handling across analysis, comparison, and history. Reuse packaged fixtures in the comparison demo.
+- Resolve physical workspace paths for Go and Git discovery when a directory is reached through an alias such as macOS's `/tmp`.
+
 ## Unreleased — audit D01–D04
 
 - Boolean literals require predeclared true/false (`v16`).

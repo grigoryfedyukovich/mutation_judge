@@ -41,18 +41,8 @@ run "sarif output" --operators boundary --format sarif ./examples/boundary
 run "github annotations (survivor)" --operators boundary --format github ./examples/boundary
 run "github annotations (clean)" --operators boundary --format github ./examples/boundary_fixed
 
-# compare/record/trend are subcommands, not flags on the default
-# command, so they bypass the run() helper above entirely (and don't
-# take --no-cache -- there's no analysis to cache, just JSON files
-# being read, diffed, and appended). This demo copies examples/boundary
-# into a scratch module, analyzes it once with its checked-in weak
-# test (a genuine SURVIVED), then patches just the test file in place
-# and analyzes again -- the production file, and so the mutant's ID,
-# never changes, so the comparison below shows a real KILLED fix
-# rather than a misleading REMOVED/new pair, which is what comparing
-# two already-different packages like boundary and boundary_fixed
-# would show instead (their mutants never share an ID at all, since
-# the file path itself is hashed into it).
+# Reuse the packaged tests in one scratch module so the production path
+# and mutant ID stay stable when the test is repaired.
 printf '\n\n=== compare and trend ===\n'
 demo="$tmp/compare-demo"
 mkdir -p "$demo"
@@ -61,83 +51,36 @@ module comparedemo
 
 go 1.22
 EOF
-cp "$root/examples/boundary/counter.go" "$demo/counter.go"
-sed -i.bak 's/^package boundary$/package comparedemo/' "$demo/counter.go" && rm "$demo/counter.go.bak"
-cat > "$demo/counter_test.go" <<'EOF'
-package comparedemo
+cp "$root/examples/boundary/"{counter.go,counter_test.go} "$demo/"
 
-import "testing"
-
-// Deliberately omits n == 0 so the > to >= mutant survives.
-func TestCountPositive(t *testing.T) {
-	calls := 0
-	CountPositive(2, func(int) { calls++ })
-	CountPositive(-1, func(int) { calls++ })
-	if calls != 1 {
-		t.Fatalf("calls = %d, want 1", calls)
-	}
+analyze_demo() {
+  (
+    cd "$demo"
+    "$tmp/mutation-judge" --no-cache --operators boundary --format json --output "$tmp/$1.json" .
+  )
 }
-EOF
-(cd "$demo" && "$tmp/mutation-judge" --no-cache --operators boundary --format json --output baseline.json .)
-"$tmp/mutation-judge" record --label "PR #101" --history-file "$demo/history.ndjson" "$demo/baseline.json"
 
-cat > "$demo/counter_test.go" <<'EOF'
-package comparedemo
+analyze_demo baseline
+"$tmp/mutation-judge" record --label "PR #101" --history-file "$tmp/history.ndjson" "$tmp/baseline.json"
 
-import "testing"
+sed 's/^package boundaryfixed$/package boundary/' \
+  "$root/examples/boundary_fixed/counter_test.go" > "$demo/counter_test.go"
+analyze_demo current
+"$tmp/mutation-judge" record --label "PR #102" --history-file "$tmp/history.ndjson" "$tmp/current.json"
 
-func TestCountPositive(t *testing.T) {
-	calls := 0
-	CountPositive(2, func(int) { calls++ })
-	CountPositive(-1, func(int) { calls++ })
-	CountPositive(0, func(int) { calls++ })
-	if calls != 1 {
-		t.Fatalf("calls = %d, want 1", calls)
-	}
-}
-EOF
-(cd "$demo" && "$tmp/mutation-judge" --no-cache --operators boundary --format json --output current.json .)
-"$tmp/mutation-judge" record --label "PR #102" --history-file "$demo/history.ndjson" "$demo/current.json"
-
-"$tmp/mutation-judge" compare --baseline "$demo/baseline.json" --current "$demo/current.json"
+"$tmp/mutation-judge" compare --baseline "$tmp/baseline.json" --current "$tmp/current.json"
 printf '\n'
-"$tmp/mutation-judge" trend --history-file "$demo/history.ndjson"
+"$tmp/mutation-judge" trend --history-file "$tmp/history.ndjson"
 
-# A third phase, in a separate scratch copy: this time the production
-# code itself is deleted rather than its test improved, so the same
-# survivor's mutant ID has nowhere to exist in the new report at all.
-# That must show up as a removed mutant, not a fixed one -- deleting
-# code proves nothing about test quality, unlike actually killing the
-# mutant above.
-printf '\n\n=== compare: a removed mutant, not a fix ===\n'
-removed="$tmp/removed-demo"
-mkdir -p "$removed"
-cp "$demo/go.mod" "$demo/counter.go" "$removed/"
-sed -i.bak 's/^module comparedemo$/module removeddemo/' "$removed/go.mod" && rm "$removed/go.mod.bak"
-sed -i.bak 's/^package comparedemo$/package removeddemo/' "$removed/counter.go" && rm "$removed/counter.go.bak"
-cat > "$removed/counter_test.go" <<'EOF'
-package removeddemo
-
-import "testing"
-
-// Deliberately omits n == 0 so the > to >= mutant survives.
-func TestCountPositive(t *testing.T) {
-	calls := 0
-	CountPositive(2, func(int) { calls++ })
-	CountPositive(-1, func(int) { calls++ })
-	if calls != 1 {
-		t.Fatalf("calls = %d, want 1", calls)
-	}
-}
-EOF
-(cd "$removed" && "$tmp/mutation-judge" --no-cache --operators boundary --format json --output baseline.json .)
-rm "$removed/counter_test.go"
-cat > "$removed/counter.go" <<'EOF'
-package removeddemo
+# Compare the same baseline with a revision where the site is gone.
+printf '\n\n=== compare: removed mutant ===\n'
+rm "$demo/counter_test.go"
+cat > "$demo/counter.go" <<'EOF'
+package boundary
 
 func AlwaysTrue() bool { return true }
 EOF
-(cd "$removed" && "$tmp/mutation-judge" --no-cache --operators boundary --format json --output current.json .)
-"$tmp/mutation-judge" compare --baseline "$removed/baseline.json" --current "$removed/current.json"
+analyze_demo removed
+"$tmp/mutation-judge" compare --baseline "$tmp/baseline.json" --current "$tmp/removed.json"
 
 printf '\n\nAll non-Git examples completed successfully.\n'

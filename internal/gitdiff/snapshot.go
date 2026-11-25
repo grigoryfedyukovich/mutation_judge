@@ -40,11 +40,15 @@ func CaptureSnapshotBase(ctx context.Context, moduleRoot, base string) (*Snapsho
 	if err != nil {
 		return nil, err
 	}
-	top, err = filepath.Abs(top)
+	top, err = filepath.EvalSymlinks(top)
 	if err != nil {
 		return nil, err
 	}
 	moduleRoot, err = filepath.Abs(moduleRoot)
+	if err != nil {
+		return nil, err
+	}
+	moduleRoot, err = filepath.EvalSymlinks(moduleRoot)
 	if err != nil {
 		return nil, err
 	}

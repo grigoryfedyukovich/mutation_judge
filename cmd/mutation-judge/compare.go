@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/example/mutation-judge/internal/compare"
@@ -61,38 +62,24 @@ func runCompare(args []string) int {
 	}
 	d := compare.CompareReports(baseline, current)
 
-	dst := os.Stdout
-	var f *os.File
-	if *output != "" {
-		if err := os.MkdirAll(parentDir(*output), 0o755); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return exitInput
+	openErr, writeErr := writeOutput(*output, func(dst io.Writer) error {
+		switch *format {
+		case "text":
+			return compare.RenderText(dst, d)
+		case "json":
+			return compare.RenderJSON(dst, d)
+		case "html":
+			return compare.RenderHTML(dst, d)
+		default:
+			return fmt.Errorf("unsupported format %q", *format)
 		}
-		f, err = os.Create(*output)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return exitInput
-		}
-		dst = f
+	})
+	if openErr != nil {
+		fmt.Fprintln(os.Stderr, openErr)
+		return exitInput
 	}
-	var renderErr error
-	switch *format {
-	case "text":
-		renderErr = compare.RenderText(dst, d)
-	case "json":
-		renderErr = compare.RenderJSON(dst, d)
-	case "html":
-		renderErr = compare.RenderHTML(dst, d)
-	default:
-		renderErr = fmt.Errorf("unsupported format %q", *format)
-	}
-	if f != nil {
-		if closeErr := f.Close(); renderErr == nil {
-			renderErr = closeErr
-		}
-	}
-	if renderErr != nil {
-		fmt.Fprintln(os.Stderr, "compare:", renderErr)
+	if writeErr != nil {
+		fmt.Fprintln(os.Stderr, "compare:", writeErr)
 		return exitInternal
 	}
 	if *failOnNew && len(d.NewSurvivors) > 0 {

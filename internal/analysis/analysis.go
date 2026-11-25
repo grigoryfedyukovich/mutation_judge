@@ -338,6 +338,13 @@ func (e Engine) prepareContextMode(ctx context.Context, req Request, toolchain r
 			cleanup()
 		}
 	}()
+	// Go may report physical package paths when the temporary directory
+	// is a symlink (for example, /tmp on macOS). Use the same root for
+	// source selection and package ownership.
+	snapshot, err = filepath.EvalSymlinks(snapshot)
+	if err != nil {
+		return preparedAnalysis{}, fmt.Errorf("resolve preparation snapshot: %w", err)
+	}
 	if err = workspace.VerifyModuleCopyContext(ctx, root, snapshot, req.Config.CacheDir); err != nil {
 		return preparedAnalysis{}, err
 	}

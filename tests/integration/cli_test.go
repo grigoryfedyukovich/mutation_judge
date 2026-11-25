@@ -29,6 +29,29 @@ func TestBoundaryExampleEndToEnd(t *testing.T) {
 	}
 }
 
+func TestAnalysisWithSymlinkedTemporaryDirectory(t *testing.T) {
+	root := projectRoot()
+	binary := buildBinary(t, root)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	t.Setenv("TMPDIR", link)
+	t.Setenv("TMP", link)
+	t.Setenv("TEMP", link)
+	cmd := integrationCommand(t, binary, "--no-cache", "--operators", "boundary", "./examples/boundary")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "SURVIVED M-") {
+		t.Fatalf("analysis through symlinked temporary directory: %v\n%s", err, out)
+	}
+}
+
 func TestJSONOutputAndNestedParentDirectory(t *testing.T) {
 	root := projectRoot()
 	binary := buildBinary(t, root)
