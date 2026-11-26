@@ -60,7 +60,8 @@ type jsonEventStream struct {
 	evidence          []testEvent
 	evidenceBytes     int
 	evidenceTruncated bool
-	timeoutHeader     bool
+	timeoutHeaders    map[string]bool
+	timeoutConfirmed  bool
 	started           map[string]bool
 	failed            map[string]bool
 	pkgRan            map[string]bool
@@ -69,8 +70,9 @@ type jsonEventStream struct {
 
 func newJSONEventStream() *jsonEventStream {
 	return &jsonEventStream{
-		display: boundedText{limit: maxOutputBytes},
-		started: make(map[string]bool), failed: make(map[string]bool),
+		display:        boundedText{limit: maxOutputBytes},
+		timeoutHeaders: make(map[string]bool),
+		started:        make(map[string]bool), failed: make(map[string]bool),
 		pkgRan: make(map[string]bool), pkgBuildFailed: make(map[string]bool),
 	}
 }
@@ -127,8 +129,12 @@ func (s *jsonEventStream) consumeLine(line []byte) {
 func (s *jsonEventStream) observe(e testEvent) {
 	if e.Action == "output" {
 		_, _ = s.display.Write([]byte(e.Output))
-		if timeoutPanicRE.MatchString(e.Output) {
-			s.timeoutHeader = true
+		if !s.timeoutConfirmed {
+			seen, confirmed := observeTimeoutTrace(e.Output, s.timeoutHeaders[e.Package])
+			s.timeoutConfirmed = confirmed
+			if seen && !confirmed && !s.track(s.timeoutHeaders, e.Package) {
+				s.incomplete = true
+			}
 		}
 		if e.Test == "" && packageFailSummaryRE.MatchString(e.Output) {
 			if _, exists := s.pkgBuildFailed[e.Package]; exists || len(s.pkgBuildFailed) < maxTrackedTests {
@@ -137,6 +143,9 @@ func (s *jsonEventStream) observe(e testEvent) {
 				s.incomplete = true
 			}
 		}
+	}
+	if e.Test == "" && (e.Action == "fail" || e.Action == "pass" || e.Action == "skip") {
+		delete(s.timeoutHeaders, e.Package)
 	}
 	if e.Test != "" {
 		key := e.Package + "\x00" + e.Test

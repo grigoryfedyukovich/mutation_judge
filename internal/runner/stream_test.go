@@ -60,6 +60,19 @@ func TestStreamingVerdictAfterManyOutputEvents(t *testing.T) {
 	}
 }
 
+func TestStreamingTimeoutTraceIsPackageScoped(t *testing.T) {
+	s := newJSONEventStream()
+	writeStreamEvent(t, s, testEvent{Action: "output", Package: "example/p", Test: "TestSlow", Output: "panic: test timed out after 1s\n"})
+	writeStreamEvent(t, s, testEvent{Action: "output", Package: "example/other", Test: "TestOther", Output: "testing.(*M).startAlarm.func1()\n"})
+	if s.timeoutConfirmed {
+		t.Fatal("combined timeout evidence from unrelated packages")
+	}
+	writeStreamEvent(t, s, testEvent{Action: "output", Package: "example/p", Test: "TestSlow", Output: "testing.(*M).startAlarm.func1()\n"})
+	if !s.timeoutConfirmed {
+		t.Fatal("missed timeout evidence across test-scoped output events")
+	}
+}
+
 func TestStreamingOversizedJSONFailsClosedUnlessKillObserved(t *testing.T) {
 	for _, explicitKill := range []bool{false, true} {
 		s := newJSONEventStream()

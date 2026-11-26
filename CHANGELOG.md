@@ -1,5 +1,6 @@
 ## Unreleased — repository maintenance
 
+- Preserve test attribution when a failing test prints a timeout-looking line. Internal Go timeouts require a matching testing alarm stack frame.
 - Consolidate the specification and documentation for cache identity, runtime limits, and local qualification.
 - Share CLI output handling across analysis, comparison, and history. Reuse packaged fixtures in the comparison demo.
 - Resolve physical workspace paths for Go and Git discovery when a directory is reached through an alias such as macOS's `/tmp`.

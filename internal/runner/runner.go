@@ -363,46 +363,35 @@ type testEvent struct {
 	Elapsed float64 `json:"Elapsed"`
 }
 
-// timeoutPanicRE matches go test's own top-level panic header line for
-// a `-timeout` firing from inside the test binary itself (e.g. "panic:
-// test timed out after 30s"), anchored to the start of a line so it
-// can only match that specific header -- never the same phrase
-// appearing anywhere else in a test's own output, which is a real and
-// not even unusual case (a test that specifically exercises
-// timeout-handling behavior and legitimately logs or asserts on
-// similar-looking text).
-var timeoutPanicRE = regexp.MustCompile(`(?m)^panic: test timed out after `)
+var (
+	timeoutPanicRE = regexp.MustCompile(`(?m)^panic: test timed out after `)
+	timeoutAlarmRE = regexp.MustCompile(`(?m)^testing\.\(\*M\)\.startAlarm\.func[0-9]+(?:\.[0-9]+)*\(`)
+)
 
-// isTimeout decides whether a completed `go test` invocation should be
-// classified TIMEOUT.
-//
-// ctxErr == context.DeadlineExceeded (the enclosing context here is
-// this package's own timeout) is definitive on its own, regardless of
-// anything else: if it fired, this is a timeout.
-//
-// The text-based fallback exists for a separate, real case that signal
-// alone can't catch: `go test -timeout` can fire from *inside* the
-// test binary, on its own internal timer, and self-terminate the
-// process (panic, stack dump, os.Exit) before the outer context's
-// deadline ever arrives -- ctx has nothing to observe, since the child
-// process already exited on its own. The only signal left at that
-// point is go test's own panic header line in the captured output.
-//
-// That fallback is gated on the process having actually failed
-// (err != nil) and matched only against that specific header line,
-// never a bare substring search across the whole combined output:
-// matching unconditionally previously misclassified two real, found
-// cases -- a passing (err == nil) suite whose own output happened to
-// contain similar phrasing came back TIMEOUT instead of SURVIVED
-// (fatal if it was the baseline: analysis aborted outright), and a
-// genuinely failing test whose own unrelated failure message happened
-// to contain the same phrase came back TIMEOUT instead of KILLED,
-// silently discarding a real kill from the score. See ISSUES.md.
-func isTimeout(ctxErr, err error, text string) bool {
+// observeTimeoutTrace looks for the testing alarm's stack frame after its
+// panic header. Tests can print the header themselves, and Go may attribute
+// a real alarm's output to the test that was running when it fired.
+func observeTimeoutTrace(text string, headerSeen bool) (seen, confirmed bool) {
+	if !headerSeen {
+		header := timeoutPanicRE.FindStringIndex(text)
+		if header == nil {
+			return false, false
+		}
+		_, remaining, _ := strings.Cut(text[header[1]:], "\n")
+		text = remaining
+	}
+	return true, timeoutAlarmRE.MatchString(text)
+}
+
+func isTimeout(ctxErr, err error, stdoutConfirmed bool, stderr string) bool {
 	if ctxErr == context.DeadlineExceeded {
 		return true
 	}
-	return err != nil && timeoutPanicRE.MatchString(text)
+	if err == nil {
+		return false
+	}
+	_, stderrConfirmed := observeTimeoutTrace(stderr, false)
+	return stdoutConfirmed || stderrConfirmed
 }
 
 func (GoTest) Run(parent context.Context, req Request) Result {
@@ -460,7 +449,7 @@ func (GoTest) Run(parent context.Context, req Request) Result {
 	text := jsonOut.diagnosticOutput(errOut)
 	res := Result{DurationMS: dur, Output: text, OutputTruncated: jsonOut.outputTruncated(errOut), GoVersion: req.GoVersion}
 
-	if ctx.Err() == context.DeadlineExceeded || (err != nil && (jsonOut.timeoutHeader || timeoutPanicRE.Match(errOut.data))) {
+	if isTimeout(ctx.Err(), err, jsonOut.timeoutConfirmed, string(errOut.data)) {
 		res.Verdict = model.VerdictTimeout
 		res.ExitCode = -1
 		return res
